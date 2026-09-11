@@ -1,15 +1,18 @@
-from flask import Blueprint, render_template_string, request, redirect, url_for, session, flash, jsonify
+from flask import Blueprint, render_template, render_template_string, request, redirect, url_for, session, flash, jsonify
 import sqlite3
 import functools
+from html import escape
 from contextlib import closing
 import os
 from datetime import datetime, date, timedelta
 from werkzeug.utils import secure_filename
 from seguranca import csrf_token
+from escalas import (EQUIPES, TIPOS_SABADO, FAIXAS_SABADO, preservar_banco_antes_migracao,
+                     migrar_horarios, validar_data, aplicar_troca, intervalos_cobertura,
+                     validar_participante_sabado, ajustar_escala)
 
-horarios_bp = Blueprint('horarios', __name__)
+horarios_bp = Blueprint('horarios', __name__, template_folder='templates')
 DB_NAME = 'sistema.db'
-PUBLIC_HORARIOS = os.getenv('PUBLIC_HORARIOS', '1') == '1'
 MAX_FOTO_BYTES = int(os.getenv('MAX_FOTO_KB', '2048')) * 1024
 
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'fotos')
@@ -37,7 +40,13 @@ def pode_editar_horarios():
 
 horarios_bp.add_app_template_global(pode_editar_horarios, name='pode_editar_horarios')
 
+@horarios_bp.context_processor
+def opcoes_funcionario():
+    return dict(equipes=EQUIPES, tipos_sabado=TIPOS_SABADO)
+
+
 def init_db():
+    preservar_banco_antes_migracao(DB_NAME)
     with closing(sqlite3.connect(DB_NAME)) as conn, conn:
         cursor = conn.cursor()
         
@@ -149,6 +158,7 @@ def init_db():
                 INSERT INTO jornadas (descricao, tipo, manha_inicio, manha_fim, almoco_inicio, almoco_fim, tarde_inicio, tarde_fim)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, jornadas_p)
+        migrar_horarios(conn)
         conn.commit()
 
 init_db()
@@ -199,14 +209,7 @@ def calcular_cobertura_diaria(data_referencia=None):
             """, (data_referencia,))
             ausencias_lista = cursor.fetchall()
 
-        cursor.execute("""
-            SELECT f.id, f.nome, f.foto_url, j.manha_inicio, j.manha_fim, j.almoco_inicio, j.almoco_fim, j.tarde_inicio, j.tarde_fim
-            FROM funcionarios f
-            JOIN jornadas j ON f.jornada_id = j.id
-            LEFT JOIN cargos c ON f.cargo_id = c.id
-            WHERE f.ativo = 1 AND j.tipo = 'Semana' AND (c.nome LIKE '%Suporte%' OR f.cargo_id IS NULL)
-        """)
-        funcs = cursor.fetchall()
+        funcs = intervalos_cobertura(conn, data_referencia or date.today().isoformat())
 
     horarios_grade = []
     minutos_inicio = hora_para_minutos("07:30")
@@ -219,7 +222,7 @@ def calcular_cobertura_diaria(data_referencia=None):
         
         atendentes = []
         for f in funcs:
-            f_id, nome, foto, m_in, m_out, a_in, a_out, t_in, t_out = f
+            f_id, nome, foto, intervalos = f
             
             # Verifica se o funcionário possui alguma ausência afeta a janela m_start/m_end
             esta_ausente = False
@@ -238,8 +241,8 @@ def calcular_cobertura_diaria(data_referencia=None):
             if esta_ausente:
                 continue
                 
-            if (hora_para_minutos(m_in) <= m_start < hora_para_minutos(m_out)) or (hora_para_minutos(t_in) <= m_start < hora_para_minutos(t_out)):
-                atendentes.append({'nome': nome, 'foto': foto or 'https://via.placeholder.com/32'})
+            if any(hora_para_minutos(inicio) <= m_start and m_end <= hora_para_minutos(fim) for inicio, fim in intervalos):
+                atendentes.append({'nome': nome, 'foto': foto or '/static/avatar-padrao.svg'})
 
         qtd = len(atendentes)
         alerta = "normal"
@@ -494,7 +497,7 @@ HTML_INTERFACE = """
                     <select name="funcionario_id" required style="padding: 6px; border-radius: 4px; border: 1px solid #ccc;">
                         <option value="">Selecione o Funcionário...</option>
                         {% for f in funcionarios %}
-                            {% if f[11] == 1 %}
+                            {% if f[11] == 1 and f[12] == 0 %}
                                 <option value="{{ f[0] }}">{{ f[1] }} ({{ f[4] }})</option>
                             {% endif %}
                         {% endfor %}
@@ -538,7 +541,7 @@ HTML_INTERFACE = """
                         {% for e in escala_sabados %}
                             {% if e[4] == faixa and 'Apoio Fixo' not in (e[5] or '') %}
                                 <div class="card-tec eq-{{ e[6] }}" id="card-escala-{{ e[0] }}" {% if pode_editar_horarios() %}draggable="true"{% endif %} ondragstart="drag(event)" data-id="{{ e[0] }}">
-                                    <img src="{{ e[7] or 'https://via.placeholder.com/40' }}" class="card-avatar">
+                                    <img src="{{ e[7] or '/static/avatar-padrao.svg' }}" class="card-avatar">
                                     <div class="card-info">
                                         <div class="card-nome">{{ e[3] }}</div>
                                         <div class="card-obs">{{ e[5] or 'Rodízio' }}</div>
@@ -566,7 +569,7 @@ HTML_INTERFACE = """
                             {% for e in escala_sabados %}
                                 {% if e[4] == 'Sobreaviso' or 'Sobreaviso' in (e[5] or '') %}
                                     <div class="card-tec eq-{{ e[6] }}" id="card-escala-{{ e[0] }}" {% if pode_editar_horarios() %}draggable="true"{% endif %} ondragstart="drag(event)" data-id="{{ e[0] }}">
-                                        <img src="{{ e[7] or 'https://via.placeholder.com/40' }}" class="card-avatar">
+                                        <img src="{{ e[7] or '/static/avatar-padrao.svg' }}" class="card-avatar">
                                         <div class="card-info">
                                             <div class="card-nome">{{ e[3] }}</div>
                                             <div class="card-obs">{{ e[5] or 'Sobreaviso Oficial' }}</div>
@@ -589,7 +592,7 @@ HTML_INTERFACE = """
                             {% for e in escala_sabados %}
                                 {% if 'Apoio Fixo' in (e[5] or '') %}
                                     <div class="card-tec eq-{{ e[6] }}" id="card-escala-{{ e[0] }}" {% if pode_editar_horarios() %}draggable="true"{% endif %} ondragstart="drag(event)" data-id="{{ e[0] }}">
-                                        <img src="{{ e[7] or 'https://via.placeholder.com/40' }}" class="card-avatar">
+                                        <img src="{{ e[7] or '/static/avatar-padrao.svg' }}" class="card-avatar">
                                         <div class="card-info">
                                             <div class="card-nome">{{ e[3] }}</div>
                                             <div class="card-obs">{{ e[4] }} - {{ e[5] }}</div>
@@ -617,7 +620,7 @@ HTML_INTERFACE = """
             <h3 style="margin:0;">📊 Cobertura de Atendimento</h3>
             <form action="/horarios#secao-cobertura" method="GET" style="display: flex; gap: 10px; align-items: center;">
                 {% if data_filtro_sabado %}<input type="hidden" name="data_filtro_sabado" value="{{ data_filtro_sabado }}">{% endif %}
-                <label>📅 <strong>Simular Dia:</strong></label>
+                <label>📅 <strong>Consultar dia:</strong></label>
                 <input type="date" name="data_cobertura" value="{{ data_cobertura or '' }}" onchange="this.form.submit()">
                 {% if data_cobertura %}
                     <a href="/horarios#secao-cobertura" class="btn btn-danger" style="padding: 4px 8px; font-size: 0.8em;">Limpar</a>
@@ -627,7 +630,7 @@ HTML_INTERFACE = """
 
         {% if data_cobertura %}
             <div style="background-color: #eff6ff; color: #1d4ed8; padding: 8px 12px; border-radius: 4px; margin-bottom: 10px; font-size: 0.9em;">
-                ℹ️ Exibindo simulação para o dia <strong>{{ data_cobertura_formatada }}</strong>.
+                ℹ️ Exibindo cobertura para o dia <strong>{{ data_cobertura_formatada }}</strong>.
             </div>
         {% endif %}
 
@@ -737,7 +740,7 @@ HTML_INTERFACE = """
                     <th onclick="ordenarTabela('tabela-equipe', 2)" style="cursor: pointer;">Nome ↕</th>
                     <th onclick="ordenarTabela('tabela-equipe', 3)" style="cursor: pointer;">Cargo ↕</th>
                     <th onclick="ordenarTabela('tabela-equipe', 4)" style="cursor: pointer;">Jornada / Horário ↕</th>
-                    <th onclick="ordenarTabela('tabela-equipe', 5)" style="cursor: pointer;">Equipe Sábado ↕</th>
+                    <th onclick="ordenarTabela('tabela-equipe', 5)" style="cursor: pointer;">Equipe ↕</th>
                     <th onclick="ordenarTabela('tabela-equipe', 6)" style="cursor: pointer;">Tipo no Sábado ↕</th>
                     {% if pode_editar_horarios() %} <th class="col-acoes">Ações</th> {% endif %}
                 </tr>
@@ -755,7 +758,7 @@ HTML_INTERFACE = """
                     <td><span class="badge-prio">{{ f[8] or 'P1' }}</span></td>
                     <td>
                         <div style="display:flex; align-items:center; gap:8px;">
-                            <img src="{{ f[10] or 'https://via.placeholder.com/40' }}" style="width:32px; height:32px; border-radius:50%; object-fit:cover;">
+                            <img src="{{ f[10] or '/static/avatar-padrao.svg' }}" style="width:32px; height:32px; border-radius:50%; object-fit:cover;">
                             <strong>{{ f[1] }}</strong>
                         </div>
                     </td>
@@ -763,10 +766,12 @@ HTML_INTERFACE = """
                     <td>{{ f[7] or 'Não definida' }}</td>
                     <td>
                         {% if f[4] == 'Amarela' %}<span class="badge-amarela">Amarela</span>
-                        {% else %}<span class="badge-verde">Verde</span>{% endif %}
+                        {% elif f[4] == 'Verde' %}<span class="badge-verde">Verde</span>
+                        {% else %}<span class="badge-prio">{{ f[4] or 'Sem Equipe' }}</span>{% endif %}
                     </td>
                     <td>
-                        {% if f[9] == 1 %}⚠️ <strong>Sobreaviso</strong>
+                        {% if f[12] == 1 %}Nenhum — não trabalha aos sábados
+                        {% elif f[9] == 1 %}⚠️ <strong>Sobreaviso</strong>
                         {% elif f[5] == 1 %}🛠️ Apoio Fixo (8h-12h)
                         {% else %}🔄 Rodízio Normal{% endif %}
                     </td>
@@ -785,42 +790,8 @@ HTML_INTERFACE = """
 
         {% if pode_editar_horarios() %}
             <h4 style="margin-top: 20px;">➕ Cadastrar Novo Funcionário</h4>
-            <form action="/horarios/salvar_funcionario" method="POST" enctype="multipart/form-data" class="form-grid">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <input type="hidden" name="id" value="">
-                <input type="text" name="nome" placeholder="Nome Completo" required>
-                <div>
-                    <label style="font-size: 0.75em; color: #555;">Foto do Colaborador:</label>
-                    <input type="file" name="foto" accept="image/*" style="padding: 3px;">
-                </div>
-                <select name="prioridade" required>
-                    <option value="P1">Prioridade 1</option>
-                    <option value="P2">Prioridade 2</option>
-                    <option value="P3">Prioridade 3</option>
-                    <option value="P4">Prioridade 4</option>
-                    <option value="P5">Prioridade 5</option>
-                </select>
-                <select name="cargo_id" required>
-                    <option value="">Selecione o Cargo...</option>
-                    {% for c in cargos %}<option value="{{ c[0] }}">{{ c[1] }}</option>{% endfor %}
-                </select>
-                <select name="jornada_id" required>
-                    <option value="">Selecione a Jornada...</option>
-                    {% for j in jornadas %}<option value="{{ j[0] }}">{{ j[1] }}</option>{% endfor %}
-                </select>
-                <select name="equipe_sabado">
-                    <option value="Amarela">Equipe Amarela</option>
-                    <option value="Verde">Equipe Verde</option>
-                </select>
-                <select name="tipo_sabado">
-                    <option value="rodizio">Rodízio Normal (4h no Sábado)</option>
-                    <option value="apoio">Apoio Fixo Dev/Com/Fin (8h-12h)</option>
-                    <option value="sobreaviso">Sobreaviso da Equipe</option>
-                </select>
-                <select name="ativo">
-                    <option value="1">Ativo</option>
-                    <option value="0">Inativo (Demitido/Desativado)</option>
-                </select>
+            <form action="/horarios/salvar_funcionario" method="POST" enctype="multipart/form-data" class="form-grid form-funcionario">
+                {% include 'campos_funcionario.html' %}
                 <button type="submit" class="btn btn-admin">Cadastrar</button>
             </form>
         {% endif %}
@@ -830,7 +801,7 @@ HTML_INTERFACE = """
     <div class="card" id="secao-trocas">
         <h3>🔄 Registros de Trocas e Consulta de Dias Trabalhados</h3>
         <form action="/horarios#secao-trocas" method="GET" style="margin-bottom: 15px; display: flex; gap: 10px;">
-            {% if data_filtro_sabado %}<input type="hidden" name="data_filtro_sabado" value="{{ data_filtro_sabado }}">{% endif %}
+            <label>Data das trocas <input type="date" name="data_trocas" value="{{ data_trocas }}"></label>
             <select name="busca_funcionario">
                 <option value="">Filtrar Histórico por Funcionário...</option>
                 {% for f in funcionarios %}
@@ -838,35 +809,36 @@ HTML_INTERFACE = """
                 {% endfor %}
             </select>
             <button type="submit" class="btn btn-bancos">🔍 Consultar Histórico</button>
-            {% if busca_func_id %}<a href="/horarios#secao-trocas" class="btn btn-danger">Limpar Filtro</a>{% endif %}
+            {% if busca_func_id or data_trocas %}<a href="/horarios#secao-trocas" class="btn btn-danger">Limpar Filtro</a>{% endif %}
         </form>
 
         {% if pode_editar_horarios() %}
-            <h4>➕ Registrar Troca de Sábado</h4>
+            <h4>➕ Trocar horários em uma data</h4>
             <form action="/horarios/registrar_troca" method="POST" class="form-grid">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <input type="date" name="data_sabado" required onchange="validarApenasSabado(this)">
+                <input type="date" name="data_sabado" value="{{ data_cobertura }}" aria-label="Data da troca" required>
                 <select name="substituido_id" required>
-                    <option value="">Titular (Quem Folga)...</option>
-                    {% for f in funcionarios %}<option value="{{ f[0] }}">{{ f[1] }}</option>{% endfor %}
+                    <option value="">Primeiro funcionário...</option>
+                    {% for f in funcionarios if f[11] == 1 %}<option value="{{ f[0] }}">{{ f[1] }}</option>{% endfor %}
                 </select>
                 <select name="substituto_id" required>
-                    <option value="">Substituto (Quem Trabalha)...</option>
-                    {% for f in funcionarios %}<option value="{{ f[0] }}">{{ f[1] }}</option>{% endfor %}
+                    <option value="">Trocar com...</option>
+                    {% for f in funcionarios if f[11] == 1 %}<option value="{{ f[0] }}">{{ f[1] }}</option>{% endfor %}
                 </select>
                 <input type="text" name="motivo" placeholder="Motivo da troca">
                 <button type="submit" class="btn btn-admin">Salvar Troca</button>
             </form>
+            <p style="color:#64748b;font-size:.85em;">A troca vale apenas para essa data. Aos sábados, se o segundo funcionário estiver de folga, ele assume o turno do primeiro; se ambos estiverem escalados, os turnos são trocados. A cobertura usa os horários resultantes e mantém as ausências registradas.</p>
         {% endif %}
 
         <h4 style="margin-top: 15px;">Histórico de Trocas Cadastradas</h4>
         <table>
             <thead>
                 <tr>
-                    <th>Data Sábado</th>
-                    <th>Titular (Ausente)</th>
-                    <th>Substituto (Trabalhou)</th>
-                    <th>Motivo</th>
+                    <th>Data</th>
+                    <th>Funcionário</th>
+                    <th>Troca com / Ajuste</th>
+                    <th>Motivo</th><th>Horários e registro</th>
                 </tr>
             </thead>
             <tbody>
@@ -875,7 +847,7 @@ HTML_INTERFACE = """
                     <td><strong>{{ t[1] }}</strong></td>
                     <td style="color: #c0392b;">{{ t[2] }}</td>
                     <td style="color: #27ae60;"><strong>{{ t[3] }}</strong></td>
-                    <td>{{ t[4] or '-' }}</td>
+                    <td>{{ t[4] or '-' }}</td><td>{{ t[5] or 'Registro anterior: sem aplicação automática à cobertura.' }}</td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -1022,7 +994,6 @@ HTML_INTERFACE = """
             var colunaDestino = ev.currentTarget;
             
             if (colunaDestino.classList.contains('coluna-turno')) {
-                colunaDestino.appendChild(card);
                 
                 var escalaId = card.getAttribute('data-id');
                 var novoHorario = colunaDestino.getAttribute('data-horario');
@@ -1032,10 +1003,16 @@ HTML_INTERFACE = """
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ id: escalaId, horario: novoHorario })
                 }).then(res => res.json()).then(data => {
-                    if(!data.success) {
-                        alert('Erro ao mover técnico.');
+                    if (!data.success) {
+                        alert(data.erro || 'Não foi possível mover o funcionário.');
+                        return;
                     }
-                });
+                    const destino = new URL(window.location.href);
+                    destino.searchParams.set('data_cobertura', data.data);
+                    destino.searchParams.set('data_filtro_sabado', data.data);
+                    destino.hash = 'secao-escala-sabado';
+                    window.location.assign(destino);
+                }).catch(() => alert('Falha de conexão. Recarregue a página para conferir a escala.'));
             }
         }
 
@@ -1063,13 +1040,18 @@ HTML_INTERFACE = """
 # --- ROTAS PRINCIPAIS ---
 @horarios_bp.route('/horarios')
 def ver_horarios():
-    if not PUBLIC_HORARIOS and (not session.get('logged_in') or not session.get('user_id')):
-        return redirect(url_for('bancos.admin_login', next=request.path))
     busca_func_id = request.args.get('busca_funcionario', '')
+    data_trocas = request.args.get('data_trocas', '')
     data_filtro_sabado = request.args.get('data_filtro_sabado', '')
     data_cobertura = request.args.get('data_cobertura')
     if not data_cobertura:
         data_cobertura = date.today().strftime('%Y-%m-%d')
+    try:
+        validar_data(data_cobertura)
+        if data_trocas:
+            validar_data(data_trocas)
+    except ValueError:
+        return 'Informe uma data válida.', 400
     modo_todos = request.args.get('modo', '') == 'todos'
     
     if not data_filtro_sabado and not modo_todos and not busca_func_id:
@@ -1103,7 +1085,7 @@ def ver_horarios():
         cursor = conn.cursor()
         
         cursor.execute("""
-            SELECT f.id, f.nome, f.cargo_id, f.jornada_id, f.equipe_sabado, f.eh_apoiador_sabado, c.nome, j.descricao, f.prioridade, f.eh_sobreaviso, f.foto_url, f.ativo
+            SELECT f.id, f.nome, f.cargo_id, f.jornada_id, f.equipe_sabado, f.eh_apoiador_sabado, c.nome, j.descricao, f.prioridade, f.eh_sobreaviso, f.foto_url, f.ativo, f.nao_trabalha_sabado
             FROM funcionarios f
             LEFT JOIN cargos c ON f.cargo_id = c.id
             LEFT JOIN jornadas j ON f.jornada_id = j.id
@@ -1155,10 +1137,10 @@ def ver_horarios():
             cor_equipe_dia = escala_sabados[0][2]
 
         query_trocas = """
-            SELECT t.id, strftime('%d/%m/%Y', t.data_sabado), f1.nome, f2.nome, t.motivo
+            SELECT t.id, strftime('%d/%m/%Y', t.data_sabado), COALESCE(f1.nome, 'Funcionário removido'), COALESCE(f2.nome, 'Funcionário removido'), t.motivo, t.detalhes, t.aplicada
             FROM trocas_sabado t
-            JOIN funcionarios f1 ON f1.id = t.funcionario_substituido_id
-            JOIN funcionarios f2 ON f2.id = t.funcionario_substituto_id
+            LEFT JOIN funcionarios f1 ON f1.id = t.funcionario_substituido_id
+            LEFT JOIN funcionarios f2 ON f2.id = t.funcionario_substituto_id
             WHERE 1=1
         """
         params_trocas = []
@@ -1167,11 +1149,11 @@ def ver_horarios():
             query_trocas += " AND (t.funcionario_substituido_id = ? OR t.funcionario_substituto_id = ?)"
             params_trocas.extend([busca_func_id, busca_func_id])
 
-        if data_filtro_sabado:
+        if data_trocas:
             query_trocas += " AND t.data_sabado = ?"
-            params_trocas.append(data_filtro_sabado)
+            params_trocas.append(data_trocas)
 
-        query_trocas += " ORDER BY t.data_sabado DESC"
+        query_trocas += " ORDER BY t.data_sabado DESC, t.id DESC"
         cursor.execute(query_trocas, params_trocas)
         trocas = cursor.fetchall()
 
@@ -1192,136 +1174,70 @@ def ver_horarios():
         data_filtro_sabado_formatada=data_filtro_sabado_formatada,
         data_cobertura=data_cobertura,
         data_cobertura_formatada=data_cobertura_formatada,
-        modo_todos=modo_todos
+        modo_todos=modo_todos, data_trocas=data_trocas, funcionario={}
     )
 
 @horarios_bp.route('/horarios/salvar_funcionario', methods=['POST'])
 @login_required
 def salvar_funcionario():
-    func_id = request.form.get('id')
-    nome = request.form['nome']
-    prioridade = request.form['prioridade']
-    cargo_id = request.form['cargo_id']
-    jornada_id = request.form['jornada_id']
-    equipe_sabado = request.form['equipe_sabado']
-    tipo_sabado = request.form['tipo_sabado']
-    ativo = int(request.form.get('ativo', 1))
-
-    eh_apoiador = 1 if tipo_sabado == 'apoio' else 0
-    eh_sobreaviso = 1 if tipo_sabado == 'sobreaviso' else 0
-
-    foto_url = None
-    if 'foto' in request.files:
-        file = request.files['foto']
-        if file and file.filename != '' and extensao_permitida(file.filename):
-            file.seek(0, os.SEEK_END)
-            tamanho = file.tell()
-            file.seek(0)
+    nome = request.form.get('nome', '').strip()
+    prioridade = request.form.get('prioridade', '')
+    equipe = request.form.get('equipe_sabado', '')
+    tipo = request.form.get('tipo_sabado', '')
+    try:
+        func_id = int(request.form['id']) if request.form.get('id') else None
+        cargo = int(request.form.get('cargo_id', ''))
+        jornada = int(request.form.get('jornada_id', ''))
+        ativo = int(request.form.get('ativo', '1'))
+    except ValueError:
+        return 'Informe cargo, jornada e funcionário válidos.', 400
+    if (not nome or len(nome) > 150 or prioridade not in {'P1', 'P2', 'P3', 'P4', 'P5'}
+            or equipe not in EQUIPES or tipo not in TIPOS_SABADO or ativo not in (0, 1)
+            or (func_id is not None and func_id <= 0)):
+        return 'Revise os dados do funcionário.', 400
+    with closing(get_db()) as conn, conn:
+        if func_id and not conn.execute('SELECT 1 FROM funcionarios WHERE id = ?', (func_id,)).fetchone():
+            return 'Funcionário não encontrado.', 404
+        if not conn.execute('SELECT 1 FROM cargos WHERE id = ?', (cargo,)).fetchone():
+            return 'Cargo inválido.', 400
+        if not conn.execute("SELECT 1 FROM jornadas WHERE id = ? AND tipo = 'Semana'", (jornada,)).fetchone():
+            return 'Selecione uma jornada da semana.', 400
+        foto_url = None
+        foto = request.files.get('foto')
+        if foto and foto.filename:
+            if not extensao_permitida(foto.filename):
+                return 'Formato de foto inválido.', 400
+            foto.seek(0, os.SEEK_END)
+            tamanho = foto.tell()
+            foto.seek(0)
             if tamanho > MAX_FOTO_BYTES:
-                flash('Foto maior que o limite permitido.', 'danger')
-                return redirect(url_for('horarios.ver_horarios'))
-            filename = secure_filename(file.filename)
-            nome_unico = f"{int(datetime.now().timestamp())}_{filename}"
-            caminho_salvar = os.path.join(UPLOAD_FOLDER, nome_unico)
-            file.save(caminho_salvar)
-            foto_url = f"/static/fotos/{nome_unico}"
-
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
-        cursor = conn.cursor()
+                return 'Foto maior que o limite permitido.', 400
+            nome_foto = f"{datetime.now():%Y%m%d%H%M%S%f}_{secure_filename(foto.filename)}"
+            foto.save(os.path.join(UPLOAD_FOLDER, nome_foto))
+            foto_url = f'/static/fotos/{nome_foto}'
+        valores = (nome, prioridade, cargo, jornada, equipe, int(tipo == 'apoio'),
+                   int(tipo == 'sobreaviso'), int(tipo == 'nenhum'), ativo)
         if func_id:
-            if foto_url:
-                cursor.execute("""
-                    UPDATE funcionarios 
-                    SET nome=?, foto_url=?, prioridade=?, cargo_id=?, jornada_id=?, equipe_sabado=?, eh_apoiador_sabado=?, eh_sobreaviso=?, ativo=?
-                    WHERE id=?
-                """, (nome, foto_url, prioridade, cargo_id, jornada_id, equipe_sabado, eh_apoiador, eh_sobreaviso, ativo, func_id))
-            else:
-                cursor.execute("""
-                    UPDATE funcionarios 
-                    SET nome=?, prioridade=?, cargo_id=?, jornada_id=?, equipe_sabado=?, eh_apoiador_sabado=?, eh_sobreaviso=?, ativo=?
-                    WHERE id=?
-                """, (nome, prioridade, cargo_id, jornada_id, equipe_sabado, eh_apoiador, eh_sobreaviso, ativo, func_id))
+            conn.execute('''UPDATE funcionarios SET nome=?, prioridade=?, cargo_id=?, jornada_id=?,
+                equipe_sabado=?, eh_apoiador_sabado=?, eh_sobreaviso=?, nao_trabalha_sabado=?, ativo=?,
+                foto_url=COALESCE(?, foto_url) WHERE id=?''', (*valores, foto_url, func_id))
         else:
-            cursor.execute("""
-                INSERT INTO funcionarios (nome, foto_url, prioridade, cargo_id, jornada_id, equipe_sabado, eh_apoiador_sabado, eh_sobreaviso, ativo)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (nome, foto_url or '', prioridade, cargo_id, jornada_id, equipe_sabado, eh_apoiador, eh_sobreaviso, ativo))
-        conn.commit()
-
+            conn.execute('''INSERT INTO funcionarios (nome, prioridade, cargo_id, jornada_id,
+                equipe_sabado, eh_apoiador_sabado, eh_sobreaviso, nao_trabalha_sabado, ativo, foto_url)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (*valores, foto_url or ''))
     return redirect(url_for('horarios.ver_horarios') + '#secao-equipe')
+
 
 @horarios_bp.route('/horarios/editar_funcionario/<int:id>')
 @login_required
 def editar_funcionario(id):
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, nome, cargo_id, jornada_id, equipe_sabado, eh_apoiador_sabado, eh_sobreaviso, prioridade, foto_url, ativo FROM funcionarios WHERE id = ?", (id,))
-        func = cursor.fetchone()
-        cursor.execute("SELECT id, nome FROM cargos")
-        cargos = cursor.fetchall()
-        cursor.execute("SELECT id, descricao FROM jornadas WHERE tipo = 'Semana'")
-        jornadas = cursor.fetchall()
-
-    if not func:
-        return redirect('/horarios#secao-equipe')
-
-    f_id, f_nome, f_cargo, f_jornada, f_equipe, f_apoiador, f_sobreaviso, f_prio, f_foto, f_ativo = func
-
-    return f"""
-    <link rel="stylesheet" href="/static/ui.css">
-    <script src="/static/ui.js" defer></script>
-    <div style="max-width: 500px; margin: 40px auto; font-family: sans-serif; padding: 20px; border: 1px solid #ccc; border-radius: 8px; background: white;">
-        <h3>✏️ Editar Funcionário</h3>
-        <form action="/horarios/salvar_funcionario" method="POST" enctype="multipart/form-data" style="display: grid; gap: 10px;">
-            <input type="hidden" name="csrf_token" value="{csrf_token()}">
-            <input type="hidden" name="id" value="{f_id}">
-            
-            <label>Status:</label>
-            <select name="ativo" style="padding: 6px; font-weight:bold;">
-                <option value="1" {'selected' if f_ativo==1 else ''}>🟢 ATIVO</option>
-                <option value="0" {'selected' if f_ativo==0 else ''}>🔴 INATIVO (Demitido/Desativado)</option>
-            </select>
-
-            <label>Nome:</label>
-            <input type="text" name="nome" value="{f_nome}" required style="padding: 6px;">
-
-            <label>Alterar Foto:</label>
-            <input type="file" name="foto" accept="image/*">
-            {f'<p style="font-size: 0.8em; color: #666;">Foto atual: <img src="{f_foto}" style="width:30px; height:30px; border-radius:50%; vertical-align:middle;"></p>' if f_foto else ''}
-
-            <label>Prioridade:</label>
-            <select name="prioridade" style="padding: 6px;">
-                {''.join([f'<option value="P{i}" {"selected" if f_prio==f"P{i}" else ""}>Prioridade P{i}</option>' for i in range(1, 6)])}
-            </select>
-            
-            <label>Cargo:</label>
-            <select name="cargo_id" style="padding: 6px;">
-                {''.join([f'<option value="{c[0]}" {"selected" if c[0]==f_cargo else ""}>{c[1]}</option>' for c in cargos])}
-            </select>
-
-            <label>Jornada da Semana:</label>
-            <select name="jornada_id" style="padding: 6px;">
-                {''.join([f'<option value="{j[0]}" {"selected" if j[0]==f_jornada else ""}>{j[1]}</option>' for j in jornadas])}
-            </select>
-
-            <label>Equipe do Sábado:</label>
-            <select name="equipe_sabado" style="padding: 6px;">
-                <option value="Amarela" {'selected' if f_equipe=='Amarela' else ''}>Equipe Amarela</option>
-                <option value="Verde" {'selected' if f_equipe=='Verde' else ''}>Equipe Verde</option>
-            </select>
-
-            <label>Papel / Tipo no Sábado:</label>
-            <select name="tipo_sabado" style="padding: 6px;">
-                <option value="rodizio" {'selected' if f_apoiador==0 and f_sobreaviso==0 else ''}>Rodízio Normal (4h no Sábado)</option>
-                <option value="apoio" {'selected' if f_apoiador==1 else ''}>Apoio Fixo Dev/Com/Fin (8h-12h)</option>
-                <option value="sobreaviso" {'selected' if f_sobreaviso==1 else ''}>Sobreaviso da Equipe</option>
-            </select>
-
-            <button type="submit" style="padding: 10px; background: #2563eb; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 600;">Salvar Alterações</button>
-            <a href="/horarios#secao-equipe" style="text-align: center; color: #555; margin-top: 5px;">Cancelar</a>
-        </form>
-    </div>
-    """
+    with closing(get_db()) as conn:
+        funcionario = conn.execute('SELECT * FROM funcionarios WHERE id = ?', (id,)).fetchone()
+        if not funcionario:
+            return 'Funcionário não encontrado.', 404
+        cargos = conn.execute('SELECT id, nome FROM cargos ORDER BY nome').fetchall()
+        jornadas = conn.execute("SELECT id, descricao, tipo FROM jornadas WHERE tipo = 'Semana' ORDER BY descricao").fetchall()
+    return render_template('editar_funcionario.html', funcionario=dict(funcionario), cargos=cargos, jornadas=jornadas)
 
 @horarios_bp.route('/horarios/gerar_sugestao_sabado', methods=['POST'])
 @login_required
@@ -1348,6 +1264,9 @@ def gerar_sugestao_sabado():
         """, (data_sabado,))
         ausentes = [row[0] for row in cursor.fetchall()]
 
+        if cursor.execute('SELECT 1 FROM trocas_sabado WHERE data_sabado = ? AND aplicada = 1', (data_sabado,)).fetchone():
+            flash('Este sábado tem trocas ou ajustes registrados. Edite a escala para preservar essas alterações.')
+            return redirect(url_for('horarios.ver_horarios', data_filtro_sabado=data_sabado))
         cursor.execute("DELETE FROM escala_sabado WHERE data_sabado = ?", (data_sabado,))
 
         cursor.execute("SELECT cor_equipe FROM escala_sabado ORDER BY id DESC LIMIT 1")
@@ -1369,7 +1288,7 @@ def gerar_sugestao_sabado():
             SELECT f.id, f.nome 
             FROM funcionarios f
             LEFT JOIN cargos c ON f.cargo_id = c.id
-            WHERE f.ativo = 1
+            WHERE f.ativo = 1 AND f.nao_trabalha_sabado = 0
               AND f.equipe_sabado = ? 
               AND (c.nome LIKE '%Suporte%' OR f.cargo_id IS NULL)
               AND f.eh_apoiador_sabado = 0 
@@ -1383,7 +1302,7 @@ def gerar_sugestao_sabado():
                 SELECT f.id, f.nome 
                 FROM funcionarios f
                 LEFT JOIN cargos c ON f.cargo_id = c.id
-                WHERE f.ativo = 1
+                WHERE f.ativo = 1 AND f.nao_trabalha_sabado = 0
                   AND f.equipe_sabado = ? 
                   AND (c.nome LIKE '%Suporte%' OR f.cargo_id IS NULL)
                   AND f.eh_apoiador_sabado = 0 
@@ -1406,7 +1325,7 @@ def gerar_sugestao_sabado():
 
         cursor.execute("""
             SELECT id FROM funcionarios 
-            WHERE ativo = 1 AND equipe_sabado = ? AND eh_apoiador_sabado = 1
+            WHERE ativo = 1 AND nao_trabalha_sabado = 0 AND equipe_sabado = ? AND eh_apoiador_sabado = 1
         """, (cor_principal,))
         for ap in cursor.fetchall():
             if ap[0] not in ausentes:
@@ -1417,7 +1336,7 @@ def gerar_sugestao_sabado():
 
         cursor.execute("""
             SELECT id FROM funcionarios 
-            WHERE ativo = 1 AND equipe_sabado = ? AND eh_sobreaviso = 1
+            WHERE ativo = 1 AND nao_trabalha_sabado = 0 AND equipe_sabado = ? AND eh_sobreaviso = 1
         """, (cor_principal,))
         for sb in cursor.fetchall():
             if sb[0] not in ausentes:
@@ -1438,8 +1357,16 @@ def adicionar_item_escala():
     tipo_sabado = request.form.get('tipo_sabado', 'rodizio')
     observacao = request.form.get('observacao', '')
 
-    if not data_sabado or not funcionario_id:
-        return redirect('/horarios#secao-escala-sabado')
+    try:
+        if validar_data(data_sabado).weekday() != 5:
+            raise ValueError('Selecione um sábado.')
+        funcionario_id = int(funcionario_id)
+        if horario not in FAIXAS_SABADO or len(observacao) > 500:
+            raise ValueError('Horário ou observação inválidos.')
+        with closing(get_db()) as conn:
+            validar_participante_sabado(conn, funcionario_id)
+    except (ValueError, TypeError) as erro:
+        return jsonify(erro=str(erro)), 400
 
     # Define a observação padrão caso não tenha sido preenchida manualmente
     if not observacao:
@@ -1470,31 +1397,26 @@ def editar_item_escala(id):
     with closing(sqlite3.connect(DB_NAME)) as conn, conn:
         cursor = conn.cursor()
         if request.method == 'POST':
-            funcionario_id = request.form.get('funcionario_id')
-            horario = request.form.get('horario')
-            observacao = request.form.get('observacao')
-            data_sabado = request.form.get('data_sabado')
-            
-            cursor.execute("""
-                UPDATE escala_sabado 
-                SET funcionario_id = ?, horario = ?, observacao = ?
-                WHERE id = ?
-            """, (funcionario_id, horario, observacao, id))
-            conn.commit()
-            return redirect(url_for('horarios.ver_horarios', data_filtro_sabado=data_sabado) + '#secao-escala-sabado')
-        
+            try:
+                data_sabado = ajustar_escala(conn, id, int(request.form.get('funcionario_id', '')),
+                    request.form.get('horario'), request.form.get('observacao', ''), session['user_id'])
+            except ValueError as erro:
+                return jsonify(erro=str(erro)), 400
+            return redirect(url_for('horarios.ver_horarios', data_filtro_sabado=data_sabado,
+                                    data_cobertura=data_sabado) + '#secao-escala-sabado')
+
         cursor.execute("SELECT id, data_sabado, funcionario_id, horario, observacao FROM escala_sabado WHERE id = ?", (id,))
         item = cursor.fetchone()
         if not item:
             return redirect('/horarios#secao-escala-sabado')
             
-        cursor.execute("SELECT id, nome FROM funcionarios WHERE ativo = 1 ORDER BY nome")
+        cursor.execute("SELECT id, nome FROM funcionarios WHERE ativo = 1 AND nao_trabalha_sabado = 0 ORDER BY nome")
         funcs = cursor.fetchall()
 
     item_id, d_sabado, f_id, h_faixa, obs = item
     faixas = ["07:30 - 11:30", "08:00 - 12:00", "09:00 - 13:00", "10:00 - 14:00", "13:00 - 17:00", "14:00 - 18:00", "Sobreaviso"]
 
-    opts_funcs = "".join([f'<option value="{f[0]}" {"selected" if f[0]==f_id else ""}>{f[1]}</option>' for f in funcs])
+    opts_funcs = "".join([f'<option value="{f[0]}" {"selected" if f[0]==f_id else ""}>{escape(f[1])}</option>' for f in funcs])
     opts_faixas = "".join([f'<option value="{fx}" {"selected" if fx==h_faixa else ""}>{fx}</option>' for fx in faixas])
 
     return f"""
@@ -1519,7 +1441,7 @@ def editar_item_escala(id):
             </div>
             <div>
                 <label style="font-size: 0.85em;">Observação:</label>
-                <input type="text" name="observacao" value="{obs or ''}" style="width: 100%; padding: 8px;">
+                <input type="text" name="observacao" value="{escape(obs or '')}" style="width: 100%; padding: 8px;">
             </div>
             <button type="submit" style="padding: 10px; background: #2563eb; color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer;">Salvar Alteração</button>
             <a href="/horarios?data_filtro_sabado={d_sabado}#secao-escala-sabado" style="text-align: center; color: #555; text-decoration: none;">Cancelar</a>
@@ -1530,19 +1452,16 @@ def editar_item_escala(id):
 @horarios_bp.route('/horarios/atualizar_horario_escala', methods=['POST'])
 @login_required
 def atualizar_horario_escala():
-    dados = request.get_json()
-    if not dados:
-        return jsonify({'success': False}), 400
-        
-    escala_id = dados.get('id')
-    novo_horario = dados.get('horario')
-    
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE escala_sabado SET horario = ? WHERE id = ?", (novo_horario, escala_id))
-        conn.commit()
-        
-    return jsonify({'success': True})
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict):
+        return jsonify(success=False, erro='Dados inválidos.'), 400
+    try:
+        escala_id = int(dados.get('id', ''))
+        with closing(get_db()) as conn, conn:
+            data = ajustar_escala(conn, escala_id, None, dados.get('horario'), None, session['user_id'])
+    except (ValueError, TypeError) as erro:
+        return jsonify(success=False, erro=str(erro)), 400
+    return jsonify(success=True, data=data)
 
 @horarios_bp.route('/horarios/salvar_ausencia', methods=['POST'])
 @login_required
@@ -1589,7 +1508,7 @@ def editar_ausencia(id):
         return redirect('/horarios#secao-ausencias')
 
     a_id, f_id, motivo, d_in, d_fim, h_in, h_fim = aus
-    opts_funcs = "".join([f'<option value="{f[0]}" {"selected" if f[0]==f_id else ""}>{f[1]}</option>' for f in funcs])
+    opts_funcs = "".join([f'<option value="{f[0]}" {"selected" if f[0]==f_id else ""}>{escape(f[1])}</option>' for f in funcs])
 
     return f"""
     <link rel="stylesheet" href="/static/ui.css">
@@ -1609,7 +1528,7 @@ def editar_ausencia(id):
 
             <div>
                 <label style="font-size: 0.85em;">Motivo:</label>
-                <input type="text" name="motivo" value="{motivo}" required style="width: 100%; padding: 8px;">
+                <input type="text" name="motivo" value="{escape(motivo)}" required style="width: 100%; padding: 8px;">
             </div>
 
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
@@ -1703,14 +1622,20 @@ def excluir_jornada(id):
 @horarios_bp.route('/horarios/registrar_troca', methods=['POST'])
 @login_required
 def registrar_troca():
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO trocas_sabado (data_sabado, funcionario_substituido_id, funcionario_substituto_id, motivo)
-            VALUES (?, ?, ?, ?)
-        """, (request.form['data_sabado'], request.form['substituido_id'], request.form['substituto_id'], request.form['motivo']))
-        conn.commit()
-    return redirect('/horarios#secao-trocas')
+    data = request.form.get('data_sabado', '')
+    motivo = request.form.get('motivo', '').strip()
+    try:
+        titular = int(request.form.get('substituido_id', ''))
+        substituto = int(request.form.get('substituto_id', ''))
+        if len(motivo) > 500:
+            raise ValueError('O motivo deve ter até 500 caracteres.')
+        with closing(get_db()) as conn, conn:
+            conn.execute('BEGIN IMMEDIATE')
+            aplicar_troca(conn, data, titular, substituto, motivo, session['user_id'])
+    except ValueError as erro:
+        return jsonify(erro=str(erro)), 400
+    return redirect(url_for('horarios.ver_horarios', data_cobertura=data, data_trocas=data,
+                            data_filtro_sabado=data if validar_data(data).weekday() == 5 else '') + '#secao-trocas')
 
 @horarios_bp.route('/horarios/excluir_funcionario/<int:id>', methods=['POST'])
 @login_required

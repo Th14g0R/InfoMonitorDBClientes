@@ -1,0 +1,50 @@
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<input type="hidden" name="id" value="{{ funcionario.get('id', '') }}">
+<div class="campo-funcionario">
+    <label for="func-nome">Nome completo</label>
+    <input id="func-nome" name="nome" value="{{ funcionario.get('nome', '') }}" required maxlength="150">
+</div>
+<div class="campo-funcionario">
+    <label for="func-foto">Foto do colaborador</label>
+    <input id="func-foto" type="file" name="foto" accept="image/png,image/jpeg,image/gif,image/webp">
+</div>
+<div class="campo-funcionario">
+    <label for="func-prioridade">Prioridade</label>
+    <select id="func-prioridade" name="prioridade" required>
+        {% for i in range(1, 6) %}<option value="P{{ i }}" {% if funcionario.get('prioridade', 'P1') == 'P' ~ i %}selected{% endif %}>Prioridade {{ i }}</option>{% endfor %}
+    </select>
+</div>
+<div class="campo-funcionario">
+    <label for="func-cargo">Cargo</label>
+    <select id="func-cargo" name="cargo_id" required>
+        <option value="">Selecione o cargo</option>
+        {% for c in cargos %}<option value="{{ c[0] }}" {% if funcionario.get('cargo_id') == c[0] %}selected{% endif %}>{{ c[1] }}</option>{% endfor %}
+    </select>
+</div>
+<div class="campo-funcionario">
+    <label for="func-jornada">Jornada da semana</label>
+    <select id="func-jornada" name="jornada_id" required>
+        <option value="">Selecione a jornada</option>
+        {% for j in jornadas if j[2] == 'Semana' %}<option value="{{ j[0] }}" {% if funcionario.get('jornada_id') == j[0] %}selected{% endif %}>{{ j[1] }}</option>{% endfor %}
+    </select>
+</div>
+<div class="campo-funcionario">
+    <label for="func-equipe">Equipe</label>
+    <select id="func-equipe" name="equipe_sabado" required>
+        {% for equipe in equipes %}<option value="{{ equipe }}" {% if funcionario.get('equipe_sabado', 'Sem Equipe') == equipe %}selected{% endif %}>{{ equipe }}</option>{% endfor %}
+    </select>
+</div>
+{% set tipo_atual = 'nenhum' if funcionario.get('nao_trabalha_sabado', 1) else ('sobreaviso' if funcionario.get('eh_sobreaviso') else ('apoio' if funcionario.get('eh_apoiador_sabado') else 'rodizio')) %}
+<div class="campo-funcionario">
+    <label for="func-sabado">Participação aos sábados</label>
+    <select id="func-sabado" name="tipo_sabado" required>
+        {% for tipo, rotulo in tipos_sabado.items() %}<option value="{{ tipo }}" {% if tipo_atual == tipo %}selected{% endif %}>{{ rotulo }}</option>{% endfor %}
+    </select>
+</div>
+<div class="campo-funcionario">
+    <label for="func-ativo">Status</label>
+    <select id="func-ativo" name="ativo">
+        <option value="1" {% if funcionario.get('ativo', 1) %}selected{% endif %}>Ativo</option>
+        <option value="0" {% if not funcionario.get('ativo', 1) %}selected{% endif %}>Inativo</option>
+    </select>
+</div>

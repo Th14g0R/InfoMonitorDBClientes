@@ -1,4 +1,4 @@
-from flask import Blueprint, render_template, render_template_string, request, jsonify, session, redirect, url_for, flash, g
+from flask import Blueprint, render_template, render_template_string, request, jsonify, session, redirect, url_for, flash, g, current_app
 import paramiko
 import posixpath
 import shlex
@@ -12,6 +12,8 @@ import unicodedata
 import socket
 import smtplib
 import secrets
+import hashlib
+import hmac
 import json  # FIX: Módulo json importado para interpretar a variável SERVIDORES_CONFIG
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -24,7 +26,7 @@ from backups import interpretar_status_backups
 from gestao_bancos import listar_pastas, adicionar_banco
 from seguranca import (
     senha_atende_politica, login_bloqueado, registrar_falha_login, limpar_falhas_login,
-    token_expira_em, token_ainda_valido, destino_redirect_seguro, login_obrigatorio,
+    token_expira_em, token_ainda_valido, destino_redirect_seguro,
     conectar_ssh, validar_caminho_banco,
 )
 
@@ -60,6 +62,24 @@ def revalidar_sessao_a_cada_requisicao():
         # Mantém a sessão sincronizada com o que está no banco (nome/master podem ter mudado)
         session['user_nome'] = nome_para_assinatura(usuario['nome'])
         session['eh_master'] = usuario['eh_master']
+
+PAGINAS_PUBLICAS = {
+    'bancos.exibir_servidor', 'bancos.exibir_todos', 'bancos.exibir_inativos',
+    'bancos.exibir_orfaos', 'bancos.exibir_historico', 'bancos.exibir_backups_ftp',
+    'bancos.api_historico', 'bancos.api_testar_cname',
+    'bancos.admin_login', 'bancos.esqueci_senha', 'bancos.admin_register',
+    'bancos.redefinir_senha_token',
+}
+
+
+@bancos_bp.before_request
+def proteger_gestao():
+    if request.endpoint in PAGINAS_PUBLICAS or g.get('usuario_atual'):
+        return
+    if request.is_json or request.path.startswith('/api/'):
+        return jsonify(erro='Autenticação necessária.'), 401
+    return redirect(url_for('bancos.admin_login', next=request.path))
+
 
 def tem_permissao(codigo_permissao):
     """Master sempre tem acesso total. Demais usuários dependem da coluna de permissão específica."""
@@ -1210,7 +1230,7 @@ HTML_LAYOUT = """
                     <a href="/orfaos" {% if modo_orfaos %}aria-current="page"{% endif %}>Arquivos órfãos no disco</a>
                     <a href="/historico" {% if modo_historico %}aria-current="page"{% endif %}>Histórico de disco</a>
                     <a href="/backups-ftp">Backups FTP</a>
-                    {% if tem_permissao('perm_servidores') %}<a href="/todos?filtro=sem_lojas">Clientes sem lojas cadastradas</a>{% endif %}
+                    <a href="/todos?filtro=sem_lojas">Clientes sem lojas cadastradas</a>
                 </div>
             </details>
             {% if tem_permissao('perm_gestao_bancos') or tem_permissao('perm_servidores') %}
@@ -1223,12 +1243,12 @@ HTML_LAYOUT = """
             </details>
             {% endif %}
             <a href="?atualizar=1{% if busca_termo %}&busca={{ busca_termo|urlencode }}{% endif %}{% if ordem_atual %}&ordem={{ ordem_atual|urlencode }}{% endif %}{% if filtro_status %}&filtro={{ filtro_status|urlencode }}{% endif %}" class="btn" title="Atualizar dados do servidor">↻ Atualizar</a>
+            <a href="/horarios" class="btn">🗓️ Horários</a>
             {% if session.get('logged_in') %}
             <details class="menu-acoes menu-conta">
                 <summary class="btn"><span class="nome-conta">{{ session.get('user_nome', '') }}</span>{% if session.get('eh_master') %}<span class="selo-master">Master</span>{% endif %}</summary>
                 <div class="menu-painel">
                     {% if tem_permissao('perm_gestao_bancos') %}<a href="/admin">Meu perfil</a>{% endif %}
-                    <a href="/horarios">Horários da equipe</a>
                     <hr>
                     <form action="/admin/logout" method="POST">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -1520,7 +1540,7 @@ HTML_LAYOUT = """
                                 </td>
                                 <td>
                                     {% if banco.arquivo_existe and not banco.eh_inativo %}
-                                        <div class="cname-cell" data-alias="{{ banco.alias }}">
+                                        <div class="cname-cell" data-assinatura="{{ assinatura_cname(banco.cname_string) }}" data-alias="{{ banco.alias }}">
                                             <span class="cname-status" title="Testando conectividade...">⏳</span>
                                             <span class="cname-texto">{{ banco.cname_string }}</span>
                                             <button class="btn-copy" onclick="copiarString('{{ banco.cname_string }}', this)" title="{{ banco.cname_string }}{% if banco.cname_custom %} (editado manualmente){% endif %} — clique para copiar">
@@ -1772,7 +1792,7 @@ HTML_LAYOUT = """
                 if (!span || !statusEl) return;
                 const host = span.textContent;
 
-                csrfFetch('/api/cname/testar?host=' + encodeURIComponent(host))
+                csrfFetch('/api/cname/testar?' + new URLSearchParams({host: host.trim(), assinatura: celula.dataset.assinatura}))
                     .then(r => r.json())
                     .then(data => {
                         if (data.ativo) {
@@ -4059,30 +4079,26 @@ def modelo_importar_lojas():
     )
 
 
+def assinatura_cname(host):
+    return hmac.new(current_app.secret_key.encode(), host.strip().encode(), hashlib.sha256).hexdigest()
+
+
+bancos_bp.add_app_template_global(assinatura_cname, name='assinatura_cname')
+
+
 @bancos_bp.route('/api/cname/testar')
-@login_obrigatorio
 def api_testar_cname():
-    """Testa (DNS + conexão TCP leve) se uma string de CNAME está ativa. Usado pelo botão 'Atualizar Dados'."""
     host = request.args.get('host', '').strip()
-    if not host:
-        return jsonify({"ativo": False, "erro": "host não informado"}), 400
-
+    assinatura = request.args.get('assinatura', '')
+    if not host or len(host) > 1024 or not hmac.compare_digest(assinatura_cname(host).encode(), assinatura.encode()):
+        return jsonify(ativo=False, erro='CNAME inválido.'), 400
     host_limpo = host.split('/')[0].split(':')[0]
-    resultado = {"ativo": False}
     try:
-        ip_resolvido = socket.gethostbyname(host_limpo)
-        resultado["ativo"] = True
-        resultado["ip"] = ip_resolvido
-        # Tenta uma conexão TCP rápida na porta 80 apenas como sinal extra (não é obrigatório para considerar ativo)
-        try:
-            with socket.create_connection((ip_resolvido, 80), timeout=2):
-                resultado["porta_80"] = True
-        except Exception:
-            resultado["porta_80"] = False
-    except Exception:
-        resultado["ativo"] = False
-
-    return jsonify(resultado)
+        socket.gethostbyname(host_limpo)
+        ativo = True
+    except (OSError, UnicodeError):
+        ativo = False
+    return jsonify(ativo=ativo)
 
 
 @bancos_bp.route('/admin/cname/salvar', methods=['POST'])
@@ -4217,7 +4233,6 @@ HTML_BACKUPS_FTP = """
 
 
 @bancos_bp.route('/backups-ftp')
-@login_obrigatorio
 def exibir_backups_ftp():
     forcar = request.args.get('atualizar') == '1'
     status = obter_status_backups_ftp(forcar_atualizacao=forcar)
@@ -4238,7 +4253,6 @@ def exibir_backups_ftp():
 
 @bancos_bp.route('/')
 @bancos_bp.route('/servidor/<nome_servidor>')
-@login_obrigatorio
 def exibir_servidor(nome_servidor='DB01'):
     if nome_servidor not in SERVIDORES: nome_servidor = 'DB01'
     ordem = request.args.get('ordem', 'nome')
@@ -4292,7 +4306,6 @@ def exibir_servidor(nome_servidor='DB01'):
     )
 
 @bancos_bp.route('/todos')
-@login_obrigatorio
 def exibir_todos():
     ordem = request.args.get('ordem', 'nome')
     busca_termo = request.args.get('busca', '').strip()
@@ -4341,7 +4354,6 @@ def exibir_todos():
     )
 
 @bancos_bp.route('/inativos')
-@login_obrigatorio
 def exibir_inativos():
     ordem = request.args.get('ordem', 'nome')
     busca_termo = request.args.get('busca', '').strip()
@@ -4371,7 +4383,6 @@ def exibir_inativos():
     )
 
 @bancos_bp.route('/orfaos')
-@login_obrigatorio
 def exibir_orfaos():
     ordem = request.args.get('ordem', 'servidor')
     forcar_atualizacao = request.args.get('atualizar') == '1'
@@ -4394,7 +4405,6 @@ def exibir_orfaos():
     )
 
 @bancos_bp.route('/historico')
-@login_obrigatorio
 def exibir_historico():
     servidores_selecionados = request.args.getlist('servidores')
     data_inicio = request.args.get('data_inicio', '').strip()
@@ -4516,7 +4526,6 @@ def exibir_historico():
     )
 
 @bancos_bp.route('/api/historico')
-@login_obrigatorio
 def api_historico():
     conn = sqlite3.connect(DB_HISTORICO)
     cursor = conn.cursor()

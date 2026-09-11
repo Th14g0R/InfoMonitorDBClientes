@@ -40,3 +40,37 @@ permanecer como `.nome.fdb.<identificador>.upload`, sem substituir o banco.
 
 Execute `python -m unittest discover -s tests -v` para validar as proteções em
 um banco temporário, sem usar o `.env` ou os bancos locais.
+
+## Visualização pública e gestão
+
+As páginas de servidores, todos os bancos, aliases inativos, arquivos órfãos,
+histórico de disco, backups FTP e horários permitem consulta sem login.
+Busca, filtros, detalhes e cópia de CNAME continuam disponíveis aos visitantes.
+O menu **Gerenciar** e os controles de alteração aparecem somente para usuários
+autenticados com a permissão correspondente. As rotas administrativas também
+validam a sessão no servidor; ocultar os botões não é a única proteção.
+
+## Horários e cobertura
+
+`/horarios` é público para consulta. Cadastro, edição, escalas, ausências e trocas
+continuam exigindo sessão ativa com permissão de horários ou acesso Master.
+O antigo parâmetro `PUBLIC_HORARIOS` não é mais utilizado.
+
+Cadastro e edição oferecem as equipes Amarela, Verde, Estágio e Sem Equipe,
+jornada da semana de 08:00 às 12:00 e participação aos sábados **Nenhum**.
+Essa opção impede novas inclusões em escalas, inclusive manuais; escalas já
+registradas são preservadas e devem ser revistas se a disponibilidade mudar.
+
+Em **Trocar horários em uma data**, as jornadas dos dois funcionários são
+trocadas somente no dia informado. Aos sábados, são usados os turnos da escala;
+quem estiver de folga assume o turno do titular. A cobertura considera as trocas,
+os ajustes da escala e as ausências. Domingo não utiliza a jornada da semana.
+O histórico informa os horários anteriores e posteriores, com filtro próprio de
+data. Registros antigos são mantidos como histórico, sem reaplicação automática.
+Sábados com trocas ou ajustes registrados não podem ser regenerados automaticamente.
+
+Ao iniciar esta versão sobre um banco anterior, o sistema cria uma cópia SQLite
+em `backups/sistema-antes-ajustes-horarios-<data-hora>.db`, junto ao banco, antes
+da migração de horários. O processo adiciona campos e tabelas e preserva os dados.
+Atualize somente o código em produção; não copie o `sistema.db` de testes sobre
+o banco de produção. Essa cópia de migração não substitui backups periódicos.

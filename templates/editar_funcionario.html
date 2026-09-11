@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Editar funcionário</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
+    <script src="{{ url_for('static', filename='ui.js') }}" defer></script>
+    <style>
+        body { font: 15px 'Segoe UI', sans-serif; color: #1e293b; background: #f8fafc; padding: 20px; }
+        main { max-width: 760px; margin: 24px auto; padding: 24px; background: white; border: 1px solid #e2e8f0; border-radius: 10px; }
+        form { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px; }
+        .acoes { grid-column: 1 / -1; display: flex; align-items: center; gap: 18px; }
+        button { background: #2563eb; color: white; border: 0; border-radius: 6px; padding: 12px 18px; cursor: pointer; }
+        a { color: #2563eb; }
+    </style>
+</head>
+<body>
+<main>
+    <h2>Editar funcionário</h2>
+    <p>Altere a equipe, jornada e participação aos sábados.</p>
+    <form action="{{ url_for('horarios.salvar_funcionario') }}" method="POST" enctype="multipart/form-data">
+        {% include 'campos_funcionario.html' %}
+        <p class="acoes">As escalas já registradas são preservadas. Revise as datas futuras se a disponibilidade mudar.</p>
+        <div class="acoes"><button type="submit">Salvar alterações</button><a href="/horarios#secao-equipe">Cancelar</a></div>
+    </form>
+</main>
+</body>
+</html>
