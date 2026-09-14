@@ -9,6 +9,9 @@ $defaultDir = 'C:\Tomcat 9.0\webapps\InfoMonitorDBClientes'
 $defaultService = 'InfoMonitorDBClientes'
 $entryPoint = 'InfoMonitorDBClientes.py'
 $serviceToRecover = $null
+$env:GIT_TERMINAL_PROMPT = '0'
+$env:GCM_INTERACTIVE = 'Never'
+$env:GIT_ASKPASS = 'echo'
 
 function Write-Title([string]$Text) {
     Write-Host "`n============================================================================" -ForegroundColor Cyan
@@ -37,7 +40,10 @@ function Get-SafeTarget([string]$Path) {
     if (-not $Path) { throw 'Nenhuma pasta foi selecionada.' }
     $full = [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
     $root = [IO.Path]::GetPathRoot($full).TrimEnd('\', '/')
-    if ($full -eq $root -or $full -match '^(?i:C:\Windows|C:\Program Files(?: \(x86\))?)$') {
+    $protectedPaths = @($env:windir, $env:ProgramFiles, ${env:ProgramFiles(x86)}) |
+        Where-Object { $_ } |
+        ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\', '/') }
+    if ($full -eq $root -or $protectedPaths -contains $full) {
         throw "Pasta de destino insegura: $full"
     }
     return $full
@@ -53,19 +59,47 @@ function Get-AppService([string]$Target) {
 function Get-LocalVersion([string]$Target) {
     $marker = Join-Path $Target '.infomonitor-version'
     if (Test-Path -LiteralPath $marker -PathType Leaf) {
-        return (Get-Content -LiteralPath $marker -Raw).Trim()
+        $value = (Get-Content -LiteralPath $marker -Raw).Trim()
+        if ($value -match '^[0-9a-fA-F]{40}$') { return $value.ToLowerInvariant() }
     }
-    if (Test-Path -LiteralPath (Join-Path $Target '.git') -PathType Container) {
-        $value = & git -C $Target rev-parse HEAD 2>$null
-        if ($LASTEXITCODE -eq 0) { return ($value | Select-Object -First 1).Trim() }
+    $gitDir = Join-Path $Target '.git'
+    if (Test-Path -LiteralPath $gitDir -PathType Container) {
+        $previousErrorPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'SilentlyContinue'
+        try {
+            $value = & git "--git-dir=$gitDir" "--work-tree=$Target" rev-parse --verify HEAD 2>$null
+            if ($LASTEXITCODE -eq 0 -and $value) {
+                $commit = ($value | Select-Object -First 1).Trim()
+                if ($commit -match '^[0-9a-fA-F]{40}$') { return $commit.ToLowerInvariant() }
+            }
+        } finally {
+            $ErrorActionPreference = $previousErrorPreference
+        }
     }
     return $null
 }
 
 function Get-RemoteVersion {
-    $line = & git ls-remote $repoUrl "refs/heads/$branch" 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $line) { throw 'Nao foi possivel consultar a versao no GitHub.' }
-    return (($line | Select-Object -First 1) -split '\s+')[0]
+    $line = $null
+    $previousErrorPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+        $line = & git -c core.askPass= -c credential.interactive=never ls-remote $repoUrl "refs/heads/$branch" 2>$null
+    } finally {
+        $ErrorActionPreference = $previousErrorPreference
+    }
+    if ($LASTEXITCODE -eq 0 -and $line) {
+        $commit = (($line | Select-Object -First 1) -split '\s+')[0]
+        if ($commit -match '^[0-9a-fA-F]{40}$') { return $commit.ToLowerInvariant() }
+    }
+
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $headers = @{ 'User-Agent' = 'InfoMonitorDBClientes-Installer'; 'Accept' = 'application/vnd.github+json' }
+        $response = Invoke-RestMethod -Uri 'https://api.github.com/repos/Th14g0R/InfoMonitorDBClientes/commits/main' -Headers $headers -TimeoutSec 15
+        if ($response.sha -match '^[0-9a-fA-F]{40}$') { return $response.sha.ToLowerInvariant() }
+    } catch {}
+    throw 'Nao foi possivel consultar a versao no GitHub. Verifique internet, proxy e acesso ao repositorio.'
 }
 
 function New-Backup([string]$Target) {
@@ -245,7 +279,7 @@ try {
     $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("InfoMonitorDBClientes-{0}" -f [Guid]::NewGuid().ToString('N'))
     try {
         Write-Title 'Preparando arquivos'
-        & git clone --quiet --depth 1 --branch $branch $repoUrl $tempRoot
+        & git -c core.askPass= -c credential.interactive=never clone --quiet --depth 1 --branch $branch $repoUrl $tempRoot
         if ($LASTEXITCODE -ne 0) { throw 'Falha ao baixar o repositorio do GitHub.' }
         $downloadedVersion = (& git -C $tempRoot rev-parse HEAD).Trim()
         if ($downloadedVersion -ne $remoteVersion) { throw 'A versao baixada nao corresponde a versao consultada.' }
