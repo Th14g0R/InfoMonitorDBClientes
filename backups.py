@@ -28,10 +28,14 @@ def interpretar_status_backups(texto):
     padrao_cliente = re.compile(
         r'^O cliente (.+?) possui o arquivo criado (?:a|há) (.*?)\s*-\s*status\s*'
         r'\[\s*(OK|ERRO|ATRASADO)\s*\]\s*(.*?)\.?$', re.I)
+    padrao_atrasado = re.compile(
+        r'^O cliente (.+?) est[aá] (.*?) sem bkp\s*-\s*status\s*'
+        r'(?:\[\s*)?(?:ERRO|ATRASADO)(?:\s*\])?\s*(.*?)\.?$', re.I)
     padrao_sem_arquivo = re.compile(r'^O caminho (.*?) N[ÃA]O possui arquivo bkp compactado', re.I)
     for linha in texto.splitlines():
         linha = linha.strip()
         cliente = padrao_cliente.match(linha)
+        atrasado_sem_bkp = padrao_atrasado.match(linha)
         sem_arquivo = padrao_sem_arquivo.match(linha)
         if cliente:
             alias, idade, status, timestamp = cliente.groups()
@@ -41,6 +45,11 @@ def interpretar_status_backups(texto):
             resultado['clientes'].append(dict(
                 alias=alias.strip(), status='ATRASADO' if atrasado else status.upper(),
                 idade=idade.strip(), timestamp=timestamp.strip(), caminho=None))
+        elif atrasado_sem_bkp:
+            alias, idade, timestamp = atrasado_sem_bkp.groups()
+            resultado['clientes'].append(dict(
+                alias=alias.strip(), status='ATRASADO', idade=idade.strip(),
+                timestamp=timestamp.strip(), caminho=None))
         elif sem_arquivo:
             caminho = sem_arquivo[1].strip()
             resultado['clientes'].append(dict(

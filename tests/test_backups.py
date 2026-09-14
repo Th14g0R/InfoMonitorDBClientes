@@ -4,6 +4,23 @@ from backups import interpretar_status_backups
 
 
 class BackupsTest(unittest.TestCase):
+    def test_formato_real_do_servidor_inclui_erros_como_atrasados(self):
+        resultado = interpretar_status_backups('''
+O cliente casabonita-1887 possui o arquivo criado a menos de 1 dia - status [OK] 2026-09-13 22:04:48.
+O cliente ceramicajscunha-1744 esta a mais de 1 dia sem bkp - status ERRO 2026-09-11 16:43:18.
+O cliente lanehomecenter-1526 está a mais de 1 dia sem bkp - status ERRO 2026-09-12 12:10:32.
+Total de clientes OK --> [ 1 ]
+Total de clientes ERRO --> [ 2 ]
+''')
+        self.assertEqual(len(resultado['clientes']), 3)
+        self.assertEqual(
+            (resultado['total_ok'], resultado['total_atrasado'], resultado['total_erro']),
+            (1, 2, 0))
+        self.assertEqual(resultado['clientes'][1], {
+            'alias': 'ceramicajscunha-1744', 'status': 'ATRASADO',
+            'idade': 'a mais de 1 dia', 'timestamp': '2026-09-11 16:43:18',
+            'caminho': None})
+
     def test_atrasado_com_erro_e_formatacao_html(self):
         resultado = interpretar_status_backups(
             '<pre><font color="red">O cliente loja.atrasada possui o arquivo criado a '
