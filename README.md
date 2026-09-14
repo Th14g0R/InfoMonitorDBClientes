@@ -74,3 +74,25 @@ em `backups/sistema-antes-ajustes-horarios-<data-hora>.db`, junto ao banco, ante
 da migração de horários. O processo adiciona campos e tabelas e preserva os dados.
 Atualize somente o código em produção; não copie o `sistema.db` de testes sobre
 o banco de produção. Essa cópia de migração não substitui backups periódicos.
+
+## Instalação e atualização no Windows
+
+Execute `INSTALAR_OU_ATUALIZAR.bat` como ponto de entrada. O assistente procura
+a instalação padrão em `C:\Tomcat 9.0\webapps\InfoMonitorDBClientes`, consulta o
+commit atual da branch `main` no GitHub e permite manter, instalar ou atualizar.
+Ele exige Git for Windows e Python 3 instalados.
+
+Quando encontra uma instalação, o assistente mostra o caminho e pede confirmação,
+permitindo selecionar ou digitar outra pasta. Se não encontrar, entra no fluxo de
+instalação limpa e permite escolher graficamente ou informar o diretório de destino.
+
+Antes de atualizar, o serviço é interrompido e uma cópia ZIP é gravada na pasta
+`InfoMonitorDBClientes-backups`, ao lado da instalação. Apenas arquivos
+controlados pelo Git são copiados; `.env`, bancos SQLite, `known_hosts`, fotos,
+backups e demais dados locais são preservados. O commit aplicado fica registrado
+localmente em `.infomonitor-version` para as próximas comparações.
+
+O serviço Windows usa NSSM. Mantenha `nssm.exe` ao lado do BAT, disponível no
+`PATH` ou na pasta instalada. Sem ele, o assistente instala e atualiza os arquivos,
+mas informa que o serviço não pôde ser criado. Instalações já registradas pelo
+NSSM são detectadas, reconfiguradas para o ambiente virtual `.venv` e reiniciadas.

@@ -37,6 +37,9 @@ static/fotos/*
 !static/fotos/site.webmanifest
 old/
 nssm.exe
+.infomonitor-version
+servico-saida.log
+servico-erro.log
 *.log
 *.bak
 *.zip
