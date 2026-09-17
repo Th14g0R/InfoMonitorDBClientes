@@ -67,6 +67,37 @@ class SegurancaTest(unittest.TestCase):
         other = self.app.test_client()
         self.assertEqual(other.post('/admin/logout', data={'csrf_token': self.token}).status_code, 400)
 
+    def test_nascimento_cadastro_edicao_e_cobertura(self):
+        with closing(self.horarios.get_db()) as conn:
+            cargo = conn.execute('SELECT id FROM cargos LIMIT 1').fetchone()[0]
+            jornada = conn.execute("SELECT id FROM jornadas WHERE tipo = 'Semana' LIMIT 1").fetchone()[0]
+        dados = dict(csrf_token=self.token, nome='Aniversariante teste', prioridade='P2',
+                     cargo_id=cargo, jornada_id=jornada, equipe_sabado='Verde', tipo_sabado='nenhum',
+                     data_nascimento='2000-09-17')
+        for invalida in ('2000-02-30', '9999-01-01', '17/09/2000'):
+            self.assertEqual(self.client.post('/horarios/salvar_funcionario',
+                data={**dados, 'data_nascimento': invalida}).status_code, 400)
+        self.assertEqual(self.client.post('/horarios/salvar_funcionario', data=dados).status_code, 302)
+        with closing(self.horarios.get_db()) as conn:
+            pessoa = conn.execute('SELECT id, data_nascimento FROM funcionarios WHERE nome = ?',
+                                  (dados['nome'],)).fetchone()
+        self.assertEqual(pessoa['data_nascimento'], '2000-09-17')
+        for dia, esperado in (('2026-09-17', True), ('2026-09-18', False)):
+            presentes = [at for slot in self.horarios.calcular_cobertura_diaria(dia)
+                         for at in slot['atendentes'] if at['nome'] == dados['nome']]
+            self.assertTrue(presentes)
+            self.assertTrue(all(at['aniversariante'] == esperado for at in presentes))
+        pagina = self.client.get('/horarios?data_cobertura=2026-09-17').get_data(as_text=True)
+        self.assertIn('foto-cobertura aniversariante', pagina)
+        self.assertIn('id="foto-ampliada"', pagina)
+        self.assertIn('2000-09-17', self.client.get(
+            f"/horarios/editar_funcionario/{pessoa['id']}").get_data(as_text=True))
+        self.assertEqual(self.client.post('/horarios/salvar_funcionario',
+            data={**dados, 'id': pessoa['id'], 'data_nascimento': ''}).status_code, 302)
+        with closing(self.horarios.get_db()) as conn:
+            self.assertIsNone(conn.execute('SELECT data_nascimento FROM funcionarios WHERE id = ?',
+                                          (pessoa['id'],)).fetchone()[0])
+
     def test_csrf_form_and_json(self):
         response = self.client.post('/horarios/novo_cargo', data={
             'csrf_token': self.token, 'nome_cargo': 'Teste CSRF',

@@ -5,6 +5,10 @@
     <input id="func-nome" name="nome" value="{{ funcionario.get('nome', '') }}" required maxlength="150">
 </div>
 <div class="campo-funcionario">
+    <label for="func-nascimento">Data de nascimento (opcional)</label>
+    <input id="func-nascimento" type="date" name="data_nascimento" value="{{ funcionario.get('data_nascimento') or '' }}" max="{{ hoje }}">
+</div>
+<div class="campo-funcionario">
     <label for="func-foto">Foto do colaborador</label>
     <input id="func-foto" type="file" name="foto" accept="image/png,image/jpeg,image/gif,image/webp">
 </div>

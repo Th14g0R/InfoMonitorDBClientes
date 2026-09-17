@@ -42,7 +42,7 @@ horarios_bp.add_app_template_global(pode_editar_horarios, name='pode_editar_hora
 
 @horarios_bp.context_processor
 def opcoes_funcionario():
-    return dict(equipes=EQUIPES, tipos_sabado=TIPOS_SABADO)
+    return dict(equipes=EQUIPES, tipos_sabado=TIPOS_SABADO, hoje=date.today().isoformat())
 
 
 def init_db():
@@ -92,6 +92,7 @@ def init_db():
         if 'prioridade' not in colunas_func: cursor.execute("ALTER TABLE funcionarios ADD COLUMN prioridade TEXT DEFAULT 'P1'")
         if 'foto_url' not in colunas_func: cursor.execute("ALTER TABLE funcionarios ADD COLUMN foto_url TEXT DEFAULT ''")
         if 'ativo' not in colunas_func: cursor.execute("ALTER TABLE funcionarios ADD COLUMN ativo INTEGER DEFAULT 1")
+        if 'data_nascimento' not in colunas_func: cursor.execute("ALTER TABLE funcionarios ADD COLUMN data_nascimento TEXT")
 
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS escala_sabado (
@@ -198,6 +199,7 @@ def obter_proximo_sabado():
     return proximo_sabado.strftime('%Y-%m-%d')
 
 def calcular_cobertura_diaria(data_referencia=None):
+    data_referencia = data_referencia or date.today().isoformat()
     with closing(sqlite3.connect(DB_NAME)) as conn, conn:
         cursor = conn.cursor()
         
@@ -210,6 +212,9 @@ def calcular_cobertura_diaria(data_referencia=None):
             ausencias_lista = cursor.fetchall()
 
         funcs = intervalos_cobertura(conn, data_referencia or date.today().isoformat())
+        aniversariantes = {row[0] for row in conn.execute(
+            "SELECT id FROM funcionarios WHERE strftime('%m-%d', data_nascimento) = ?",
+            (data_referencia[5:],))}
 
     horarios_grade = []
     minutos_inicio = hora_para_minutos("07:30")
@@ -242,7 +247,8 @@ def calcular_cobertura_diaria(data_referencia=None):
                 continue
                 
             if any(hora_para_minutos(inicio) <= m_start and m_end <= hora_para_minutos(fim) for inicio, fim in intervalos):
-                atendentes.append({'nome': nome, 'foto': foto or '/static/avatar-padrao.svg'})
+                atendentes.append({'nome': nome, 'foto': foto or '/static/avatar-padrao.svg',
+                                   'aniversariante': f_id in aniversariantes})
 
         qtd = len(atendentes)
         alerta = "normal"
@@ -333,6 +339,14 @@ HTML_INTERFACE = """
         .avatar-item { position: relative; display: inline-block; }
         .avatar-img { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; border: 1px solid #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.2); transition: transform 0.2s ease, z-index 0.2s; cursor: pointer; }
         .avatar-item:hover .avatar-img { transform: scale(2.5); z-index: 100; position: relative; }
+        .foto-cobertura { padding: 0; border: 0; background: transparent; cursor: zoom-in; line-height: 0; }
+        .foto-cobertura:hover .avatar-img { transform: none; }
+        .foto-cobertura:focus-visible { outline: 3px solid #2563eb; outline-offset: 3px; border-radius: 50%; }
+        .foto-cobertura.aniversariante .avatar-img { border: 2px solid #d97706; box-shadow: 0 0 0 2px #fde68a; }
+        .aniversario-icone { position: absolute; bottom: -3px; right: -3px; font-size: 14px; line-height: 1; pointer-events: none; }
+        #foto-ampliada { max-width: min(90vw, 720px); padding: 20px; border: 0; border-radius: 12px; color: var(--cor-texto); background: var(--cor-superficie); }
+        #foto-ampliada::backdrop { background: rgba(0, 0, 0, .75); }
+        #foto-ampliada img { display: block; max-width: 100%; max-height: 75vh; margin: 12px auto 0; object-fit: contain; }
 
         .grid-escala { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 15px; }
         .coluna-turno { background: #f8fafc; border: 1px solid var(--cor-borda); border-radius: 6px; min-height: 180px; padding: 8px; }
@@ -642,9 +656,10 @@ HTML_INTERFACE = """
                     <div class="avatars-container">
                         {% if c.atendentes %}
                             {% for at in c.atendentes %}
-                                <div class="avatar-item" title="{{ at.nome }}">
+                                <button type="button" class="avatar-item foto-cobertura{% if at.aniversariante %} aniversariante{% endif %}" title="{{ at.nome }}{% if at.aniversariante %} — Aniversariante do dia! 🎂{% endif %}" aria-label="Ampliar foto de {{ at.nome }}{% if at.aniversariante %}, aniversariante do dia{% endif %}">
                                     <img src="{{ at.foto }}" class="avatar-img" alt="{{ at.nome }}">
-                                </div>
+                                    {% if at.aniversariante %}<span class="aniversario-icone" aria-hidden="true">🎂</span>{% endif %}
+                                </button>
                             {% endfor %}
                         {% else %}
                             <span style="color: #78281f; font-size:0.7em; font-weight: bold;">⚠️ VAZIO</span>
@@ -742,6 +757,7 @@ HTML_INTERFACE = """
                     <th onclick="ordenarTabela('tabela-equipe', 4)" style="cursor: pointer;">Jornada / Horário ↕</th>
                     <th onclick="ordenarTabela('tabela-equipe', 5)" style="cursor: pointer;">Equipe ↕</th>
                     <th onclick="ordenarTabela('tabela-equipe', 6)" style="cursor: pointer;">Tipo no Sábado ↕</th>
+                    <th>Data de nascimento</th>
                     {% if pode_editar_horarios() %} <th class="col-acoes">Ações</th> {% endif %}
                 </tr>
             </thead>
@@ -775,6 +791,7 @@ HTML_INTERFACE = """
                         {% elif f[5] == 1 %}🛠️ Apoio Fixo (8h-12h)
                         {% else %}🔄 Rodízio Normal{% endif %}
                     </td>
+                    <td>{{ f[13] or 'Não informada' }}</td>
                     {% if pode_editar_horarios() %}
                     <td class="col-acoes">
                         <div class="acoes-container">
@@ -919,7 +936,28 @@ HTML_INTERFACE = """
     </div>
     {% endif %}
 
+    <dialog id="foto-ampliada" aria-labelledby="foto-ampliada-nome">
+        <form method="dialog"><button type="submit" class="btn" autofocus>Fechar ✕</button></form>
+        <h3 id="foto-ampliada-nome"></h3>
+        <img alt="">
+    </dialog>
     <script>
+        const fotoDialog = document.getElementById('foto-ampliada');
+        document.querySelectorAll('.foto-cobertura').forEach(botao => {
+            botao.addEventListener('click', () => {
+                const origem = botao.querySelector('img');
+                const ampliada = fotoDialog.querySelector('img');
+                ampliada.src = origem.src;
+                ampliada.alt = origem.alt;
+                document.getElementById('foto-ampliada-nome').textContent = botao.title;
+                fotoDialog.showModal();
+            });
+        });
+        fotoDialog.addEventListener('click', event => {
+            const rect = fotoDialog.getBoundingClientRect();
+            if (event.target === fotoDialog && (event.clientX < rect.left || event.clientX > rect.right ||
+                event.clientY < rect.top || event.clientY > rect.bottom)) fotoDialog.close();
+        });
         document.addEventListener("DOMContentLoaded", function() {
             var scrollpos = localStorage.getItem('scrollpos');
             if (scrollpos && !window.location.hash) {
@@ -1085,7 +1123,8 @@ def ver_horarios():
         cursor = conn.cursor()
         
         cursor.execute("""
-            SELECT f.id, f.nome, f.cargo_id, f.jornada_id, f.equipe_sabado, f.eh_apoiador_sabado, c.nome, j.descricao, f.prioridade, f.eh_sobreaviso, f.foto_url, f.ativo, f.nao_trabalha_sabado
+            SELECT f.id, f.nome, f.cargo_id, f.jornada_id, f.equipe_sabado, f.eh_apoiador_sabado, c.nome, j.descricao, f.prioridade, f.eh_sobreaviso, f.foto_url, f.ativo, f.nao_trabalha_sabado,
+                   strftime('%d/%m/%Y', f.data_nascimento)
             FROM funcionarios f
             LEFT JOIN cargos c ON f.cargo_id = c.id
             LEFT JOIN jornadas j ON f.jornada_id = j.id
@@ -1184,6 +1223,13 @@ def salvar_funcionario():
     prioridade = request.form.get('prioridade', '')
     equipe = request.form.get('equipe_sabado', '')
     tipo = request.form.get('tipo_sabado', '')
+    nascimento = request.form.get('data_nascimento', '').strip()
+    if nascimento:
+        try:
+            if validar_data(nascimento) > date.today():
+                raise ValueError
+        except ValueError:
+            return 'Informe uma data de nascimento válida, que não seja futura.', 400
     try:
         func_id = int(request.form['id']) if request.form.get('id') else None
         cargo = int(request.form.get('cargo_id', ''))
@@ -1216,15 +1262,15 @@ def salvar_funcionario():
             foto.save(os.path.join(UPLOAD_FOLDER, nome_foto))
             foto_url = f'/static/fotos/{nome_foto}'
         valores = (nome, prioridade, cargo, jornada, equipe, int(tipo == 'apoio'),
-                   int(tipo == 'sobreaviso'), int(tipo == 'nenhum'), ativo)
+                   int(tipo == 'sobreaviso'), int(tipo == 'nenhum'), ativo, nascimento or None)
         if func_id:
             conn.execute('''UPDATE funcionarios SET nome=?, prioridade=?, cargo_id=?, jornada_id=?,
                 equipe_sabado=?, eh_apoiador_sabado=?, eh_sobreaviso=?, nao_trabalha_sabado=?, ativo=?,
-                foto_url=COALESCE(?, foto_url) WHERE id=?''', (*valores, foto_url, func_id))
+                data_nascimento=?, foto_url=COALESCE(?, foto_url) WHERE id=?''', (*valores, foto_url, func_id))
         else:
             conn.execute('''INSERT INTO funcionarios (nome, prioridade, cargo_id, jornada_id,
-                equipe_sabado, eh_apoiador_sabado, eh_sobreaviso, nao_trabalha_sabado, ativo, foto_url)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (*valores, foto_url or ''))
+                equipe_sabado, eh_apoiador_sabado, eh_sobreaviso, nao_trabalha_sabado, ativo, data_nascimento, foto_url)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (*valores, foto_url or ''))
     return redirect(url_for('horarios.ver_horarios') + '#secao-equipe')
 
 
