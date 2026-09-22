@@ -67,6 +67,24 @@ class SegurancaTest(unittest.TestCase):
         other = self.app.test_client()
         self.assertEqual(other.post('/admin/logout', data={'csrf_token': self.token}).status_code, 400)
 
+    def test_filtro_ausencias_e_aniversario(self):
+        with closing(self.horarios.get_db()) as conn, conn:
+            pessoa = conn.execute("INSERT INTO funcionarios (nome, data_nascimento) VALUES ('Filtro teste', '1987-12-17')").lastrowid
+            conn.execute("INSERT INTO ausencias (funcionario_id, motivo, data_inicio, data_fim) VALUES (?, 'Motivo exato teste', '2001-01-01', '2001-01-31')", (pessoa,))
+        resposta = self.client.get('/horarios')
+        self.assertEqual(resposta.status_code, 200)
+        self.assertIn('Aniversário ↕', resposta.text)
+        self.assertIn('>17/12</td>', resposta.text)
+        self.assertNotIn('>01/01/2001</td>', resposta.text)
+        resposta = self.client.get('/horarios', query_string={'ausencia_motivo': 'Motivo exato teste'})
+        self.assertIn('>01/01/2001</td>', resposta.text)
+        resposta = self.client.get('/horarios?ausencia_inicio=2001-01-15&ausencia_fim=2001-01-20')
+        self.assertIn('>01/01/2001</td>', resposta.text)
+        self.assertEqual(self.client.get('/horarios?ausencia_inicio=invalid').status_code, 400)
+        with closing(self.horarios.get_db()) as conn, conn:
+            conn.execute('DELETE FROM ausencias WHERE funcionario_id = ?', (pessoa,))
+            conn.execute('DELETE FROM funcionarios WHERE id = ?', (pessoa,))
+
     def test_nascimento_cadastro_edicao_e_cobertura(self):
         with closing(self.horarios.get_db()) as conn:
             cargo = conn.execute('SELECT id FROM cargos LIMIT 1').fetchone()[0]

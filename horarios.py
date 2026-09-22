@@ -9,7 +9,7 @@ from werkzeug.utils import secure_filename
 from seguranca import csrf_token
 from escalas import (EQUIPES, TIPOS_SABADO, FAIXAS_SABADO, preservar_banco_antes_migracao,
                      migrar_horarios, validar_data, aplicar_troca, intervalos_cobertura,
-                     validar_participante_sabado, ajustar_escala)
+                     validar_participante_sabado, ajustar_escala, registrar_substituicao)
 
 horarios_bp = Blueprint('horarios', __name__, template_folder='templates')
 DB_NAME = 'sistema.db'
@@ -327,6 +327,9 @@ HTML_INTERFACE = """
 
         .tr-inativo { opacity: 0.6; background-color: #f8fafc; }
 
+        .lista-rolagem { max-height: 360px; overflow: auto; margin-top: 15px; }
+        .lista-rolagem table { margin-top: 0; }
+        .lista-rolagem thead th { position: sticky; top: 0; z-index: 1; background: var(--cor-superficie, #fff); }
         .grid-cobertura { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin-top: 15px; }
         .card-cobertura-slot { border-radius: 6px; border: 1px solid var(--cor-borda); padding: 8px; text-align: center; background: var(--cor-superficie); }
         .cov-normal { border-top: 4px solid var(--cor-sucesso); background: #f0fdf4; }
@@ -674,7 +677,7 @@ HTML_INTERFACE = """
     <div class="card" id="secao-ausencias">
         <div style="display: flex; justify-content: space-between; align-items: center;">
             <h3 style="margin: 0;">🏖️ Ausências, Férias e Licenças</h3>
-            <span style="font-size: 0.85em; color: #666; font-weight: bold;">📅 Mês Vigente</span>
+            <span style="font-size: 0.85em; color: #666; font-weight: bold;">{{ 'Resultados do filtro' if filtro_ausencias else 'Ausências vigentes hoje' }}</span>
         </div>
 
         {% if pode_editar_horarios() %}
@@ -705,7 +708,17 @@ HTML_INTERFACE = """
             </form>
         {% endif %}
 
-        <table>
+        <form action="/horarios#secao-ausencias" method="GET" class="form-grid">
+            <label>Início do período <input type="date" name="ausencia_inicio" value="{{ ausencia_inicio }}"></label>
+            <label>Fim do período <input type="date" name="ausencia_fim" value="{{ ausencia_fim }}"></label>
+            <label>Motivo <select name="ausencia_motivo">
+                <option value="">Todos os motivos</option>
+                {% for motivo in motivos_ausencias %}<option value="{{ motivo }}" {% if motivo == ausencia_motivo %}selected{% endif %}>{{ motivo }}</option>{% endfor %}
+            </select></label>
+            <button class="btn btn-bancos" type="submit">Filtrar ausências</button>
+            <a href="/horarios#secao-ausencias">Limpar filtros</a>
+        </form>
+        <div class="lista-rolagem" tabindex="0" role="region" aria-label="Lista com rolagem"><table>
             <thead>
                 <tr>
                     <th>Técnico</th>
@@ -737,17 +750,17 @@ HTML_INTERFACE = """
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="7" style="text-align: center; color: #777;">Nenhuma ausência registrada para o mês vigente.</td>
+                    <td colspan="7" style="text-align: center; color: #777;">Nenhuma ausência encontrada para este período ou motivo.</td>
                 </tr>
                 {% endfor %}
             </tbody>
-        </table>
+        </table></div>
     </div>
 
     <!-- 4. EQUIPE E JORNADAS CADASTRADAS -->
     <div class="card" id="secao-equipe">
         <h3>👥 Equipe e Jornadas Cadastradas</h3>
-        <table id="tabela-equipe">
+        <div class="lista-rolagem" tabindex="0" role="region" aria-label="Lista com rolagem"><table id="tabela-equipe">
             <thead>
                 <tr>
                     <th onclick="ordenarTabela('tabela-equipe', 0)" style="cursor: pointer;">Status ↕</th>
@@ -757,7 +770,7 @@ HTML_INTERFACE = """
                     <th onclick="ordenarTabela('tabela-equipe', 4)" style="cursor: pointer;">Jornada / Horário ↕</th>
                     <th onclick="ordenarTabela('tabela-equipe', 5)" style="cursor: pointer;">Equipe ↕</th>
                     <th onclick="ordenarTabela('tabela-equipe', 6)" style="cursor: pointer;">Tipo no Sábado ↕</th>
-                    <th>Data de nascimento</th>
+                    <th onclick="ordenarTabela('tabela-equipe', 7)" style="cursor:pointer;">Aniversário ↕</th>
                     {% if pode_editar_horarios() %} <th class="col-acoes">Ações</th> {% endif %}
                 </tr>
             </thead>
@@ -791,7 +804,7 @@ HTML_INTERFACE = """
                         {% elif f[5] == 1 %}🛠️ Apoio Fixo (8h-12h)
                         {% else %}🔄 Rodízio Normal{% endif %}
                     </td>
-                    <td>{{ f[13] or 'Não informada' }}</td>
+                    <td data-sort="{{ (f[13][3:5] ~ f[13][:2]) if f[13] else '9999' }}">{{ f[13] or 'Não informada' }}</td>
                     {% if pode_editar_horarios() %}
                     <td class="col-acoes">
                         <div class="acoes-container">
@@ -803,7 +816,7 @@ HTML_INTERFACE = """
                 </tr>
                 {% endfor %}
             </tbody>
-        </table>
+        </table></div>
 
         {% if pode_editar_horarios() %}
             <h4 style="margin-top: 20px;">➕ Cadastrar Novo Funcionário</h4>
@@ -848,8 +861,28 @@ HTML_INTERFACE = """
             <p style="color:#64748b;font-size:.85em;">A troca vale apenas para essa data. Aos sábados, se o segundo funcionário estiver de folga, ele assume o turno do primeiro; se ambos estiverem escalados, os turnos são trocados. A cobertura usa os horários resultantes e mantém as ausências registradas.</p>
         {% endif %}
 
+        <h4>Substituição de atribuições por período (segunda a sexta)</h4>
+        <p>O substituto assume o cargo e a jornada do titular no período informado. Ao terminar, volta automaticamente às atribuições habituais. Cadastre também a ausência do titular em Ausências. Os sábados seguem a escala normal.</p>
+        {% if pode_editar_horarios() %}
+        <form action="/horarios/substituicao_periodo" method="POST" class="form-grid">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <label>Titular <select name="titular_id" required><option value="">Selecione...</option>{% for f in funcionarios if f[11] == 1 %}<option value="{{ f[0] }}">{{ f[1] }}</option>{% endfor %}</select></label>
+            <label>Substituto <select name="substituto_id" required><option value="">Selecione...</option>{% for f in funcionarios if f[11] == 1 %}<option value="{{ f[0] }}">{{ f[1] }}</option>{% endfor %}</select></label>
+            <label>Início <input type="date" name="data_inicio" required></label>
+            <label>Fim (inclusive) <input type="date" name="data_fim" required></label>
+            <input name="motivo" placeholder="Motivo da substituição" maxlength="500" required>
+            <button class="btn btn-admin" type="submit">Cadastrar substituição</button>
+        </form>
+        {% endif %}
+        <div class="lista-rolagem" tabindex="0" role="region" aria-label="Substituições por período">
+        <table><thead><tr><th>Titular</th><th>Substituto</th><th>Início</th><th>Fim</th><th>Motivo</th>{% if pode_editar_horarios() %}<th>Ações</th>{% endif %}</tr></thead><tbody>
+        {% for s in substituicoes %}<tr><td>{{ s[1] }}</td><td>{{ s[2] }}</td><td>{{ s[3][8:10] }}/{{ s[3][5:7] }}/{{ s[3][:4] }}</td><td>{{ s[4][8:10] }}/{{ s[4][5:7] }}/{{ s[4][:4] }}</td><td>{{ s[5] }}</td>
+        {% if pode_editar_horarios() %}<td><form action="/horarios/excluir_substituicao/{{ s[0] }}" method="POST"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" onclick="return confirm('Excluir esta substituição?')">Excluir</button></form></td>{% endif %}</tr>
+        {% else %}<tr><td colspan="6">Nenhuma substituição cadastrada.</td></tr>{% endfor %}
+        </tbody></table></div>
+
         <h4 style="margin-top: 15px;">Histórico de Trocas Cadastradas</h4>
-        <table>
+        <div class="lista-rolagem" tabindex="0" role="region" aria-label="Lista com rolagem"><table>
             <thead>
                 <tr>
                     <th>Data</th>
@@ -868,7 +901,7 @@ HTML_INTERFACE = """
                 </tr>
                 {% endfor %}
             </tbody>
-        </table>
+        </table></div>
     </div>
 
     <!-- 6. GERENCIAMENTO DE CARGOS E JORNADAS -->
@@ -986,8 +1019,8 @@ HTML_INTERFACE = """
             th.setAttribute("data-ordem", novaDirecao);
 
             linhas.sort((linhaA, linhaB) => {
-                const celulaA = linhaA.children[colunaIndex].innerText.trim();
-                const celulaB = linhaB.children[colunaIndex].innerText.trim();
+                const celulaA = linhaA.children[colunaIndex].dataset.sort ?? linhaA.children[colunaIndex].innerText.trim();
+                const celulaB = linhaB.children[colunaIndex].dataset.sort ?? linhaB.children[colunaIndex].innerText.trim();
 
                 const comparacao = celulaA.localeCompare(celulaB, 'pt-BR', { numeric: true, sensitivity: 'base' });
                 return novaDirecao === "asc" ? comparacao : -comparacao;
@@ -1111,20 +1144,27 @@ def ver_horarios():
         except ValueError:
             pass
 
-    hoje = date.today()
-    primeiro_dia_mes = hoje.replace(day=1).strftime('%Y-%m-%d')
-    if hoje.month == 12:
-        ultimo_dia_mes = hoje.replace(year=hoje.year + 1, month=1, day=1) - timedelta(days=1)
-    else:
-        ultimo_dia_mes = hoje.replace(month=hoje.month + 1, day=1) - timedelta(days=1)
-    ultimo_dia_mes_str = ultimo_dia_mes.strftime('%Y-%m-%d')
+    ausencia_inicio = request.args.get('ausencia_inicio', '').strip()
+    ausencia_fim = request.args.get('ausencia_fim', '').strip()
+    ausencia_motivo = request.args.get('ausencia_motivo', '').strip()
+    filtro_ausencias = bool(ausencia_inicio or ausencia_fim or ausencia_motivo)
+    try:
+        for valor in (ausencia_inicio, ausencia_fim):
+            if valor:
+                validar_data(valor)
+        if ausencia_inicio and ausencia_fim and ausencia_inicio > ausencia_fim:
+            raise ValueError()
+    except ValueError:
+        return 'Informe um período válido.', 400
+    limite_inicio = ausencia_inicio or ('0001-01-01' if filtro_ausencias else date.today().isoformat())
+    limite_fim = ausencia_fim or ('9999-12-31' if filtro_ausencias else date.today().isoformat())
 
     with closing(sqlite3.connect(DB_NAME)) as conn, conn:
         cursor = conn.cursor()
         
         cursor.execute("""
             SELECT f.id, f.nome, f.cargo_id, f.jornada_id, f.equipe_sabado, f.eh_apoiador_sabado, c.nome, j.descricao, f.prioridade, f.eh_sobreaviso, f.foto_url, f.ativo, f.nao_trabalha_sabado,
-                   strftime('%d/%m/%Y', f.data_nascimento)
+                   strftime('%d/%m', f.data_nascimento)
             FROM funcionarios f
             LEFT JOIN cargos c ON f.cargo_id = c.id
             LEFT JOIN jornadas j ON f.jornada_id = j.id
@@ -1132,7 +1172,6 @@ def ver_horarios():
         """)
         funcionarios = cursor.fetchall()
 
-        # EXIBE APENAS AUSÊNCIAS DO MÊS VIGENTE
         cursor.execute("""
             SELECT a.id, f.nome, a.motivo, 
                    strftime('%d/%m/%Y', a.data_inicio), 
@@ -1140,10 +1179,14 @@ def ver_horarios():
                    a.hora_inicio, a.hora_fim
             FROM ausencias a
             JOIN funcionarios f ON f.id = a.funcionario_id
-            WHERE a.data_fim >= ? AND a.data_inicio <= ?
+            WHERE a.data_fim >= ? AND a.data_inicio <= ? AND (? = '' OR a.motivo = ?)
             ORDER BY a.data_inicio DESC
-        """, (primeiro_dia_mes, ultimo_dia_mes_str))
+        """, (limite_inicio, limite_fim, ausencia_motivo, ausencia_motivo))
         ausencias = cursor.fetchall()
+        motivos_ausencias = [r[0] for r in conn.execute('SELECT DISTINCT motivo FROM ausencias ORDER BY motivo')]
+        substituicoes = conn.execute('''SELECT s.id, t.nome, f.nome, s.data_inicio, s.data_fim, s.motivo
+            FROM substituicoes_periodo s JOIN funcionarios t ON t.id = s.titular_id
+            JOIN funcionarios f ON f.id = s.substituto_id ORDER BY s.data_inicio DESC''').fetchall()
         
         cursor.execute("SELECT id, nome FROM cargos ORDER BY nome")
         cargos = cursor.fetchall()
@@ -1207,7 +1250,9 @@ def ver_horarios():
         cor_equipe_dia=cor_equipe_dia,
         trocas=trocas,
         cobertura=cobertura,
-        ausencias=ausencias,
+        ausencias=ausencias, motivos_ausencias=motivos_ausencias,
+        ausencia_inicio=ausencia_inicio, ausencia_fim=ausencia_fim, ausencia_motivo=ausencia_motivo,
+        filtro_ausencias=filtro_ausencias, substituicoes=substituicoes,
         busca_func_id=busca_func_id,
         data_filtro_sabado=data_filtro_sabado,
         data_filtro_sabado_formatada=data_filtro_sabado_formatada,
@@ -1710,3 +1755,29 @@ def login():
 def logout():
     session.clear()
     return redirect(url_for('horarios.ver_horarios'))
+
+
+@horarios_bp.route('/horarios/substituicao_periodo', methods=['POST'])
+@login_required
+def salvar_substituicao_periodo():
+    try:
+        titular = int(request.form.get('titular_id', ''))
+        substituto = int(request.form.get('substituto_id', ''))
+    except ValueError:
+        return 'Selecione dois funcionários válidos.', 400
+    try:
+        with closing(get_db()) as conn, conn:
+            registrar_substituicao(conn, titular, substituto,
+                request.form.get('data_inicio', ''), request.form.get('data_fim', ''),
+                request.form.get('motivo', '').strip(), session['user_id'])
+    except ValueError as erro:
+        return str(erro), 400
+    return redirect('/horarios#secao-trocas')
+
+
+@horarios_bp.route('/horarios/excluir_substituicao/<int:id>', methods=['POST'])
+@login_required
+def excluir_substituicao_periodo(id):
+    with closing(get_db()) as conn, conn:
+        conn.execute('DELETE FROM substituicoes_periodo WHERE id = ?', (id,))
+    return redirect('/horarios#secao-trocas')

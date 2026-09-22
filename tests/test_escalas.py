@@ -5,7 +5,7 @@ from contextlib import closing
 from pathlib import Path
 
 from escalas import (migrar_horarios, aplicar_troca, jornada_no_dia, intervalos_cobertura,
-                     ajustar_escala, preservar_banco_antes_migracao)
+                     ajustar_escala, preservar_banco_antes_migracao, registrar_substituicao)
 
 
 class EscalasTest(unittest.TestCase):
@@ -30,6 +30,23 @@ class EscalasTest(unittest.TestCase):
         ''')
         migrar_horarios(self.conn)
         self.conn.commit()
+
+    def test_substituicao_periodo_preserva_sabado_e_retorna_ao_suporte(self):
+        self.conn.executescript("""
+            INSERT INTO cargos VALUES (1, 'Comercial'), (2, 'Suporte Técnico');
+            UPDATE funcionarios SET cargo_id = id;
+            INSERT INTO escala_sabado VALUES (1, '2026-09-19', 2, '09:00 - 13:00', '');
+        """)
+        registrar_substituicao(self.conn, 1, 2, '2026-09-14', '2026-10-13', 'Férias', 9)
+        self.assertEqual(jornada_no_dia(self.conn, 2, '2026-09-14')[:2], ('08:00', '12:00'))
+        self.assertEqual(intervalos_cobertura(self.conn, '2026-09-14'), [])
+        self.assertEqual(intervalos_cobertura(self.conn, '2026-09-19')[0][3], [('09:00', '13:00')])
+        self.assertEqual(intervalos_cobertura(self.conn, '2026-10-14')[0][3], [('13:00', '17:00')])
+        self.assertEqual(self.conn.execute('SELECT jornada_id, cargo_id FROM funcionarios WHERE id=2').fetchone(), (2, 2))
+        with self.assertRaises(ValueError):
+            registrar_substituicao(self.conn, 1, 2, '2026-10-13', '2026-10-15', 'Conflito', 9)
+        with self.assertRaises(ValueError):
+            aplicar_troca(self.conn, '2026-09-15', 1, 2, 'Conflito', 9)
 
     def test_migracao_preserva_dados_e_nao_duplica_jornada(self):
         migrar_horarios(self.conn)

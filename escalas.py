@@ -30,6 +30,13 @@ def preservar_banco_antes_migracao(caminho):
 
 
 def migrar_horarios(conn):
+    conn.execute('''CREATE TABLE IF NOT EXISTS substituicoes_periodo (
+        id INTEGER PRIMARY KEY, titular_id INTEGER NOT NULL, substituto_id INTEGER NOT NULL,
+        data_inicio TEXT NOT NULL, data_fim TEXT NOT NULL, motivo TEXT NOT NULL,
+        registrado_por INTEGER NOT NULL, cargo_id INTEGER,
+        manha_inicio TEXT NOT NULL, manha_fim TEXT NOT NULL,
+        tarde_inicio TEXT NOT NULL, tarde_fim TEXT NOT NULL
+    )''')
     colunas = {row[1] for row in conn.execute('PRAGMA table_info(funcionarios)')}
     if 'nao_trabalha_sabado' not in colunas:
         conn.execute('ALTER TABLE funcionarios ADD COLUMN nao_trabalha_sabado INTEGER NOT NULL DEFAULT 0')
@@ -59,6 +66,12 @@ def validar_data(valor):
 
 
 def jornada_no_dia(conn, funcionario_id, data):
+    if validar_data(data).weekday() < 5:
+        substituicao = conn.execute('''SELECT manha_inicio, manha_fim, tarde_inicio, tarde_fim
+            FROM substituicoes_periodo WHERE substituto_id = ? AND ? BETWEEN data_inicio AND data_fim''',
+            (funcionario_id, data)).fetchone()
+        if substituicao:
+            return tuple(substituicao)
     ajuste = conn.execute('''SELECT manha_inicio, manha_fim, tarde_inicio, tarde_fim
         FROM jornadas_dia WHERE data = ? AND funcionario_id = ?''', (data, funcionario_id)).fetchone()
     if ajuste:
@@ -131,6 +144,10 @@ def aplicar_troca(conn, data, titular, substituto, motivo, autor):
             WHERE data_sabado = ? AND funcionario_id IN (?, ?)''',
             (titular, substituto, titular, data, titular, substituto))
     else:
+        if conn.execute('''SELECT 1 FROM substituicoes_periodo
+            WHERE ? BETWEEN data_inicio AND data_fim AND substituto_id IN (?, ?)''',
+            (data, titular, substituto)).fetchone():
+            raise ValueError('Há substituição por período nesta data; remova-a antes de trocar jornadas.')
         horarios = {pessoa: jornada_no_dia(conn, pessoa, data) for pessoa in pessoas}
         anteriores = {pessoa: descrever_jornada(horarios[pessoa]) for pessoa in pessoas}
         for pessoa, outro in ((titular, substituto), (substituto, titular)):
@@ -145,11 +162,46 @@ def aplicar_troca(conn, data, titular, substituto, motivo, autor):
     registrar_historico(conn, data, titular, substituto, motivo, detalhes, autor)
 
 
+def registrar_substituicao(conn, titular, substituto, inicio, fim, motivo, autor):
+    if validar_data(inicio) > validar_data(fim):
+        raise ValueError('A data final deve ser igual ou posterior à inicial.')
+    if titular == substituto:
+        raise ValueError('Selecione dois funcionários diferentes.')
+    if not motivo or len(motivo) > 500:
+        raise ValueError('Informe um motivo de até 500 caracteres.')
+    pessoas = conn.execute('SELECT id FROM funcionarios WHERE id IN (?, ?) AND ativo = 1',
+                          (titular, substituto)).fetchall()
+    if len(pessoas) != 2:
+        raise ValueError('Selecione dois funcionários ativos.')
+    if conn.execute('''SELECT 1 FROM substituicoes_periodo
+        WHERE data_inicio <= ? AND data_fim >= ?
+        AND (titular_id IN (?, ?) OR substituto_id IN (?, ?))''',
+        (fim, inicio, titular, substituto, titular, substituto)).fetchone():
+        raise ValueError('Um dos funcionários já participa de substituição neste período.')
+    if conn.execute('''SELECT 1 FROM jornadas_dia WHERE funcionario_id = ? AND data BETWEEN ? AND ?
+        AND strftime('%w', data) BETWEEN '1' AND '5' ''', (substituto, inicio, fim)).fetchone():
+        raise ValueError('O substituto possui ajustes de jornada neste período.')
+    jornada = conn.execute('''SELECT f.cargo_id, j.manha_inicio, j.manha_fim,
+        COALESCE(j.tarde_inicio, ''), COALESCE(j.tarde_fim, '')
+        FROM funcionarios f JOIN jornadas j ON j.id = f.jornada_id
+        WHERE f.id = ? AND j.tipo = 'Semana' ''', (titular,)).fetchone()
+    if not jornada:
+        raise ValueError('O titular precisa ter jornada da semana cadastrada.')
+    conn.execute('''INSERT INTO substituicoes_periodo (titular_id, substituto_id, data_inicio,
+        data_fim, motivo, registrado_por, cargo_id, manha_inicio, manha_fim, tarde_inicio, tarde_fim)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+        (titular, substituto, inicio, fim, motivo, autor, *jornada))
+
+
 def intervalos_cobertura(conn, data):
     dia = validar_data(data)
     pessoas = conn.execute('''SELECT f.id, f.nome, f.foto_url FROM funcionarios f
-        LEFT JOIN cargos c ON c.id = f.cargo_id
-        WHERE f.ativo = 1 AND (c.nome LIKE '%Suporte%' OR f.cargo_id IS NULL)''').fetchall()
+        LEFT JOIN substituicoes_periodo s ON s.substituto_id = f.id
+            AND ? BETWEEN s.data_inicio AND s.data_fim AND ? < 5
+        LEFT JOIN cargos c ON c.id = CASE WHEN s.id IS NOT NULL THEN s.cargo_id ELSE f.cargo_id END
+        WHERE f.ativo = 1 AND (c.nome LIKE '%Suporte%' OR
+            CASE WHEN s.id IS NOT NULL THEN s.cargo_id ELSE f.cargo_id END IS NULL)''',
+        (data, dia.weekday())).fetchall()
     resultado = []
     for pessoa, nome, foto in pessoas:
         if dia.weekday() == 6:
