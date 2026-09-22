@@ -174,10 +174,20 @@ function Ensure-Environment([string]$Target) {
 
 function Ensure-Venv([string]$Target, [string]$Python) {
     $venvPython = Join-Path $Target '.venv\Scripts\python.exe'
-    if (-not (Test-Path -LiteralPath $venvPython)) { & $Python -m venv (Join-Path $Target '.venv') }
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $venvPython)) { throw 'Falha ao criar o ambiente virtual Python.' }
-    & $venvPython -m pip install --disable-pip-version-check -r (Join-Path $Target 'requirements.txt')
-    if ($LASTEXITCODE -ne 0) { throw 'Falha ao instalar as dependencias Python.' }
+    if (-not (Test-Path -LiteralPath $venvPython)) {
+        & $Python -m venv (Join-Path $Target '.venv')
+    }
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $venvPython)) {
+        throw 'Falha ao criar o ambiente virtual Python.'
+    }
+
+    & $venvPython -m pip install --disable-pip-version-check -r (Join-Path $Target 'requirements.txt') | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Falha ao instalar as dependencias Python.'
+    }
+
+    & $Python -m pip install --disable-pip-version-check -r (Join-Path $Target 'requirements.txt') | Out-Null
+
     return $venvPython
 }
 
@@ -190,12 +200,19 @@ function Configure-Service([string]$Target, [string]$Python, $CurrentService) {
         return $null
     }
     $serviceName = if ($CurrentService) { $CurrentService.Name } else { $defaultService }
+    $existingApp = $null
+    if ($CurrentService) {
+        $existingApp = (& $nssm get $serviceName Application 2>$null)
+        if ($existingApp) { $existingApp = $existingApp.Trim() }
+    }
+    $pythonToUse = if ($existingApp -and (Test-Path -LiteralPath $existingApp -PathType Leaf)) { $existingApp } else { $Python }
+
     if (-not $CurrentService) {
-        & $nssm install $serviceName $Python (Join-Path $Target $entryPoint)
+        & $nssm install $serviceName $pythonToUse $entryPoint
         if ($LASTEXITCODE -ne 0) { throw 'Falha ao registrar o servico com NSSM.' }
     }
-    & $nssm set $serviceName Application $Python | Out-Null
-    & $nssm set $serviceName AppParameters (Join-Path $Target $entryPoint) | Out-Null
+    & $nssm set $serviceName Application $pythonToUse | Out-Null
+    & $nssm set $serviceName AppParameters $entryPoint | Out-Null
     & $nssm set $serviceName AppDirectory $Target | Out-Null
     & $nssm set $serviceName Start SERVICE_AUTO_START | Out-Null
     & $nssm set $serviceName AppStdout (Join-Path $Target 'servico-saida.log') | Out-Null
