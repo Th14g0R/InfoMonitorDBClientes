@@ -36,6 +36,7 @@ _falhas_login = defaultdict(list)
 LOGIN_MAX_TENTATIVAS = int(os.getenv('LOGIN_MAX_TENTATIVAS', '8'))
 LOGIN_JANELA_SEGUNDOS = int(os.getenv('LOGIN_JANELA_SEGUNDOS', '900'))  # 15 min
 SENHA_MIN_CHARS = int(os.getenv('SENHA_MIN_CHARS', '8'))
+SECRET_KEY_MIN_CHARS = 32
 TOKEN_RESET_HORAS = int(os.getenv('TOKEN_RESET_HORAS', '1'))
 
 
@@ -134,10 +135,10 @@ def conectar_ssh(info_servidor, timeout=10):
 
 def aplicar_config_flask(app):
     secret = os.getenv('SECRET_KEY', '').strip()
-    if not secret or secret == 'chave_secreta_para_sessoes_admin':
+    if len(secret) < SECRET_KEY_MIN_CHARS or secret == 'chave_secreta_para_sessoes_admin':
         raise RuntimeError(
-            "Defina SECRET_KEY no arquivo .env com um valor longo e aleatório. "
-            "O sistema recusa iniciar com a chave padrão."
+            f"Defina SECRET_KEY no arquivo .env com pelo menos {SECRET_KEY_MIN_CHARS} "
+            "caracteres aleatórios. O sistema recusa chaves ausentes, curtas ou padrão."
         )
     app.secret_key = secret
     app.jinja_env.globals['csrf_token'] = csrf_token

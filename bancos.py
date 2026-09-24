@@ -15,6 +15,11 @@ import secrets
 import hashlib
 import hmac
 import json  # FIX: Módulo json importado para interpretar a variável SERVIDORES_CONFIG
+import threading
+import stat
+import copy
+import logging
+from urllib.parse import urlencode
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from concurrent.futures import ThreadPoolExecutor
@@ -32,6 +37,7 @@ from seguranca import (
 
 # Configuração do Blueprint e Banco
 bancos_bp = Blueprint('bancos', __name__)
+LOGGER = logging.getLogger(__name__)
 ALLOW_PUBLIC_REGISTER = os.getenv('ALLOW_PUBLIC_REGISTER', '0') == '1'
 
 # Nomes das 3 áreas de acesso que podem ser concedidas por usuário (o Master sempre tem as 3, sempre).
@@ -254,6 +260,10 @@ def init_db_sistema():
     if master_email and senha_master_inicial:
         cursor.execute("SELECT id FROM usuarios WHERE email = ?", (master_email,))
         if not cursor.fetchone():
+            ok_senha, msg_senha = senha_atende_politica(senha_master_inicial)
+            if not ok_senha:
+                conn.close()
+                raise RuntimeError(f'ADMIN_MASTER_PASSWORD inválida: {msg_senha}')
             senha_criptografada = generate_password_hash(senha_master_inicial)
             cursor.execute('''
                 INSERT INTO usuarios (nome, email, senha_hash, eh_master, ativo)
@@ -430,27 +440,70 @@ CACHE_DADOS = {
     'orfaos': {'dados': [], 'timestamp': 0},
     'metricas': {'dados': [], 'timestamp': 0},
     'backups_ftp': {'dados': None, 'timestamp': 0},
-    'ttl_segundos': 600
+    'ttl_segundos': 600,
+    'generation': 0,
 }
+CACHE_LOCK = threading.RLock()
+METRICAS_LOCK = threading.Lock()
+BACKUPS_LOCK = threading.Lock()
+LOCKS_SERVIDORES = {}
+CONFIG_LOCKS_SERVIDORES = {}
+REFRESH_LOCK = threading.Lock()
+ULTIMO_REFRESH = {}
+REFRESH_COOLDOWN_SEGUNDOS = 15
+
+def _lock_servidor(nome_servidor):
+    """Retorna o lock single-flight do servidor sem criar dois locks em corrida."""
+    with CACHE_LOCK:
+        return LOCKS_SERVIDORES.setdefault(nome_servidor, threading.Lock())
+
+def _lock_config_servidor(nome_servidor):
+    with CACHE_LOCK:
+        return CONFIG_LOCKS_SERVIDORES.setdefault(nome_servidor, threading.Lock())
+
+def solicitar_refresh(recurso, limpar_cache=False):
+    """Coalesce cliques/requisições repetidas de refresh público."""
+    if request.args.get('atualizar') != '1':
+        return False
+    agora = time.monotonic()
+    with REFRESH_LOCK:
+        anterior = ULTIMO_REFRESH.get(recurso, 0)
+        if agora - anterior < REFRESH_COOLDOWN_SEGUNDOS:
+            return False
+        ULTIMO_REFRESH[recurso] = agora
+        if limpar_cache:
+            limpar_cache_global()
+        return True
 
 def limpar_cache_global():
     """Força a invalidação do cache em memória."""
-    CACHE_DADOS['bancos_por_servidor'].clear()
-    CACHE_DADOS['orfaos'] = {'dados': [], 'timestamp': 0}
-    CACHE_DADOS['metricas'] = {'dados': [], 'timestamp': 0}
-    CACHE_DADOS['backups_ftp'] = {'dados': None, 'timestamp': 0}
+    with CACHE_LOCK:
+        CACHE_DADOS['generation'] += 1
+        CACHE_DADOS['bancos_por_servidor'].clear()
+        CACHE_DADOS['orfaos'] = {'dados': [], 'timestamp': 0}
+        CACHE_DADOS['metricas'] = {'dados': [], 'timestamp': 0}
+        CACHE_DADOS['backups_ftp'] = {'dados': None, 'timestamp': 0}
+        return CACHE_DADOS['generation']
 
 # --- RECURSO: STATUS DE BACKUPS FTP (lê e interpreta a página de texto do servidor de backups) ---
 def obter_status_backups_ftp(forcar_atualizacao=False):
+    """Single-flight da consulta HTTP de backups."""
+    with BACKUPS_LOCK:
+        return _obter_status_backups_ftp(forcar_atualizacao)
+
+
+def _obter_status_backups_ftp(forcar_atualizacao=False):
     """
     Busca http://.../cgi-bin/bkp-status.web (texto simples) e transforma em dados estruturados:
     cliente, status (OK / ATRASADO / SEM_ARQUIVO), horário do último backup e totais.
     Cacheado por alguns minutos, já que é uma chamada HTTP síncrona e a página muda pouco.
     """
     agora = time.time()
-    cache = CACHE_DADOS['backups_ftp']
+    with CACHE_LOCK:
+        geracao_consulta = CACHE_DADOS['generation']
+        cache = CACHE_DADOS['backups_ftp']
     if not forcar_atualizacao and cache['dados'] is not None and (agora - cache['timestamp'] < CACHE_DADOS['ttl_segundos']):
-        return cache['dados']
+        return copy.deepcopy(cache['dados'])
 
     resultado = {
         "erro": None, "clientes": [], "total_ok": 0, "total_erro": 0,
@@ -466,14 +519,20 @@ def obter_status_backups_ftp(forcar_atualizacao=False):
             except UnicodeDecodeError:
                 texto = conteudo.decode('latin-1')
     except Exception as e:
-        resultado["erro"] = f"Não foi possível consultar o status dos backups: {e}"
-        CACHE_DADOS['backups_ftp'] = {'dados': resultado, 'timestamp': agora}
-        return resultado
+        LOGGER.warning('Falha ao consultar status remoto de backups: %s', e)
+        resultado["erro"] = "Não foi possível consultar o status dos backups."
+        timestamp_resultado = time.time()
+        with CACHE_LOCK:
+            if CACHE_DADOS['generation'] == geracao_consulta:
+                CACHE_DADOS['backups_ftp'] = {'dados': copy.deepcopy(resultado), 'timestamp': timestamp_resultado}
+        return copy.deepcopy(resultado)
 
     resultado = interpretar_status_backups(texto)
-
-    CACHE_DADOS['backups_ftp'] = {'dados': resultado, 'timestamp': agora}
-    return resultado
+    timestamp_resultado = time.time()
+    with CACHE_LOCK:
+        if CACHE_DADOS['generation'] == geracao_consulta:
+            CACHE_DADOS['backups_ftp'] = {'dados': copy.deepcopy(resultado), 'timestamp': timestamp_resultado}
+    return copy.deepcopy(resultado)
 
 # --- BANCO DE DADOS LOCAL PARA HISTÓRICO ---
 def init_db_historico():
@@ -488,6 +547,10 @@ def init_db_historico():
             PRIMARY KEY (data, servidor)
         )
     ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_historico_servidor_data
+        ON historico_servidores (servidor, data DESC)
+    ''')
     conn.commit()
     conn.close()
 
@@ -499,7 +562,10 @@ def caminho_do_alias_no_conf(nome_servidor, alias):
     alias_limpo = sanitizar_alias(alias)
     if not alias_limpo:
         return None
-    conteudo = ler_databases_conf_remoto(nome_servidor) or ""
+    leitura = ler_databases_conf_remoto_estruturado(nome_servidor)
+    if not leitura['ok']:
+        raise RuntimeError('Não foi possível ler databases.conf.')
+    conteudo = leitura['conteudo']
     for linha in conteudo.splitlines():
         linha_limpa = linha.strip()
         if not linha_limpa or linha_limpa.startswith('#') or '=' not in linha_limpa:
@@ -537,7 +603,7 @@ def upload_banco_avulso():
         informado = (request.form.get('caminho') or '').strip()
         if informado and validar_caminho_banco(informado, DIRETORIO_BASE) != caminho_destino:
             raise ValueError('O destino deve corresponder ao alias cadastrado.')
-    except ValueError:
+    except (ValueError, RuntimeError):
         return redirect(url_for('bancos.admin_painel', servidor=servidor, erro='Caminho do alias inválido.'))
 
     pasta_destino = posixpath.dirname(caminho_destino)
@@ -576,14 +642,13 @@ def calcular_espaco_total_incluindo_sombra(nome_servidor, info_servidor, forcar_
     continua ocupando espaço físico no servidor ("armazenamento sombra").
     """
     try:
-        # modo_busca_unificada=True retorna TODAS as entradas do databases.conf, ativas e inativas
-        todos_ativos_e_inativos, total_conf, _ = obter_dados_servidor_linux(
-            nome_servidor, info_servidor, modo_busca_unificada=True, forcar_atualizacao=forcar_atualizacao
+        # A mesma sessão SSH traz entradas ativas/inativas e órfãos.
+        todos_ativos_e_inativos, total_conf, arquivos_orfaos = obter_dados_servidor_linux(
+            nome_servidor, info_servidor, modo_busca_unificada=True,
+            varrer_orfaos=True, forcar_atualizacao=forcar_atualizacao
         )
-        # varrer_orfaos=True retorna arquivos no disco que nem constam no databases.conf
-        _, _, arquivos_orfaos = obter_dados_servidor_linux(
-            nome_servidor, info_servidor, varrer_orfaos=True, forcar_atualizacao=forcar_atualizacao
-        )
+        if todos_ativos_e_inativos and 'erro' in todos_ativos_e_inativos[0]:
+            return None
         total_orfaos = sum(a.get('tamanho_bytes', 0) for a in arquivos_orfaos)
         return total_conf + total_orfaos
     except Exception:
@@ -591,23 +656,41 @@ def calcular_espaco_total_incluindo_sombra(nome_servidor, info_servidor, forcar_
 
 def salvar_historico_diario(metricas_servidores=None):
     """Grava o snapshot diário no SQLite, contando o espaço real do disco (ativos + inativos + órfãos)."""
-    if not metricas_servidores:
-        metricas_servidores = obter_metricas_servidores(salvar_db=False, forcar_atualizacao=True)
-        
+    metricas_por_servidor = {
+        metrica['servidor']: metrica for metrica in (metricas_servidores or [])
+    }
     hoje = datetime.now().strftime('%Y-%m-%d')
     conn = sqlite3.connect(DB_HISTORICO)
     cursor = conn.cursor()
-    for m in metricas_servidores:
-        info_servidor = SERVIDORES.get(m['servidor'])
+    nomes_servidores = metricas_por_servidor.keys() if metricas_por_servidor else SERVIDORES.keys()
+    for nome_servidor in nomes_servidores:
+        m = metricas_por_servidor.get(nome_servidor)
+        info_servidor = SERVIDORES.get(nome_servidor)
         total_bytes_real = None
+        qtd_ativos = m['qtd_ativos'] if m else 0
         if info_servidor:
-            total_bytes_real = calcular_espaco_total_incluindo_sombra(m['servidor'], info_servidor, forcar_atualizacao=True)
-        # Se não foi possível calcular o total real (ex: falha de SSH), usa o valor de ativos como último recurso
-        total_bytes = total_bytes_real if total_bytes_real is not None else m['tamanho_gb'] * (1024 ** 3)
+            try:
+                bancos, total_conf, orfaos = obter_dados_servidor_linux(
+                    nome_servidor, info_servidor, modo_busca_unificada=True,
+                    varrer_orfaos=True, forcar_atualizacao=True
+                )
+                if not (bancos and 'erro' in bancos[0]):
+                    total_bytes_real = total_conf + sum(a.get('tamanho_bytes', 0) for a in orfaos)
+                    qtd_ativos = sum(
+                        1 for banco in bancos
+                        if banco.get('arquivo_existe') and not banco.get('eh_inativo')
+                    )
+            except Exception:
+                pass
+        # Sem uma varredura completa de órfãos, não grave um total sabidamente
+        # parcial: preserve o último snapshot confiável em vez de subcontá-lo.
+        if total_bytes_real is None:
+            continue
+        total_bytes = total_bytes_real
         cursor.execute('''
             INSERT OR REPLACE INTO historico_servidores (data, servidor, total_bytes, qtd_bancos)
             VALUES (?, ?, ?, ?)
-        ''', (hoje, m['servidor'], total_bytes, m['qtd_ativos']))
+        ''', (hoje, nome_servidor, total_bytes, qtd_ativos))
     conn.commit()
     conn.close()
 
@@ -710,29 +793,65 @@ def _banco_bate_busca(banco, termo, lojas_por_alias):
     return False
 
 def obter_dados_servidor_linux(nome_servidor, info_servidor, busca=None, buscar_inativos=False, modo_busca_unificada=False, varrer_orfaos=False, forcar_atualizacao=False):
+    """Executa no máximo uma coleta SSH simultânea por servidor."""
+    if not forcar_atualizacao:
+        resultado_cache = _obter_resultado_cache_servidor(
+            nome_servidor, busca, buscar_inativos, modo_busca_unificada, varrer_orfaos
+        )
+        if resultado_cache is not None:
+            return resultado_cache
+    with _lock_servidor(nome_servidor):
+        return _obter_dados_servidor_linux(
+            nome_servidor, info_servidor, busca, buscar_inativos,
+            modo_busca_unificada, varrer_orfaos, forcar_atualizacao
+        )
+
+
+def _obter_resultado_cache_servidor(nome_servidor, busca, buscar_inativos,
+                                    modo_busca_unificada, varrer_orfaos):
+    """Seleciona referências sob lock e copia somente os objetos devolvidos."""
     agora = time.time()
+    lojas_por_alias = carregar_lojas_clientes() if busca else {}
+    with CACHE_LOCK:
+        item = CACHE_DADOS['bancos_por_servidor'].get(nome_servidor)
+        ttl = CACHE_DADOS['ttl_segundos']
+        if not item or agora - item.get('timestamp', 0) >= ttl:
+            return None
+        if varrer_orfaos and (
+                not item.get('orfaos_coletados') or
+                agora - item.get('orfaos_timestamp', 0) >= ttl):
+            return None
+        total_b = item['bytes']
+        referencias_filtradas = []
+        for banco in item['dados']:
+            eh_inativo = banco.get('eh_inativo', False)
+            if not modo_busca_unificada and not varrer_orfaos:
+                if buscar_inativos and not eh_inativo:
+                    continue
+                if not buscar_inativos and eh_inativo:
+                    continue
+            if busca and not _banco_bate_busca(banco, busca, lojas_por_alias):
+                continue
+            referencias_filtradas.append(banco)
+        lista_filtrada = copy.deepcopy(referencias_filtradas)
+        orfaos = copy.deepcopy(item.get('orfaos', [])) if varrer_orfaos else []
+
+    return lista_filtrada, total_b, orfaos
+
+
+def _obter_dados_servidor_linux(nome_servidor, info_servidor, busca=None, buscar_inativos=False, modo_busca_unificada=False, varrer_orfaos=False, forcar_atualizacao=False):
     chave_cache = nome_servidor
     lojas_por_alias = carregar_lojas_clientes() if busca else {}
-    
-    if not forcar_atualizacao and chave_cache in CACHE_DADOS['bancos_por_servidor']:
-        item_cache = CACHE_DADOS['bancos_por_servidor'][chave_cache]
-        if agora - item_cache['timestamp'] < CACHE_DADOS['ttl_segundos']:
-            bancos_brutos = item_cache['dados']
-            total_b = item_cache['bytes']
-            orfaos = item_cache['orfaos']
-            
-            lista_filtrada = []
-            for b in bancos_brutos:
-                eh_inativo = b.get('eh_inativo', False)
-                if not modo_busca_unificada and not varrer_orfaos:
-                    if buscar_inativos and not eh_inativo:
-                        continue
-                    if not buscar_inativos and eh_inativo:
-                        continue
-                if busca and not _banco_bate_busca(b, busca, lojas_por_alias):
-                    continue
-                lista_filtrada.append(b)
-            return lista_filtrada, total_b, orfaos if varrer_orfaos else []
+
+    with CACHE_LOCK:
+        geracao_coleta = CACHE_DADOS['generation']
+
+    if not forcar_atualizacao:
+        resultado_cache = _obter_resultado_cache_servidor(
+            chave_cache, busca, buscar_inativos, modo_busca_unificada, varrer_orfaos
+        )
+        if resultado_cache is not None:
+            return resultado_cache
 
     lista_bancos = []
     arquivos_orfaos = []
@@ -747,6 +866,8 @@ def obter_dados_servidor_linux(nome_servidor, info_servidor, busca=None, buscar_
             with sftp.open(CAMINHO_DATABASES_CONF, 'rb') as f:
                 conteudo_bytes = f.read()
         except Exception as e:
+            LOGGER.warning('Falha ao ler databases.conf em %s durante coleta: %s',
+                           nome_servidor, e)
             sftp.close()
             ssh.close()
             return [{
@@ -764,7 +885,7 @@ def obter_dados_servidor_linux(nome_servidor, info_servidor, busca=None, buscar_
                 'status_inatividade': {'status': 'desconhecido', 'dias': 0, 'texto_dias': '-'},
                 'arquivo_existe': False,
                 'eh_inativo': False,
-                'erro': str(e)
+                'erro': 'Não foi possível ler a configuração remota.'
             }], 0, []
             
         try:
@@ -858,44 +979,74 @@ def obter_dados_servidor_linux(nome_servidor, info_servidor, busca=None, buscar_
                     'arquivo_existe': False,
                     'eh_inativo': eh_inativo
                 })
-            except Exception:
-                pass
+            except Exception as exc:
+                if varrer_orfaos or modo_busca_unificada:
+                    raise RuntimeError(
+                        f"Não foi possível medir banco configurado: {mascara_caminho(caminho_fdb)}"
+                    ) from exc
 
-        try:
+        if varrer_orfaos:
             cmd_find = f"find {DIRETORIO_BASE} -type f \\( -name '*.fdb' -o -name '*.fbk' -o -name '*.bak' \\)"
             stdin, stdout, stderr = ssh.exec_command(cmd_find, timeout=5)
-            arquivos_no_disco = stdout.read().decode('utf-8').splitlines()
+            saida_bytes = stdout.read()
+            erro_bytes = stderr.read()
+            status_saida = stdout.channel.recv_exit_status()
+            if status_saida != 0:
+                detalhe = erro_bytes.decode('utf-8', errors='replace').strip()
+                raise RuntimeError(f"Falha ao varrer arquivos órfãos (status {status_saida}): {detalhe}")
+            try:
+                arquivos_no_disco = saida_bytes.decode('utf-8').splitlines()
+            except UnicodeDecodeError as exc:
+                raise RuntimeError("Resposta inválida ao varrer arquivos órfãos") from exc
 
             for arq in arquivos_no_disco:
                 arq_limpo = arq.strip()
                 if arq_limpo and arq_limpo not in caminhos_oficiais:
                     try:
                         st = sftp.stat(arq_limpo)
-                        arquivos_orfaos.append({
-                            'servidor': nome_servidor,
-                            'caminho': arq_limpo,
-                            'caminho_exibicao': mascara_caminho(arq_limpo),
-                            'tamanho_bytes': st.st_size,
-                            'tamanho_str': formatar_tamanho(st.st_size),
-                            'timestamp': st.st_mtime,
-                            'data_str': datetime.fromtimestamp(st.st_mtime).strftime('%d/%m/%Y %H:%M:%S')
-                        })
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                    except Exception as exc:
+                        raise RuntimeError(f"Não foi possível medir arquivo órfão: {mascara_caminho(arq_limpo)}") from exc
+                    arquivos_orfaos.append({
+                        'servidor': nome_servidor,
+                        'caminho': arq_limpo,
+                        'caminho_exibicao': mascara_caminho(arq_limpo),
+                        'tamanho_bytes': st.st_size,
+                        'tamanho_str': formatar_tamanho(st.st_size),
+                        'timestamp': st.st_mtime,
+                        'data_str': datetime.fromtimestamp(st.st_mtime).strftime('%d/%m/%Y %H:%M:%S')
+                    })
 
         sftp.close()
         ssh.close()
+        timestamp_cache = time.time()
 
-        CACHE_DADOS['bancos_por_servidor'][nome_servidor] = {
-            'dados': lista_bancos,
+        novo_cache = {
+            'dados': copy.deepcopy(lista_bancos),
             'bytes': total_bytes,
-            'orfaos': arquivos_orfaos,
-            'timestamp': agora
+            'orfaos': copy.deepcopy(arquivos_orfaos),
+            'orfaos_coletados': varrer_orfaos,
+            'orfaos_timestamp': timestamp_cache if varrer_orfaos else 0,
+            'timestamp': timestamp_cache
         }
+        with CACHE_LOCK:
+            # Uma coleta iniciada antes de ?atualizar=1 nunca repovoa a nova geração.
+            if CACHE_DADOS['generation'] == geracao_coleta:
+                atual = CACHE_DADOS['bancos_por_servidor'].get(nome_servidor)
+                # Uma coleta comum nunca rebaixa um cache da mesma geração que já
+                # contém a varredura de órfãos, mesmo quando foi solicitada à força.
+                if atual and atual.get('orfaos_coletados') and not varrer_orfaos:
+                    novo_cache['orfaos'] = atual['orfaos']
+                    novo_cache['orfaos_coletados'] = True
+                    novo_cache['orfaos_timestamp'] = atual.get('orfaos_timestamp', 0)
+                CACHE_DADOS['bancos_por_servidor'][nome_servidor] = novo_cache
 
     except Exception as e:
+        LOGGER.warning('Falha SSH ao coletar dados de %s: %s', nome_servidor, e)
+        try:
+            if ssh:
+                ssh.close()
+        except Exception:
+            pass
         return [{
             'servidor': nome_servidor,
             'porta': info_servidor['porta_fb'],
@@ -911,7 +1062,7 @@ def obter_dados_servidor_linux(nome_servidor, info_servidor, busca=None, buscar_
             'status_inatividade': {'status': 'desconhecido', 'dias': 0, 'texto_dias': '-'},
             'arquivo_existe': False,
             'eh_inativo': False,
-            'erro': f"Erro SSH: {str(e)}"
+            'erro': "Falha na conexão ou coleta SSH."
         }], 0, []
 
     lista_filtrada = []
@@ -932,7 +1083,10 @@ def buscar_em_todos_servidores(termo_busca=None, buscar_inativos=False, modo_bus
     todos_orfaos = []
     total_bytes_global = 0
 
-    with ThreadPoolExecutor(max_workers=len(SERVIDORES)) as executor:
+    if not SERVIDORES:
+        return todos_bancos, total_bytes_global, todos_orfaos
+
+    with ThreadPoolExecutor(max_workers=min(8, len(SERVIDORES))) as executor:
         futures = [
             executor.submit(obter_dados_servidor_linux, nome, info, termo_busca, buscar_inativos, modo_busca_unificada, varrer_orfaos, forcar_atualizacao)
             for nome, info in SERVIDORES.items()
@@ -946,25 +1100,42 @@ def buscar_em_todos_servidores(termo_busca=None, buscar_inativos=False, modo_bus
     return todos_bancos, total_bytes_global, todos_orfaos
 
 def obter_metricas_servidores(salvar_db=True, forcar_atualizacao=False):
+    """Single-flight para impedir recomputações concorrentes das mesmas métricas."""
+    with METRICAS_LOCK:
+        return _obter_metricas_servidores(salvar_db, forcar_atualizacao)
+
+
+def _obter_metricas_servidores(salvar_db=True, forcar_atualizacao=False):
     agora = time.time()
-    if not forcar_atualizacao and CACHE_DADOS['metricas']['dados'] and (agora - CACHE_DADOS['metricas']['timestamp'] < CACHE_DADOS['ttl_segundos']):
-        return CACHE_DADOS['metricas']['dados']
+    with CACHE_LOCK:
+        geracao_coleta = CACHE_DADOS['generation']
+        cache_metricas = CACHE_DADOS['metricas']
+    if not forcar_atualizacao and cache_metricas['dados'] and (agora - cache_metricas['timestamp'] < CACHE_DADOS['ttl_segundos']):
+        return copy.deepcopy(cache_metricas['dados'])
 
     metricas = []
-    with ThreadPoolExecutor(max_workers=len(SERVIDORES)) as executor:
+    if not SERVIDORES:
+        with CACHE_LOCK:
+            if CACHE_DADOS['generation'] == geracao_coleta:
+                CACHE_DADOS['metricas'] = {'dados': [], 'timestamp': agora}
+        return metricas
+
+    with ThreadPoolExecutor(max_workers=min(8, len(SERVIDORES))) as executor:
         futures = {
             executor.submit(obter_dados_servidor_linux, nome, info, buscar_inativos=False, forcar_atualizacao=forcar_atualizacao): nome
             for nome, info in SERVIDORES.items()
         }
         for future in futures:
             nome_srv = futures[future]
+            erro_metrica = None
             try:
                 bancos, total_bytes, _ = future.result()
                 if bancos and 'erro' in bancos[0]:
-                    qtd_ativos = 0
-                    qtd_3meses = 0
-                    tamanho_gb = 0
-                    media_mb = 0
+                    erro_metrica = bancos[0]['erro']
+                    qtd_ativos = None
+                    qtd_3meses = None
+                    tamanho_gb = None
+                    media_mb = None
                     maior_banco_alias = "-"
                     maior_banco_tamanho = "-"
                 else:
@@ -982,15 +1153,17 @@ def obter_metricas_servidores(salvar_db=True, forcar_atualizacao=False):
                         maior_banco_alias = "-"
                         maior_banco_tamanho = "-"
 
-                pct_disco = min(round((tamanho_gb / 100) * 100, 1), 100)
-                runway = calcular_runway_disco(nome_srv, tamanho_gb)
+                pct_disco = None if erro_metrica else min(round((tamanho_gb / 100) * 100, 1), 100)
+                runway = ({"crescimento_diario_mb": None, "dias_restantes": "Indisponível"}
+                          if erro_metrica else calcular_runway_disco(nome_srv, tamanho_gb))
 
-            except Exception:
-                tamanho_gb = 0
-                pct_disco = 0
-                qtd_ativos = 0
-                qtd_3meses = 0
-                media_mb = 0
+            except Exception as exc:
+                erro_metrica = f'Falha ao coletar métricas: {exc}'
+                tamanho_gb = None
+                pct_disco = None
+                qtd_ativos = None
+                qtd_3meses = None
+                media_mb = None
                 maior_banco_alias = "-"
                 maior_banco_tamanho = "-"
                 runway = {"crescimento_diario_mb": 0, "dias_restantes": "Erro"}
@@ -1004,19 +1177,22 @@ def obter_metricas_servidores(salvar_db=True, forcar_atualizacao=False):
                 'media_mb': media_mb,
                 'maior_banco_alias': maior_banco_alias,
                 'maior_banco_tamanho': maior_banco_tamanho,
-                'runway': runway
+                'runway': runway,
+                'erro': erro_metrica,
             })
     
     metricas.sort(key=lambda x: x['servidor'])
     
-    CACHE_DADOS['metricas'] = {
-        'dados': metricas,
-        'timestamp': agora
-    }
+    with CACHE_LOCK:
+        if CACHE_DADOS['generation'] == geracao_coleta:
+            CACHE_DADOS['metricas'] = {
+                'dados': copy.deepcopy(metricas),
+                'timestamp': time.time()
+            }
 
     if salvar_db:
         salvar_historico_diario(metricas)
-    return metricas
+    return copy.deepcopy(metricas)
 
 def converter_para_data_iso(data_str):
     """Auxiliar para converter DD/MM/AAAA em YYYYMMDD para ordenação correta."""
@@ -1026,56 +1202,114 @@ def converter_para_data_iso(data_str):
         return "00000000"
 
 # --- OPERAÇÕES REMOTAS PARA GESTÃO DO DATABASES.CONF ---
-def ler_databases_conf_remoto(nome_servidor):
+def ler_databases_conf_remoto_estruturado(nome_servidor):
+    """Lê a configuração sem confundir conteúdo válido com mensagem de erro."""
     info = SERVIDORES.get(nome_servidor)
-    if not info: return ""
-    
-    ssh = None
+    if not info:
+        return {'ok': False, 'conteudo': None, 'erro': 'Servidor inválido.'}
     try:
-        ssh = conectar_ssh(info, timeout=5)
-        sftp = ssh.open_sftp()
-        with sftp.open(CAMINHO_DATABASES_CONF, 'rb') as f:
-            conteudo = f.read()
-        sftp.close()
-        ssh.close()
+        with closing(conectar_ssh(info, timeout=5)) as ssh, closing(ssh.open_sftp()) as sftp:
+            with sftp.open(CAMINHO_DATABASES_CONF, 'rb') as arquivo:
+                conteudo = arquivo.read()
         try:
-            return conteudo.decode('utf-8')
+            texto = conteudo.decode('utf-8')
         except UnicodeDecodeError:
-            return conteudo.decode('latin-1', errors='ignore')
+            texto = conteudo.decode('latin-1')
+        return {
+            'ok': True, 'conteudo': texto, 'erro': None,
+            'hash': hashlib.sha256(conteudo).hexdigest(),
+        }
     except Exception as e:
-        return f"# Erro ao ler databases.conf em {nome_servidor}: {str(e)}"
+        LOGGER.warning('Falha ao ler databases.conf em %s: %s', nome_servidor, e)
+        return {'ok': False, 'conteudo': None,
+                'erro': f'Não foi possível ler databases.conf em {nome_servidor}.'}
 
-def salvar_databases_conf_remoto(nome_servidor, novo_conteudo):
+
+def ler_databases_conf_remoto(nome_servidor):
+    """Compatibilidade para telas somente leitura; mutações usam o resultado estruturado."""
+    resultado = ler_databases_conf_remoto_estruturado(nome_servidor)
+    return resultado['conteudo'] if resultado['ok'] else f"# {resultado['erro']}"
+
+
+def validar_conteudo_databases_conf(conteudo):
+    if not isinstance(conteudo, str) or '\x00' in conteudo:
+        return False, 'Conteúdo inválido.'
+    # Não tente reinterpretar a gramática do Firebird: databases.conf aceita
+    # blocos e diretivas que não são simples pares alias=caminho.
+    inicio = conteudo.lstrip().lower()
+    if (inicio.startswith('# erro ao ler databases.conf') or
+            inicio.startswith('# não foi possível ler databases.conf')):
+        return False, 'Conteúdo de erro não pode substituir databases.conf.'
+    return True, None
+
+def salvar_databases_conf_remoto(nome_servidor, novo_conteudo, hash_esperado=None):
     info = SERVIDORES.get(nome_servidor)
-    if not info: return False
-    
-    ssh = None
-    try:
-        ssh = conectar_ssh(info, timeout=5)
-        sftp = ssh.open_sftp()
-        conteudo_unix = novo_conteudo.replace('\r\n', '\n')
-        with sftp.open(CAMINHO_DATABASES_CONF, 'wb') as f:
-            f.write(conteudo_unix.encode('utf-8'))
-        sftp.close()
-        ssh.close()
-        limpar_cache_global()
-        return True
-    except Exception as e:
-        print(f"Erro ao salvar databases.conf em {nome_servidor}: {e}")
+    valido, erro = validar_conteudo_databases_conf(novo_conteudo)
+    if not info or not valido:
         return False
+    with _lock_config_servidor(nome_servidor):
+        temporario = None
+        try:
+            with closing(conectar_ssh(info, timeout=5)) as ssh, closing(ssh.open_sftp()) as sftp:
+                # normalize resolve o alvo real quando databases.conf é um symlink.
+                sftp.lstat(CAMINHO_DATABASES_CONF)
+                destino_real = sftp.normalize(CAMINHO_DATABASES_CONF)
+                metadados = sftp.stat(destino_real)
+                diretorio = posixpath.dirname(destino_real)
+                temporario = posixpath.join(
+                    diretorio, f'.{posixpath.basename(destino_real)}.{secrets.token_hex(8)}.tmp'
+                )
+                with sftp.open(destino_real, 'rb') as atual:
+                    bytes_atuais = atual.read()
+                if hash_esperado is not None and not hmac.compare_digest(
+                        hashlib.sha256(bytes_atuais).hexdigest(), hash_esperado):
+                    LOGGER.warning('Conflito de edição de databases.conf em %s', nome_servidor)
+                    return False
+
+                conteudo_unix = novo_conteudo.replace('\r\n', '\n').replace('\r', '\n')
+                try:
+                    with sftp.open(temporario, 'x') as arquivo:
+                        arquivo.write(conteudo_unix.encode('utf-8'))
+                        arquivo.flush()
+                    # Falha fechada: o arquivo nunca é trocado sem preservar dono,
+                    # grupo e permissões do alvo real.
+                    sftp.chown(temporario, metadados.st_uid, metadados.st_gid)
+                    sftp.chmod(temporario, stat.S_IMODE(metadados.st_mode))
+                    with sftp.open(destino_real, 'rb') as atual:
+                        hash_antes_swap = hashlib.sha256(atual.read()).hexdigest()
+                    if hash_esperado is not None and not hmac.compare_digest(
+                            hash_antes_swap, hash_esperado):
+                        raise RuntimeError('Conflito de edição concorrente.')
+                    sftp.posix_rename(temporario, destino_real)
+                    temporario = None
+                finally:
+                    if temporario:
+                        try:
+                            sftp.remove(temporario)
+                        except Exception as exc:
+                            LOGGER.warning('Falha ao remover temporário remoto em %s: %s',
+                                           nome_servidor, exc)
+            limpar_cache_global()
+            return True
+        except Exception as exc:
+            LOGGER.warning('Falha ao salvar databases.conf em %s: %s', nome_servidor, exc)
+            return False
 
 def verificar_alias_existente_global(alias_busca):
-    """Varre todos os servidores para verificar se o alias já existe ativo."""
-    alias_limpo = alias_busca.strip().lower()
-    for srv, info in SERVIDORES.items():
-        conf = ler_databases_conf_remoto(srv)
+    """Retorna (servidor_encontrado, erro); qualquer leitura incompleta falha fechada."""
+    alias_limpo = sanitizar_alias(alias_busca)
+    for srv in SERVIDORES:
+        resultado = ler_databases_conf_remoto_estruturado(srv)
+        if not resultado['ok']:
+            return None, resultado['erro']
+        conf = resultado['conteudo']
         for linha in conf.splitlines():
             l = linha.strip()
             if not l.startswith('#') and '=' in l:
-                nome_alias = l.split('=', 1)[0].strip().lower()
+                nome_alias = sanitizar_alias(l.split('=', 1)[0])
                 if nome_alias == alias_limpo:
-                    return srv
-    return None
+                    return srv, None
+    return None, None
     
 def sanitizar_alias(texto):
     if not texto:
@@ -1093,9 +1327,11 @@ HTML_LAYOUT = """
 <head>
     <meta charset="UTF-8">
     <title>Servidores dos Bancos Hospedados</title>
-    <!-- Font Awesome Icons & Chart.js -->
+    <!-- Font Awesome Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    {% if modo_historico %}
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" defer></script>
+    {% endif %}
     <style>
         :root {
             --cor-primaria: #2563eb;
@@ -1153,6 +1389,9 @@ HTML_LAYOUT = """
         table { width: 100%; border-collapse: collapse; }
         th, td { border: 1px solid var(--cor-borda); padding: 10px 12px; text-align: left; vertical-align: middle; }
         th { position: sticky; top: var(--topo-altura, 160px); background-color: #f8fafc; color: var(--cor-texto); font-weight: 600; z-index: 900; }
+        .historico-scroll { max-height: 65vh; overflow: auto; border: 1px solid var(--cor-borda); border-radius: var(--raio); }
+        .historico-scroll table { min-width: 640px; }
+        .historico-scroll th { top: 0; z-index: 2; }
         th a { color: var(--cor-texto); text-decoration: none; display: block; width: 100%; }
         th a:hover { color: var(--cor-primaria); text-decoration: underline; }
         tr:nth-child(even) { background-color: #fafbfc; }
@@ -1398,20 +1637,42 @@ HTML_LAYOUT = """
 
                 <!-- GRÁFICO HISTÓRICO DE CRESCIMENTO -->
                 {% if dados_grafico and dados_grafico.labels %}
+                    {% if grafico_amostrado %}
+                    <p class="text-muted" role="status">
+                        Gráfico amostrado: {{ datas_exibidas_grafico }} de {{ total_datas_grafico }} datas,
+                        com seleção determinística que preserva a primeira e a última data.
+                        Use o período para visualizar maior detalhe.
+                    </p>
+                    {% endif %}
                     <div style="background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); margin-bottom: 20px; border: 1px solid #e2e8f0;">
                         <h4 style="margin-top: 0; color: #2c3e50;">📈 EVOLUÇÃO DE CONSUMO DE DISCO (GB)</h4>
                         <div style="height: 250px; width: 100%;">
-                            <canvas id="chart-historico-linha"></canvas>
+                            <canvas id="chart-historico-linha" role="img" aria-label="Evolução do consumo de disco em gigabytes por servidor">Seu navegador não suporta gráficos em canvas.</canvas>
+                        </div>
+                    </div>
+                    <div style="background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); margin-bottom: 20px; border: 1px solid #e2e8f0;">
+                        <h4 style="margin-top: 0; color: #2c3e50;">📊 COMPOSIÇÃO DO ESPAÇO POR SERVIDOR (GB)</h4>
+                        <div style="height: 250px; width: 100%;">
+                            <canvas id="chart-historico-area" role="img" aria-label="Composição empilhada do espaço ocupado em gigabytes por servidor">Seu navegador não suporta gráficos em canvas.</canvas>
                         </div>
                     </div>
                 {% endif %}
 
                 <h3>📊 Registros de Histórico Diário (`historico_bancos.db`)</h3>
+                {% if total_registros_historico %}
+                    <p class="text-muted" aria-live="polite">
+                        Exibindo {{ dados_historico|length }} de {{ total_registros_historico }} registros.
+                        {% if historico_tabela_limitado %}
+                            Para consultar registros além dos {{ limite_tabela_historico }} mais recentes, selecione um período menor nos filtros.
+                        {% endif %}
+                    </p>
+                {% endif %}
                 {% if dados_historico|length == 0 %}
                     <div style="text-align: center; padding: 30px; color: #7f8c8d;">
                         Nenhum registro encontrado para os filtros selecionados.
                     </div>
                 {% else %}
+                    <div class="historico-scroll" role="region" aria-label="Registros do histórico diário" tabindex="0">
                     <table>
                         <thead>
                             <tr>
@@ -1432,13 +1693,26 @@ HTML_LAYOUT = """
                             {% endfor %}
                         </tbody>
                     </table>
+                    </div>
                 {% endif %}
 
             {% elif modo_orfaos %}
+                {% if erros_orfaos %}
+                    <div role="alert" style="padding: 15px; margin-bottom: 15px; color: #991b1b; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px;">
+                        <strong>Não foi possível concluir a varredura em {{ erros_orfaos|length }} servidor(es):</strong>
+                        <ul style="margin-bottom: 0;">
+                            {% for erro in erros_orfaos %}
+                                <li><strong>{{ erro.servidor }}</strong>: {{ erro.mensagem }}</li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                {% endif %}
                 {% if arquivos_orfaos|length == 0 %}
+                    {% if not erros_orfaos %}
                     <div style="text-align: center; padding: 20px; color: #27ae60; font-weight: bold;">
                         ✅ Nenhum arquivo órfão/cópia manual encontrado nos diretórios!
                     </div>
+                    {% endif %}
                 {% else %}
                     <table>
                         <thead>
@@ -1511,8 +1785,8 @@ HTML_LAYOUT = """
                                 {% endif %}
                                 <td>
                                     {% if banco.eh_inativo %}<span class="badge-inativo-tag">INATIVO</span>{% endif %}
-                                    <strong class="alias-clicavel" onclick="toggleDetalhes('{{ banco.alias }}')" title="Clique para ver os detalhes do cliente">
-                                        {{ banco.alias }} <span id="seta-{{ banco.alias }}">▸</span>
+                                    <strong class="alias-clicavel" onclick="toggleDetalhes(this)" title="Clique para ver os detalhes do cliente">
+                                        {{ banco.alias }} <span class="seta-detalhes">▸</span>
                                     </strong>
                                     {% if not banco.lojas and not banco.eh_inativo %}
                                         <span class="badge bg-warning text-dark" style="font-size:0.7em;" title="Nenhuma loja cadastrada para este alias">📭 sem loja</span>
@@ -1543,7 +1817,7 @@ HTML_LAYOUT = """
                                         <div class="cname-cell" data-assinatura="{{ assinatura_cname(banco.cname_string) }}" data-alias="{{ banco.alias }}">
                                             <span class="cname-status" title="Testando conectividade...">⏳</span>
                                             <span class="cname-texto">{{ banco.cname_string }}</span>
-                                            <button class="btn-copy" onclick="copiarString('{{ banco.cname_string }}', this)" title="{{ banco.cname_string }}{% if banco.cname_custom %} (editado manualmente){% endif %} — clique para copiar">
+                                            <button class="btn-copy" data-cname="{{ banco.cname_string }}" onclick="copiarCnameCliente(this)" title="{{ banco.cname_string }}{% if banco.cname_custom %} (editado manualmente){% endif %} — clique para copiar">
                                                 📋 Copiar
                                             </button>
                                             {% if tem_permissao('perm_servidores') %}
@@ -1557,7 +1831,7 @@ HTML_LAYOUT = """
                                     {% endif %}
                                 </td>
                             </tr>
-                            <tr id="detalhes-{{ banco.alias }}" class="linha-detalhes" style="display:none;">
+                            <tr class="linha-detalhes" style="display:none;">
                                 <td colspan="{{ 7 if (busca_termo or modo_todos or modo_inativos) else 6 }}">
                                     <div class="painel-lojas" data-alias="{{ banco.alias }}">
                                         {% if banco.lojas %}
@@ -1591,7 +1865,7 @@ HTML_LAYOUT = """
                                             <p class="sem-lojas">Nenhuma loja cadastrada para este alias ainda.</p>
                                         {% endif %}
                                         {% if tem_permissao('perm_servidores') %}
-                                            <button class="btn-copy" style="background:#e8f8f0;color:#1e8449;margin-top:8px;" onclick="adicionarLoja(this, '{{ banco.alias }}')">
+                                            <button class="btn-copy" style="background:#e8f8f0;color:#1e8449;margin-top:8px;" onclick="adicionarLoja(this, this.closest('.painel-lojas').dataset.alias)">
                                                 ➕ Adicionar Loja
                                             </button>
                                         {% endif %}
@@ -1608,9 +1882,9 @@ HTML_LAYOUT = """
 
     <script>
         // --- Expande/recolhe o card de detalhes do cliente (CodInfo, LojCód., CNPJ, Razão, Fantasia) ---
-        function toggleDetalhes(alias) {
-            const linha = document.getElementById('detalhes-' + alias);
-            const seta = document.getElementById('seta-' + alias);
+        function toggleDetalhes(elemento) {
+            const linha = elemento.closest('tr').nextElementSibling;
+            const seta = elemento.querySelector('.seta-detalhes');
             if (!linha) return;
             const abrindo = linha.style.display === 'none';
             linha.style.display = abrindo ? '' : 'none';
@@ -1873,11 +2147,14 @@ HTML_LAYOUT = """
 
         document.addEventListener("DOMContentLoaded", function() {
             {% if modo_historico and dados_grafico and dados_grafico.labels %}
+                const dadosHistorico = {{ dados_grafico|tojson }};
                 var ctxHistorico = document.getElementById('chart-historico-linha').getContext('2d');
                 new Chart(ctxHistorico, {
                     type: 'line',
-                    data: {{ dados_grafico|tojson }},
+                    data: dadosHistorico,
                     options: {
+                        animation: false,
+                        normalized: true,
                         responsive: true,
                         maintainAspectRatio: false,
                         interaction: {
@@ -1890,8 +2167,44 @@ HTML_LAYOUT = """
                                 title: { display: true, text: 'Tamanho Total (GB)' }
                             },
                             x: {
-                                title: { display: true, text: 'Data' }
+                                title: { display: true, text: 'Data' },
+                                ticks: { autoSkip: true, maxTicksLimit: 12 }
                             }
+                        },
+                        elements: {
+                            point: { radius: 0, hitRadius: 8 },
+                            line: { tension: 0 }
+                        }
+                    }
+                });
+
+                const dadosArea = {
+                    labels: dadosHistorico.labels,
+                    datasets: dadosHistorico.datasets.map(dataset => ({
+                        ...dataset,
+                        data: dataset.data.slice(),
+                        fill: true,
+                        stack: 'espaco-servidores',
+                        backgroundColor: dataset.borderColor + '66'
+                    }))
+                };
+                var ctxArea = document.getElementById('chart-historico-area').getContext('2d');
+                new Chart(ctxArea, {
+                    type: 'line',
+                    data: dadosArea,
+                    options: {
+                        animation: false,
+                        normalized: true,
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        interaction: { mode: 'index', intersect: false },
+                        scales: {
+                            y: { stacked: true, beginAtZero: true, title: { display: true, text: 'Tamanho Total (GB)' } },
+                            x: { stacked: true, title: { display: true, text: 'Data' }, ticks: { autoSkip: true, maxTicksLimit: 12 } }
+                        },
+                        elements: {
+                            point: { radius: 0, hitRadius: 8 },
+                            line: { tension: 0 }
                         }
                     }
                 });
@@ -2269,7 +2582,7 @@ HTML_ADMIN = r"""
                                     <i class="fa-solid fa-pen-to-square"></i> Editar
                                 </button>
                                 <!-- Botão Inativar -->
-                                <form action="/admin/inativar" method="POST" class="d-inline" onsubmit="return confirm('Inativar o alias {{ b.alias }}?') && pedirSenhaEConfirmar(this);">
+                                <form action="/admin/inativar" method="POST" class="d-inline" data-alias="{{ b.alias }}" onsubmit="return confirmarInativacao(this);">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                                     <input type="hidden" name="servidor" value="{{ servidor_atual }}">
                                     <input type="hidden" name="alias" value="{{ b.alias }}">
@@ -2320,6 +2633,7 @@ HTML_ADMIN = r"""
             <form action="/admin/salvar_raw" method="POST" onsubmit="return pedirSenhaEConfirmar(this)">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="servidor" value="{{ servidor_atual }}">
+                <input type="hidden" name="hash_original" value="{{ hash_conteudo_raw }}">
                 <input type="hidden" name="senha_confirmacao" class="campo-senha-confirmacao">
                 <textarea id="conteudoArquivo" name="conteudo_raw" class="editor-raw p-3" oninput="renderizarVisualizador()">{{ conteudo_raw }}</textarea>
                 <div class="p-3 bg-light text-end border-top d-flex justify-content-between align-items-center">
@@ -2331,18 +2645,77 @@ HTML_ADMIN = r"""
             </form>
         </div>
     </div>
+
+    <!-- Confirmação protegida para ações administrativas sensíveis. -->
+    <div id="modalConfirmacaoSenha" class="modal" role="dialog" aria-modal="true"
+         aria-labelledby="tituloConfirmacaoSenha" style="display:none; background:rgba(15, 23, 42, .55);">
+        <div class="modal-content" style="max-width:420px; margin:10vh auto; padding:24px; border-radius:10px; background:#fff;">
+            <form id="formConfirmacaoSenha" onsubmit="confirmarSenhaAcao(event)">
+                <h3 id="tituloConfirmacaoSenha" style="margin-top:0; color:#1e293b;">
+                    <i class="fa-solid fa-lock me-2"></i>Confirmar ação
+                </h3>
+                <p style="color:#64748b;">Digite sua senha para continuar com esta ação.</p>
+                <label for="senhaConfirmacaoAcao" class="form-label fw-bold">Senha:</label>
+                <input type="password" id="senhaConfirmacaoAcao" class="form-control" required
+                       autocomplete="current-password">
+                <div id="erroConfirmacaoSenha" class="text-danger small mt-2" role="alert" aria-live="polite"></div>
+                <div class="d-flex justify-content-end gap-2 mt-4">
+                    <button type="button" class="btn btn-secondary" onclick="fecharConfirmacaoSenha()">Cancelar</button>
+                    <button type="submit" class="btn btn-success fw-bold">Confirmar</button>
+                </div>
+            </form>
+        </div>
+    </div>
         
     <script>
     // --- Confirmação de senha antes de ações sensíveis (criar/editar/excluir alias, salvar .conf) ---
     // Evita que outra pessoa use a sessão aberta e esquecida de um usuário ausente do computador.
+    let formularioAguardandoSenha = null;
+
     function pedirSenhaEConfirmar(form) {
-        const senha = prompt('Confirme sua senha para continuar com esta ação:');
+        formularioAguardandoSenha = form;
+        const modal = document.getElementById('modalConfirmacaoSenha');
+        const campoSenha = document.getElementById('senhaConfirmacaoAcao');
+        campoSenha.value = '';
+        document.getElementById('erroConfirmacaoSenha').textContent = '';
+        modal.style.display = 'block';
+        requestAnimationFrame(() => campoSenha.focus());
+        return false;
+    }
+
+    function fecharConfirmacaoSenha() {
+        document.getElementById('modalConfirmacaoSenha').style.display = 'none';
+        document.getElementById('senhaConfirmacaoAcao').value = '';
+        document.getElementById('erroConfirmacaoSenha').textContent = '';
+        formularioAguardandoSenha = null;
+    }
+
+    function confirmarSenhaAcao(event) {
+        event.preventDefault();
+        const senha = document.getElementById('senhaConfirmacaoAcao').value;
+        const form = formularioAguardandoSenha;
+        const campo = form && form.querySelector('.campo-senha-confirmacao');
         if (!senha) {
-            return false; // cancelou ou deixou em branco: não envia o formulário
+            document.getElementById('erroConfirmacaoSenha').textContent = 'Informe sua senha.';
+            return;
         }
-        const campo = form.querySelector('.campo-senha-confirmacao');
-        if (campo) campo.value = senha;
-        return true;
+        if (!form || !campo) {
+            document.getElementById('erroConfirmacaoSenha').textContent = 'Não foi possível confirmar esta ação.';
+            return;
+        }
+        campo.value = senha;
+        document.getElementById('modalConfirmacaoSenha').style.display = 'none';
+        document.getElementById('senhaConfirmacaoAcao').value = '';
+        formularioAguardandoSenha = null;
+        HTMLFormElement.prototype.submit.call(form);
+    }
+
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && formularioAguardandoSenha) fecharConfirmacaoSenha();
+    });
+
+    function confirmarInativacao(form) {
+        return confirm('Inativar o alias ' + form.dataset.alias + '?') && pedirSenhaEConfirmar(form);
     }
 
     // --- Solicitação de novo CNAME por e-mail ---
@@ -2382,7 +2755,8 @@ HTML_ADMIN = r"""
             document.getElementById('cnameAlias').value = alias;
         }
 
-        statusDiv.innerHTML = '<span class="text-muted small">Enviando...</span>';
+        statusDiv.className = 'text-muted small';
+        statusDiv.textContent = 'Enviando...';
 
         csrfFetch('/admin/solicitar-cname', {
             method: 'POST',
@@ -2392,13 +2766,18 @@ HTML_ADMIN = r"""
         .then(r => r.json())
         .then(data => {
             if (data.sucesso) {
-                statusDiv.innerHTML = '<div class="alert alert-success p-2 mb-0">' + data.mensagem + '</div>';
+                statusDiv.className = 'alert alert-success p-2 mb-0';
+                statusDiv.textContent = data.mensagem;
                 document.getElementById('formSolicitarCname').reset();
             } else {
-                statusDiv.innerHTML = '<div class="alert alert-danger p-2 mb-0">' + data.mensagem + '</div>';
+                statusDiv.className = 'alert alert-danger p-2 mb-0';
+                statusDiv.textContent = data.mensagem;
             }
         })
-        .catch(() => { statusDiv.innerHTML = '<div class="alert alert-danger p-2 mb-0">Não foi possível enviar. Verifique sua conexão.</div>'; });
+        .catch(() => {
+            statusDiv.className = 'alert alert-danger p-2 mb-0';
+            statusDiv.textContent = 'Não foi possível enviar. Verifique sua conexão.';
+        });
 
         return false;
     }
@@ -2439,10 +2818,16 @@ HTML_ADMIN = r"""
         const acoesTd = tr.querySelector('.val-acoes');
         
         const originalAlias = tr.getAttribute('data-original-alias');
-        const originalCaminho = tr.getAttribute('data-original-caminho');
+        if (!acoesTd._conteudoOriginal) acoesTd._conteudoOriginal = acoesTd.cloneNode(true);
 
         // Cria input no campo de alias
-        aliasTd.innerHTML = `<input type="text" id="input-alias-${id}" class="form-control form-control-sm" value="${originalAlias}" oninput="atualizarCaminhoEdicaoLinha(${id})">`;
+        const inputAlias = document.createElement('input');
+        inputAlias.type = 'text';
+        inputAlias.id = `input-alias-${id}`;
+        inputAlias.className = 'form-control form-control-sm';
+        inputAlias.value = originalAlias;
+        inputAlias.addEventListener('input', () => atualizarCaminhoEdicaoLinha(id));
+        aliasTd.replaceChildren(inputAlias);
 
         // Troca os botões de ação para [Salvar] e [Cancelar]
         acoesTd.innerHTML = `
@@ -2470,7 +2855,9 @@ HTML_ADMIN = r"""
         if (servidor === 'DB05') {
             novoCaminho = `/opt/infobrasil/3.0/${novoAlias}/dados.fdb`;
         }
-        valCaminhoTd.innerHTML = `<code>${novoCaminho}</code>`;
+        const code = document.createElement('code');
+        code.textContent = novoCaminho;
+        valCaminhoTd.replaceChildren(code);
     }
 
     function cancelarEdicaoLinha(id) {
@@ -2483,32 +2870,24 @@ HTML_ADMIN = r"""
         const originalCaminho = tr.getAttribute('data-original-caminho');
 
         // Restaura os valores originais
-        aliasTd.innerHTML = `<span class="alias-text">${originalAlias}</span>`;
-        caminhoTd.innerHTML = `<code>${originalCaminho}</code>`;
+        const aliasSpan = document.createElement('span');
+        aliasSpan.className = 'alias-text';
+        aliasSpan.textContent = originalAlias;
+        aliasTd.replaceChildren(aliasSpan);
+        const caminhoCode = document.createElement('code');
+        caminhoCode.textContent = originalCaminho;
+        caminhoTd.replaceChildren(caminhoCode);
 
         // Restaura botões padrão
-        const servidorAtual = document.getElementById('servidor').value;
-        acoesTd.innerHTML = `
-            <div class="btn-group-acoes" id="acoes-${id}">
-                <button class="btn btn-sm btn-outline-primary me-1" onclick="editarLinha(${id})">
-                    <i class="fa-solid fa-pen-to-square"></i> Editar
-                </button>
-                <form action="/admin/inativar" method="POST" class="d-inline" onsubmit="return confirm('Inativar o alias ${originalAlias}?') && pedirSenhaEConfirmar(this);">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    <input type="hidden" name="servidor" value="${servidorAtual}">
-                    <input type="hidden" name="alias" value="${originalAlias}">
-                    <input type="hidden" name="senha_confirmacao" class="campo-senha-confirmacao">
-                    <button type="submit" class="btn btn-sm btn-outline-danger">
-                        <i class="fa-solid fa-ban me-1"></i>Inativar
-                    </button>
-                </form>
-            </div>
-        `;
+        if (acoesTd._conteudoOriginal) {
+            acoesTd.replaceChildren(...Array.from(acoesTd._conteudoOriginal.childNodes, no => no.cloneNode(true)));
+        }
     }
 
     function salvarEdicaoLinha(id) {
         const tr = document.getElementById(`tr-${id}`);
         const inputAlias = document.getElementById(`input-alias-${id}`);
+        const acoesTd = tr.querySelector('.val-acoes');
         const novoAlias = inputAlias.value.trim();
         const originalAlias = tr.getAttribute('data-original-alias');
         const servidor = document.getElementById('servidor').value;
@@ -2527,9 +2906,10 @@ HTML_ADMIN = r"""
         const areaTexto = document.getElementById('conteudoArquivo');
         let texto = areaTexto.value;
         
-        const regexAlias = new RegExp(`^(\\s*${originalAlias}\\s*=.*)$`, 'm');
+        const aliasRegexSeguro = originalAlias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const regexAlias = new RegExp('^(\\s*' + aliasRegexSeguro + '\\s*=.*)$', 'm');
         if (regexAlias.test(texto)) {
-            texto = texto.replace(regexAlias, `${novoAlias} = ${novoCaminho}`);
+            texto = texto.replace(regexAlias, () => novoAlias + ' = ' + novoCaminho);
             areaTexto.value = texto;
             renderizarVisualizador();
         }
@@ -2537,6 +2917,14 @@ HTML_ADMIN = r"""
         // Atualiza os dados na tabela e salva novo estado original
         tr.setAttribute('data-original-alias', novoAlias);
         tr.setAttribute('data-original-caminho', novoCaminho);
+        if (acoesTd._conteudoOriginal) {
+            const formOriginal = acoesTd._conteudoOriginal.querySelector('form');
+            if (formOriginal) {
+                formOriginal.dataset.alias = novoAlias;
+                const campoAlias = formOriginal.querySelector('input[name="alias"]');
+                if (campoAlias) campoAlias.value = novoAlias;
+            }
+        }
         cancelarEdicaoLinha(id);
 
         const secaoArquivo = document.getElementById('secaoArquivo');
@@ -3273,17 +3661,34 @@ def admin_perfil():
 
     nova_senha = request.form.get('nova_senha')
     confirmar_senha = request.form.get('confirmar_nova_senha')
+    senha_atual = request.form.get('senha_atual') or request.form.get('senha_atual_perfil')
 
     if nova_senha:
         if nova_senha != confirmar_senha:
             flash('As senhas não coincidem!', 'danger')
             return redirect('/admin')
 
-        senha_hash = generate_password_hash(nova_senha)
+        ok_senha, msg_senha = senha_atende_politica(nova_senha)
+        if not ok_senha:
+            flash(msg_senha, 'danger')
+            return redirect('/admin')
+
         conn = get_db_connection()
+        usuario = conn.execute(
+            'SELECT senha_hash FROM usuarios WHERE id = ?', (session['user_id'],)
+        ).fetchone()
+        veio_de_reset = session.get('reset_senha_pendente', False)
+        if not usuario or (not veio_de_reset and (
+                not senha_atual or not check_password_hash(usuario['senha_hash'], senha_atual))):
+            conn.close()
+            flash('Senha atual incorreta.', 'danger')
+            return redirect('/admin')
+
+        senha_hash = generate_password_hash(nova_senha)
         conn.execute('UPDATE usuarios SET senha_hash = ? WHERE id = ?', (senha_hash, session['user_id']))
         conn.commit()
         conn.close()
+        session.pop('reset_senha_pendente', None)
         flash('Senha alterada com sucesso!', 'success')
 
     return redirect('/admin')
@@ -3341,10 +3746,12 @@ def admin_painel():
         return redirect('/admin/login')
     if not tem_permissao('perm_gestao_bancos'):
         return "Você não tem permissão para acessar a Gestão de Bancos. Fale com o administrador Master. <a href='/'>Voltar</a>", 403
+    if not SERVIDORES:
+        return "Nenhum servidor está configurado em SERVIDORES_CONFIG.", 503
 
     srv_atual = request.args.get('servidor', 'DB01')
     if srv_atual not in SERVIDORES: 
-        srv_atual = 'DB01'
+        srv_atual = next(iter(SERVIDORES))
 
     msg_sucesso = request.args.get('sucesso')
     msg_erro = request.args.get('erro')
@@ -3363,12 +3770,16 @@ def admin_painel():
         usuarios_lista = conn.execute("SELECT id, nome, email, eh_master, ativo, perm_servidores, perm_gestao_bancos, perm_horarios FROM usuarios").fetchall()
         conn.close()
 
-    conteudo_raw = ler_databases_conf_remoto(srv_atual)
+    leitura_raw = ler_databases_conf_remoto_estruturado(srv_atual)
+    conteudo_raw = (leitura_raw['conteudo'] if leitura_raw['ok'] else
+                    '# Não foi possível ler databases.conf neste momento.')
+    hash_conteudo_raw = leitura_raw.get('hash', '') if leitura_raw['ok'] else ''
     bancos_conf, _, _ = obter_dados_servidor_linux(srv_atual, SERVIDORES[srv_atual], modo_busca_unificada=True, forcar_atualizacao=True)
 
     return render_template_string(
         HTML_ADMIN, servidores=SERVIDORES, servidor_atual=srv_atual,
         bancos_conf=bancos_conf, conteudo_raw=conteudo_raw,
+        hash_conteudo_raw=hash_conteudo_raw,
         msg_sucesso=msg_sucesso, msg_erro=msg_erro, usuarios_lista=usuarios_lista,
         usuario_nome=usuario_nome, usuario_email=usuario_email,
         veio_de_reset=session.get('reset_senha_pendente', False)
@@ -3447,11 +3858,15 @@ def admin_adicionar():
         return voltar(erro='Informe um alias válido e os responsáveis em uma única linha.')
     if tem_arquivo and not arquivo.filename.lower().endswith('.fdb'):
         return voltar(erro='Selecione um arquivo de banco .fdb.')
-    if verificar_alias_existente_global(alias):
+    servidor_existente, erro_verificacao = verificar_alias_existente_global(alias)
+    if erro_verificacao:
+        return voltar(erro='Não foi possível verificar a unicidade do alias em todos os servidores. Nenhuma alteração foi feita.')
+    if servidor_existente:
         return voltar(erro=f'O alias "{alias}" já está cadastrado. Use um alias diferente.')
-    conteudo_atual = ler_databases_conf_remoto(srv)
-    if conteudo_atual.startswith('# Erro ao ler'):
+    leitura = ler_databases_conf_remoto_estruturado(srv)
+    if not leitura['ok']:
         return voltar(erro='Não foi possível ler a configuração do servidor. Nenhum banco foi enviado.')
+    conteudo_atual = leitura['conteudo']
     try:
         with closing(conectar_ssh(SERVIDORES[srv])) as ssh, closing(ssh.open_sftp()) as sftp:
             caminho = adicionar_banco(
@@ -3465,7 +3880,7 @@ def admin_adicionar():
     hoje = datetime.now().strftime('%d/%m/%Y')
     comentario = f"\n# Data: {hoje}" + (f" | Envolvidos: {envolvidos}" if envolvidos else '')
     conteudo_final = conteudo_atual.rstrip() + comentario + f"\n{alias} = {caminho}\n"
-    if not salvar_databases_conf_remoto(srv, conteudo_final):
+    if not salvar_databases_conf_remoto(srv, conteudo_final, leitura.get('hash')):
         return voltar(erro='O destino foi preparado, mas o alias não pôde ser salvo. Se enviou um banco, ele permanece no destino; tente cadastrar o alias novamente sem reenviar o arquivo.')
     return voltar(sucesso=f'Alias "{alias}" cadastrado com sucesso!')
 
@@ -3621,11 +4036,21 @@ def admin_inativar():
 
     srv = request.form.get('servidor')
     alias_target = request.form.get('alias', '').strip()
+    if (srv not in SERVIDORES or not alias_target or len(alias_target) > 100 or
+            any(ord(caractere) < 32 for caractere in alias_target)):
+        return redirect(url_for('bancos.admin_painel', servidor=srv, erro='Servidor ou alias inválido.'))
     hoje = datetime.now().strftime('%d/%m/%Y')
 
-    conteudo_atual = ler_databases_conf_remoto(srv)
+    leitura = ler_databases_conf_remoto_estruturado(srv)
+    if not leitura['ok']:
+        return redirect(url_for(
+            'bancos.admin_painel', servidor=srv,
+            erro='Não foi possível ler databases.conf. Nenhuma alteração foi feita.'
+        ))
+    conteudo_atual = leitura['conteudo']
     linhas = conteudo_atual.splitlines()
     novas_linhas = []
+    encontrado = False
 
     for i, linha in enumerate(linhas):
         linha_limpa = linha.strip()
@@ -3633,15 +4058,29 @@ def admin_inativar():
             partes = linha_limpa.split('=', 1)
             alias_linha = partes[0].strip()
             if alias_linha.lower() == alias_target.lower():
+                encontrado = True
                 novas_linhas.append(f"# INATIVADO EM {hoje}")
                 novas_linhas.append(f"# {linha_limpa}")
                 continue
         novas_linhas.append(linha)
 
-    conteudo_final = "\n".join(novas_linhas) + "\n"
-    salvar_databases_conf_remoto(srv, conteudo_final)
+    if not encontrado:
+        return redirect(url_for(
+            'bancos.admin_painel', servidor=srv,
+            erro=f'Alias "{alias_target}" não foi encontrado; nenhuma alteração foi feita.'
+        ))
 
-    return redirect(f'/admin?servidor={srv}&sucesso=Alias "{alias_target}" inativado com sucesso!')
+    conteudo_final = "\n".join(novas_linhas) + "\n"
+    if not salvar_databases_conf_remoto(srv, conteudo_final, leitura.get('hash')):
+        return redirect(url_for(
+            'bancos.admin_painel', servidor=srv,
+            erro='Não foi possível salvar databases.conf. Nenhuma confirmação de sucesso foi emitida.'
+        ))
+
+    return redirect(url_for(
+        'bancos.admin_painel', servidor=srv,
+        sucesso=f'Alias "{alias_target}" inativado com sucesso!'
+    ))
 
 @bancos_bp.route('/admin/usuarios/excluir', methods=['POST'])
 def excluir_usuario():
@@ -3675,9 +4114,39 @@ def admin_salvar_raw():
 
     srv = request.form.get('servidor')
     conteudo_raw = request.form.get('conteudo_raw', '')
-    salvar_databases_conf_remoto(srv, conteudo_raw)
+    hash_original = request.form.get('hash_original', '').strip()
+    if srv not in SERVIDORES:
+        return redirect(url_for('bancos.admin_painel', servidor=srv, erro='Servidor inválido.'))
+    if not re.fullmatch(r'[0-9a-fA-F]{64}', hash_original):
+        return redirect(url_for(
+            'bancos.admin_painel', servidor=srv,
+            erro='Versão original inválida ou ausente. Recarregue a página antes de salvar.'
+        ))
+    hash_original = hash_original.lower()
+    leitura = ler_databases_conf_remoto_estruturado(srv)
+    if not leitura['ok']:
+        return redirect(url_for(
+            'bancos.admin_painel', servidor=srv,
+            erro='Não foi possível validar o estado atual de databases.conf. Nenhuma alteração foi feita.'
+        ))
+    if not hmac.compare_digest(leitura.get('hash', '').lower(), hash_original):
+        return redirect(url_for(
+            'bancos.admin_painel', servidor=srv,
+            erro='Conflito: databases.conf foi alterado desde que a página foi carregada. Recarregue e revise suas alterações.'
+        ))
+    valido, erro_validacao = validar_conteudo_databases_conf(conteudo_raw)
+    if not valido:
+        return redirect(url_for('bancos.admin_painel', servidor=srv, erro=erro_validacao))
+    if not salvar_databases_conf_remoto(srv, conteudo_raw, hash_original):
+        return redirect(url_for(
+            'bancos.admin_painel', servidor=srv,
+            erro='Conflito ou falha ao salvar databases.conf. O arquivo anterior foi preservado; recarregue a página e tente novamente.'
+        ))
 
-    return redirect(f'/admin?servidor={srv}&sucesso=Arquivo databases.conf atualizado com sucesso!')
+    return redirect(url_for(
+        'bancos.admin_painel', servidor=srv,
+        sucesso='Arquivo databases.conf atualizado com sucesso!'
+    ))
 
 # --- ROTAS PÚBLICAS REAPROVEITADAS ---
 @bancos_bp.route('/admin/cliente-loja/salvar', methods=['POST'])
@@ -4234,7 +4703,7 @@ HTML_BACKUPS_FTP = """
 
 @bancos_bp.route('/backups-ftp')
 def exibir_backups_ftp():
-    forcar = request.args.get('atualizar') == '1'
+    forcar = solicitar_refresh('backups_ftp')
     status = obter_status_backups_ftp(forcar_atualizacao=forcar)
     filtro = request.args.get('filtro', '')  # '', 'ok', 'atrasado', 'sem_arquivo'
 
@@ -4254,20 +4723,22 @@ def exibir_backups_ftp():
 @bancos_bp.route('/')
 @bancos_bp.route('/servidor/<nome_servidor>')
 def exibir_servidor(nome_servidor='DB01'):
-    if nome_servidor not in SERVIDORES: nome_servidor = 'DB01'
+    if nome_servidor not in SERVIDORES:
+        nome_servidor = next(iter(SERVIDORES), '')
     ordem = request.args.get('ordem', 'nome')
     busca_termo = request.args.get('busca', '').strip()
     filtro_status = request.args.get('filtro', '').strip()
-    forcar_atualizacao = request.args.get('atualizar') == '1'
-    if forcar_atualizacao: limpar_cache_global()
+    forcar_atualizacao = solicitar_refresh('dados_servidores', limpar_cache=True)
 
-    metricas_servidores = obter_metricas_servidores(salvar_db=False, forcar_atualizacao=forcar_atualizacao)
+    metricas_servidores = obter_metricas_servidores(salvar_db=False)
     
     if busca_termo:
-        bancos_brutos, _, _ = buscar_em_todos_servidores(busca_termo, modo_busca_unificada=True, forcar_atualizacao=forcar_atualizacao)
+        bancos_brutos, _, _ = buscar_em_todos_servidores(busca_termo, modo_busca_unificada=True)
+    elif not nome_servidor:
+        bancos_brutos = []
     else:
         info = SERVIDORES[nome_servidor]
-        bancos_brutos, _, _ = obter_dados_servidor_linux(nome_servidor, info, buscar_inativos=False, forcar_atualizacao=forcar_atualizacao)
+        bancos_brutos, _, _ = obter_dados_servidor_linux(nome_servidor, info, buscar_inativos=False)
 
     todos_bancos, _, _ = buscar_em_todos_servidores(buscar_inativos=False, forcar_atualizacao=False)
     todos_bancos_validos = sorted([b for b in todos_bancos if b.get('arquivo_existe')], key=lambda x: x['tamanho_bytes'], reverse=True)
@@ -4284,7 +4755,9 @@ def exibir_servidor(nome_servidor='DB01'):
         bancos = [b for b in bancos_brutos if b.get('status_inatividade', {}).get('status') == filtro_status]
     else: bancos = bancos_brutos
 
-    total_tamanho = formatar_tamanho(sum(b['tamanho_bytes'] for b in bancos))
+    total_calculado = formatar_tamanho(sum(b['tamanho_bytes'] for b in bancos))
+    total_tamanho = ('Indisponível' if any(b.get('erro') for b in bancos_brutos)
+                     else total_calculado)
 
     if ordem == 'servidor': bancos.sort(key=lambda x: (x.get('servidor', ''), x['alias'].lower()))
     elif ordem == 'tamanho': bancos.sort(key=lambda x: x['tamanho_bytes'], reverse=True)
@@ -4310,11 +4783,10 @@ def exibir_todos():
     ordem = request.args.get('ordem', 'nome')
     busca_termo = request.args.get('busca', '').strip()
     filtro_status = request.args.get('filtro', '').strip()
-    forcar_atualizacao = request.args.get('atualizar') == '1'
-    if forcar_atualizacao: limpar_cache_global()
+    forcar_atualizacao = solicitar_refresh('dados_servidores', limpar_cache=True)
 
-    metricas_servidores = obter_metricas_servidores(salvar_db=False, forcar_atualizacao=forcar_atualizacao)
-    bancos_brutos, _, _ = buscar_em_todos_servidores(busca_termo if busca_termo else None, modo_busca_unificada=bool(busca_termo), forcar_atualizacao=forcar_atualizacao)
+    metricas_servidores = obter_metricas_servidores(salvar_db=False)
+    bancos_brutos, _, _ = buscar_em_todos_servidores(busca_termo if busca_termo else None, modo_busca_unificada=bool(busca_termo))
 
     todos_bancos_validos = sorted([b for b in bancos_brutos if b.get('arquivo_existe')], key=lambda x: x['tamanho_bytes'], reverse=True)
     top5_global = todos_bancos_validos[:5]
@@ -4327,7 +4799,9 @@ def exibir_todos():
     total_critico = sum(1 for b in bancos_brutos if b.get('status_inatividade', {}).get('status') == 'critico')
 
     bancos = [b for b in bancos_brutos if b.get('status_inatividade', {}).get('status') == filtro_status] if filtro_status in ['atencao', 'critico'] else bancos_brutos
-    total_tamanho = formatar_tamanho(sum(b['tamanho_bytes'] for b in bancos))
+    total_calculado = formatar_tamanho(sum(b['tamanho_bytes'] for b in bancos))
+    total_tamanho = (f'Parcial: {total_calculado}' if any(b.get('erro') for b in bancos_brutos)
+                     else total_calculado)
 
     if ordem == 'servidor': bancos.sort(key=lambda x: (x.get('servidor', ''), x['alias'].lower()))
     elif ordem == 'tamanho': bancos.sort(key=lambda x: x['tamanho_bytes'], reverse=True)
@@ -4342,7 +4816,9 @@ def exibir_todos():
     # FIX: filtro "sem_lojas" precisa ser aplicado depois de anexar as lojas, já que depende desse dado
     if filtro_status == 'sem_lojas':
         bancos = [b for b in bancos if not b.get('lojas')]
-        total_tamanho = formatar_tamanho(sum(b['tamanho_bytes'] for b in bancos))
+        total_calculado = formatar_tamanho(sum(b['tamanho_bytes'] for b in bancos))
+        total_tamanho = (f'Parcial: {total_calculado}' if any(b.get('erro') for b in bancos_brutos)
+                         else total_calculado)
 
     return render_template_string(
         HTML_LAYOUT, servidores=SERVIDORES, servidor_atual='TODOS', bancos=bancos,
@@ -4357,12 +4833,13 @@ def exibir_todos():
 def exibir_inativos():
     ordem = request.args.get('ordem', 'nome')
     busca_termo = request.args.get('busca', '').strip()
-    forcar_atualizacao = request.args.get('atualizar') == '1'
-    if forcar_atualizacao: limpar_cache_global()
+    forcar_atualizacao = solicitar_refresh('dados_servidores', limpar_cache=True)
 
-    metricas_servidores = obter_metricas_servidores(salvar_db=False, forcar_atualizacao=forcar_atualizacao)
-    bancos, total_bytes, _ = buscar_em_todos_servidores(busca_termo, buscar_inativos=True, modo_busca_unificada=bool(busca_termo), forcar_atualizacao=forcar_atualizacao)
-    total_tamanho = formatar_tamanho(total_bytes)
+    metricas_servidores = obter_metricas_servidores(salvar_db=False)
+    bancos, total_bytes, _ = buscar_em_todos_servidores(busca_termo, buscar_inativos=True, modo_busca_unificada=bool(busca_termo))
+    total_formatado = formatar_tamanho(total_bytes)
+    total_tamanho = (f'Parcial: {total_formatado}' if any(b.get('erro') for b in bancos)
+                     else total_formatado)
 
     if ordem == 'servidor': bancos.sort(key=lambda x: (x.get('servidor', ''), x['alias'].lower()))
     elif ordem == 'tamanho': bancos.sort(key=lambda x: x['tamanho_bytes'], reverse=True)
@@ -4385,12 +4862,18 @@ def exibir_inativos():
 @bancos_bp.route('/orfaos')
 def exibir_orfaos():
     ordem = request.args.get('ordem', 'servidor')
-    forcar_atualizacao = request.args.get('atualizar') == '1'
-    if forcar_atualizacao: limpar_cache_global()
+    forcar_atualizacao = solicitar_refresh('dados_servidores', limpar_cache=True)
 
-    metricas_servidores = obter_metricas_servidores(salvar_db=False, forcar_atualizacao=forcar_atualizacao)
-    _, _, arquivos_orfaos = buscar_em_todos_servidores(varrer_orfaos=True, forcar_atualizacao=forcar_atualizacao)
-    total_tamanho = formatar_tamanho(sum(a['tamanho_bytes'] for a in arquivos_orfaos))
+    # A coleta de órfãos também preenche o cache de bancos; as métricas reutilizam
+    # esse resultado e não abrem uma segunda conexão SSH na mesma requisição.
+    bancos_coleta, _, arquivos_orfaos = buscar_em_todos_servidores(varrer_orfaos=True)
+    erros_orfaos = [
+        {'servidor': banco.get('servidor', 'desconhecido'), 'mensagem': banco.get('erro', 'Falha desconhecida')}
+        for banco in bancos_coleta if banco.get('erro')
+    ]
+    metricas_servidores = obter_metricas_servidores(salvar_db=False)
+    total_formatado = formatar_tamanho(sum(a['tamanho_bytes'] for a in arquivos_orfaos))
+    total_tamanho = f'Parcial: {total_formatado}' if erros_orfaos else total_formatado
 
     if ordem == 'tamanho': arquivos_orfaos.sort(key=lambda x: x['tamanho_bytes'], reverse=True)
     elif ordem == 'data': arquivos_orfaos.sort(key=lambda x: x['timestamp'], reverse=True)
@@ -4401,92 +4884,139 @@ def exibir_orfaos():
         total_tamanho=total_tamanho, total_atencao=0, total_critico=0,
         ordem_atual=ordem, busca_termo='', filtro_status='',
         modo_todos=False, modo_inativos=False, modo_orfaos=True, modo_historico=False,
-        metricas_servidores=metricas_servidores, top5_global=[], ultimos_hospedados_global=[], arquivos_orfaos=arquivos_orfaos, dados_historico=[]
+        metricas_servidores=metricas_servidores, top5_global=[], ultimos_hospedados_global=[],
+        arquivos_orfaos=arquivos_orfaos, erros_orfaos=erros_orfaos, dados_historico=[]
     )
+
+def _data_iso_valida(valor):
+    try:
+        datetime.strptime(valor, '%Y-%m-%d')
+        return True
+    except (TypeError, ValueError):
+        return False
+
 
 @bancos_bp.route('/historico')
 def exibir_historico():
-    servidores_selecionados = request.args.getlist('servidores')
+    servidores_solicitados = request.args.getlist('servidores')
+    servidores_selecionados = list(dict.fromkeys(servidores_solicitados))
+    if (len(servidores_selecionados) > 50 or
+            any(servidor not in SERVIDORES for servidor in servidores_selecionados)):
+        return 'Filtro de servidor inválido.', 400
     data_inicio = request.args.get('data_inicio', '').strip()
     data_fim = request.args.get('data_fim', '').strip()
+    if ((data_inicio and not _data_iso_valida(data_inicio)) or
+            (data_fim and not _data_iso_valida(data_fim))):
+        return 'Período inválido. Use datas no formato AAAA-MM-DD.', 400
+    if data_inicio and data_fim and data_inicio > data_fim:
+        return 'Período inválido: a data inicial deve anteceder a data final.', 400
+    limite_tabela_historico = 500
+    limite_datas_grafico = 1000
+    filtros = []
+    params = []
+    if servidores_selecionados:
+        placeholders = ','.join(['?'] * len(servidores_selecionados))
+        filtros.append(f'servidor IN ({placeholders})')
+        params.extend(servidores_selecionados)
+    if data_inicio:
+        filtros.append('data >= ?')
+        params.append(data_inicio)
+    if data_fim:
+        filtros.append('data <= ?')
+        params.append(data_fim)
+    # Preserva a visão inicial existente: sem qualquer filtro, mostra o último dia.
+    if not filtros:
+        filtros.append('data = (SELECT MAX(data) FROM historico_servidores)')
+    where_sql = ' WHERE ' + ' AND '.join(filtros)
 
     conn = sqlite3.connect(DB_HISTORICO)
     cursor = conn.cursor()
-
-    if not servidores_selecionados and not data_inicio and not data_fim:
-        cursor.execute('SELECT MAX(data) FROM historico_servidores')
-        ultima_data = cursor.fetchone()[0]
-        
-        if ultima_data:
-            cursor.execute('''
-                SELECT data, servidor, total_bytes, qtd_bancos 
-                FROM historico_servidores 
-                WHERE data = ? 
-                ORDER BY servidor ASC
-            ''', (ultima_data,))
-            rows = cursor.fetchall()
-        else:
-            rows = []
-    else:
-        query = 'SELECT data, servidor, total_bytes, qtd_bancos FROM historico_servidores WHERE 1=1'
-        params = []
-
-        if servidores_selecionados:
-            placeholders = ','.join(['?'] * len(servidores_selecionados))
-            query += f' AND servidor IN ({placeholders})'
-            params.extend(servidores_selecionados)
-
-        if data_inicio:
-            query += ' AND data >= ?'
-            params.append(data_inicio)
-
-        if data_fim:
-            query += ' AND data <= ?'
-            params.append(data_fim)
-
-        query += ' ORDER BY data DESC, servidor ASC'
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
-
-    conn.close()
-
-    dados_historico = []
-    for r in rows:
-        dados_historico.append({
+    cursor.execute('SELECT COUNT(*) FROM historico_servidores' + where_sql, params)
+    total_registros_historico = cursor.fetchone()[0]
+    cursor.execute(
+        'SELECT data, servidor, total_bytes, qtd_bancos FROM historico_servidores' +
+        where_sql + ' ORDER BY data DESC, servidor ASC LIMIT ?',
+        [*params, limite_tabela_historico]
+    )
+    dados_historico_tabela = [{
             'data': r[0],
             'servidor': r[1],
             'total_bytes': r[2],
             'tamanho_str': formatar_tamanho(r[2]),
             'qtd_bancos': r[3]
-        })
+        } for r in cursor.fetchall()]
+
+    # O resumo usa extremos agregados no SQLite; não materializa o histórico inteiro.
+    cursor.execute(f'''
+        WITH filtrados AS (
+            SELECT data, servidor, total_bytes FROM historico_servidores{where_sql}
+        ), ordenados AS (
+            SELECT data, servidor, total_bytes,
+                   ROW_NUMBER() OVER (PARTITION BY servidor ORDER BY data ASC) AS rn_asc,
+                   ROW_NUMBER() OVER (PARTITION BY servidor ORDER BY data DESC) AS rn_desc
+            FROM filtrados
+        )
+        SELECT servidor,
+               MAX(CASE WHEN rn_asc = 1 THEN data END),
+               MAX(CASE WHEN rn_desc = 1 THEN data END),
+               MAX(CASE WHEN rn_asc = 1 THEN total_bytes END),
+               MAX(CASE WHEN rn_desc = 1 THEN total_bytes END)
+        FROM ordenados GROUP BY servidor ORDER BY servidor
+    ''', params)
+    linhas_resumo = cursor.fetchall()
+
+    cursor.execute(
+        'SELECT COUNT(DISTINCT data) FROM historico_servidores' + where_sql, params
+    )
+    total_datas_grafico = cursor.fetchone()[0]
+    grafico_amostrado = total_datas_grafico > limite_datas_grafico
+    numeracao_amostra = (
+        'SELECT data, NTILE(?) OVER (ORDER BY data) AS grupo FROM datas'
+        if grafico_amostrado else 'SELECT data FROM datas'
+    )
+    selecao_amostra = (
+        'SELECT CASE WHEN grupo = ? THEN MAX(data) ELSE MIN(data) END AS data '
+        'FROM numeradas GROUP BY grupo'
+        if grafico_amostrado else 'SELECT data FROM datas'
+    )
+    params_grafico = [*params]
+    if grafico_amostrado:
+        params_grafico.extend([limite_datas_grafico, limite_datas_grafico])
+    params_grafico.extend(params)
+    cursor.execute(f'''
+        WITH datas AS (
+            SELECT DISTINCT data FROM historico_servidores{where_sql}
+        ), numeradas AS (
+            {numeracao_amostra}
+        ), amostra AS ({selecao_amostra})
+        SELECT h.data, h.servidor, h.total_bytes
+        FROM (
+            SELECT data, servidor, total_bytes FROM historico_servidores{where_sql}
+        ) h
+        JOIN amostra a ON a.data = h.data
+        ORDER BY h.data ASC, h.servidor ASC
+    ''', params_grafico)
+    rows_grafico = cursor.fetchall()
+    conn.close()
 
     resumo_crescimento = []
     dados_grafico = {}
+    for srv, data_primeira, data_ultima, bytes_primeiro, bytes_ultimo in linhas_resumo:
+        diff_bytes = bytes_ultimo - bytes_primeiro
+        resumo_crescimento.append({
+            'servidor': srv,
+            'data_inicial': data_primeira,
+            'data_final': data_ultima,
+            'crescimento_str': formatar_tamanho(abs(diff_bytes)),
+            'is_positivo': diff_bytes >= 0,
+            'runway': calcular_runway_disco(srv, 0)
+        })
 
-    if dados_historico:
+    if rows_grafico:
         por_servidor = {}
-        for item in dados_historico:
-            srv = item['servidor']
-            if srv not in por_servidor:
-                por_servidor[srv] = []
-            por_servidor[srv].append(item)
-
-        for srv, registros in por_servidor.items():
-            registros_ordenados = sorted(registros, key=lambda x: x['data'])
-            primeiro = registros_ordenados[0]
-            ultimo = registros_ordenados[-1]
-            diff_bytes = ultimo['total_bytes'] - primeiro['total_bytes']
-
-            resumo_crescimento.append({
-                'servidor': srv,
-                'data_inicial': primeiro['data'],
-                'data_final': ultimo['data'],
-                'crescimento_str': formatar_tamanho(abs(diff_bytes)),
-                'is_positivo': diff_bytes >= 0,
-                'runway': calcular_runway_disco(srv, 0)
-            })
-
-        datas_unicas = sorted(list(set(item['data'] for item in dados_historico)))
+        for data, srv, total_bytes in rows_grafico:
+            por_servidor.setdefault(srv, {})[data] = round(total_bytes / (1024 ** 3), 2)
+        datas_unicas = sorted({r[0] for r in rows_grafico})
         datasets_grafico = []
         
         cores = {
@@ -4495,46 +5025,105 @@ def exibir_historico():
         }
 
         for srv in sorted(por_servidor.keys()):
-            valores_gb = []
-            mapa_datas = {item['data']: round(item['total_bytes'] / (1024**3), 2) for item in por_servidor[srv]}
-            
-            for d in datas_unicas:
-                valores_gb.append(mapa_datas.get(d, None))
-
             datasets_grafico.append({
                 'label': srv,
-                'data': valores_gb,
+                'data': [por_servidor[srv].get(data) for data in datas_unicas],
                 'borderColor': cores.get(srv, '#34495e'),
                 'backgroundColor': cores.get(srv, '#34495e'),
                 'fill': False,
-                'tension': 0.1
+                'pointRadius': 0,
+                'tension': 0
             })
 
         dados_grafico = {
             'labels': datas_unicas,
             'datasets': datasets_grafico
         }
-
     return render_template_string(
         HTML_LAYOUT, servidores=SERVIDORES, servidor_atual='HISTORICO', bancos=[],
         total_tamanho="-", total_atencao=0, total_critico=0,
         ordem_atual='', busca_termo='', filtro_status='',
         modo_todos=False, modo_inativos=False, modo_orfaos=False, modo_historico=True,
-        metricas_servidores=[], top5_global=[], ultimos_hospedados_global=[], arquivos_orfaos=[], dados_historico=dados_historico,
+        metricas_servidores=[], top5_global=[], ultimos_hospedados_global=[], arquivos_orfaos=[], dados_historico=dados_historico_tabela,
         servidores_selecionados=servidores_selecionados, data_inicio=data_inicio, data_fim=data_fim,
-        resumo_crescimento=resumo_crescimento, dados_grafico=dados_grafico
+        resumo_crescimento=resumo_crescimento, dados_grafico=dados_grafico,
+        total_registros_historico=total_registros_historico,
+        limite_tabela_historico=limite_tabela_historico,
+        historico_tabela_limitado=total_registros_historico > limite_tabela_historico,
+        grafico_amostrado=grafico_amostrado, total_datas_grafico=total_datas_grafico,
+        limite_datas_grafico=limite_datas_grafico,
+        datas_exibidas_grafico=len(dados_grafico.get('labels', []))
     )
 
 @bancos_bp.route('/api/historico')
 def api_historico():
+    servidores = list(dict.fromkeys(
+        request.args.getlist('servidor') + request.args.getlist('servidores')
+    ))
+    if len(servidores) > 50 or any(servidor not in SERVIDORES for servidor in servidores):
+        return jsonify(erro='Filtro de servidor inválido.'), 400
+    data_inicio = request.args.get('data_inicio', '').strip()
+    data_fim = request.args.get('data_fim', '').strip()
+    if ((data_inicio and not _data_iso_valida(data_inicio)) or
+            (data_fim and not _data_iso_valida(data_fim)) or
+            (data_inicio and data_fim and data_inicio > data_fim)):
+        return jsonify(erro='Período inválido. Use AAAA-MM-DD e data inicial anterior à final.'), 400
+    try:
+        limite = int(request.args.get('limite', '500'))
+        deslocamento = int(request.args.get('offset', '0'))
+    except ValueError:
+        return jsonify(erro='limite e offset devem ser números inteiros.'), 400
+    max_int64 = (1 << 63) - 1
+    max_offset = 10_000_000
+    if (limite < 1 or limite > 1000 or deslocamento < 0 or
+            limite > max_int64 or deslocamento > max_int64 or deslocamento > max_offset):
+        return jsonify(
+            erro=f'limite deve estar entre 1 e 1000 e offset entre 0 e {max_offset}.'
+        ), 400
+
+    filtros = []
+    params = []
+    if servidores:
+        filtros.append('servidor IN (' + ','.join('?' for _ in servidores) + ')')
+        params.extend(servidores)
+    if data_inicio:
+        filtros.append('data >= ?')
+        params.append(data_inicio)
+    if data_fim:
+        filtros.append('data <= ?')
+        params.append(data_fim)
+    where_sql = (' WHERE ' + ' AND '.join(filtros)) if filtros else ''
     conn = sqlite3.connect(DB_HISTORICO)
     cursor = conn.cursor()
-    cursor.execute('SELECT data, servidor, total_bytes, qtd_bancos FROM historico_servidores ORDER BY data DESC')
+    cursor.execute('SELECT COUNT(*) FROM historico_servidores' + where_sql, params)
+    total = cursor.fetchone()[0]
+    cursor.execute(
+        'SELECT data, servidor, total_bytes, qtd_bancos FROM historico_servidores' +
+        where_sql + ' ORDER BY data DESC, servidor ASC LIMIT ? OFFSET ?',
+        [*params, limite, deslocamento]
+    )
     rows = cursor.fetchall()
     conn.close()
     
     resultado = [{'data': r[0], 'servidor': r[1], 'tamanho_bytes': r[2], 'qtd_bancos': r[3]} for r in rows]
-    return jsonify(resultado)
+    resposta = jsonify(resultado)
+    resposta.headers['X-Total-Count'] = str(total)
+    resposta.headers['X-Limit'] = str(limite)
+    resposta.headers['X-Offset'] = str(deslocamento)
+    links = []
+    args_base = request.args.to_dict(flat=False)
+    args_base['limite'] = [str(limite)]
+    if deslocamento > 0:
+        args_anterior = dict(args_base)
+        args_anterior['offset'] = [str(max(0, deslocamento - limite))]
+        links.append(f'<{request.path}?{urlencode(args_anterior, doseq=True)}>; rel="prev"')
+    if deslocamento + len(resultado) < total:
+        args_proximo = dict(args_base)
+        args_proximo['offset'] = [str(deslocamento + limite)]
+        links.append(f'<{request.path}?{urlencode(args_proximo, doseq=True)}>; rel="next"')
+    if links:
+        resposta.headers['Link'] = ', '.join(links)
+    return resposta
 
 
 if __name__ == '__main__':

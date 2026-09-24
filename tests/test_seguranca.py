@@ -1,7 +1,12 @@
 import io
 import gc
+import json
+import re
 import shlex
+import sqlite3
+import threading
 from contextlib import closing, ExitStack
+from datetime import date, timedelta
 import os
 from pathlib import Path
 import tempfile
@@ -156,6 +161,359 @@ class SegurancaTest(unittest.TestCase):
             html = render_template_string(self.bancos.HTML_LOGIN)
             self.assertNotIn('{{ csrf_token()', html)
 
+    def test_confirmacao_de_acao_admin_mascara_senha(self):
+        html = self.bancos.HTML_ADMIN
+        self.assertIn('type="password" id="senhaConfirmacaoAcao"', html)
+        self.assertIn('autocomplete="current-password"', html)
+        self.assertNotIn("prompt('Confirme sua senha", html)
+
+    def test_historico_cria_indice_composto(self):
+        caminho = str(Path(self.temp.name) / 'historico-indice.db')
+        with patch.object(self.bancos, 'DB_HISTORICO', caminho):
+            self.bancos.init_db_historico()
+        with closing(sqlite3.connect(caminho)) as conn:
+            indices = conn.execute("PRAGMA index_list('historico_servidores')").fetchall()
+            nomes = {indice[1] for indice in indices}
+            self.assertIn('idx_historico_servidor_data', nomes)
+            colunas = conn.execute(
+                "PRAGMA index_xinfo('idx_historico_servidor_data')"
+            ).fetchall()
+        self.assertEqual([(coluna[2], coluna[3]) for coluna in colunas[:2]], [
+            ('servidor', 0), ('data', 1)
+        ])
+
+    def test_historico_tem_scroll_graficos_otimizados_e_chart_condicional(self):
+        with closing(sqlite3.connect(self.bancos.DB_HISTORICO)) as conn, conn:
+            conn.execute('DELETE FROM historico_servidores')
+            conn.executemany(
+                'INSERT INTO historico_servidores (data, servidor, total_bytes, qtd_bancos) VALUES (?, ?, ?, ?)',
+                [('2026-09-21', 'DB01', 1024 ** 3, 1),
+                 ('2026-09-22', 'DB01', 2 * 1024 ** 3, 2)],
+            )
+        with patch.dict(self.bancos.SERVIDORES, {'DB01': {}}, clear=True):
+            pagina = self.client.get('/historico?servidores=DB01').get_data(as_text=True)
+        self.assertIn('class="historico-scroll" role="region"', pagina)
+        self.assertIn('chart.js@4.4.7/dist/chart.umd.min.js', pagina)
+        self.assertIn('id="chart-historico-linha"', pagina)
+        self.assertIn('id="chart-historico-area"', pagina)
+        self.assertIn('role="img" aria-label="Evolução do consumo', pagina)
+        self.assertIn('Seu navegador não suporta gráficos em canvas.', pagina)
+        self.assertIn('animation: false', pagina)
+        self.assertIn('normalized: true', pagina)
+        self.assertIn('maxTicksLimit: 12', pagina)
+        self.assertIn("stack: 'espaco-servidores'", pagina)
+
+        with patch.dict(self.bancos.SERVIDORES, {}, clear=True):
+            pagina_comum = self.client.get('/inativos').get_data(as_text=True)
+        self.assertNotIn('chart.umd.min.js', pagina_comum)
+
+    def test_historico_limita_somente_tabela_e_avisa_total(self):
+        registros = [
+            ((date(2025, 1, 1) + timedelta(days=i)).isoformat(),
+             'DB01', (i + 1) * 1024 ** 3, 1)
+            for i in range(1201)
+        ]
+        with closing(sqlite3.connect(self.bancos.DB_HISTORICO)) as conn, conn:
+            conn.execute('DELETE FROM historico_servidores')
+            conn.executemany(
+                'INSERT OR REPLACE INTO historico_servidores (data, servidor, total_bytes, qtd_bancos) VALUES (?, ?, ?, ?)',
+                registros,
+            )
+        with patch.dict(self.bancos.SERVIDORES, {'DB01': {}}, clear=True):
+            pagina = self.client.get('/historico?servidores=DB01').get_data(as_text=True)
+        self.assertIn('Exibindo 500 de 1201 registros.', pagina)
+        self.assertIn('selecione um período menor', pagina)
+        self.assertIn('Gráfico amostrado: 1000 de 1201 datas', pagina)
+        match = re.search(r'const dadosHistorico = (\{.*\});', pagina)
+        self.assertIsNotNone(match)
+        grafico = json.loads(match.group(1))
+        self.assertEqual(len(grafico['labels']), 1000)
+        self.assertEqual(grafico['labels'][0], registros[0][0])
+        self.assertEqual(grafico['labels'][-1], registros[-1][0])
+        self.assertTrue(all(len(dataset['data']) == 1000 for dataset in grafico['datasets']))
+        self.assertEqual(pagina.count('<td><strong>'), 500)
+
+    def test_coleta_sem_servidores_e_limite_de_oito_threads(self):
+        with patch.dict(self.bancos.SERVIDORES, {}, clear=True):
+            self.assertEqual(self.bancos.buscar_em_todos_servidores(), ([], 0, []))
+            self.assertEqual(self.bancos.obter_metricas_servidores(), [])
+
+        servidores = {f'DB{i:02d}': {'ip': 'localhost'} for i in range(9)}
+        executor_real = self.bancos.ThreadPoolExecutor
+        with patch.dict(self.bancos.SERVIDORES, servidores, clear=True), \
+                patch.object(self.bancos, 'obter_dados_servidor_linux', return_value=([], 0, [])), \
+                patch.object(self.bancos, 'ThreadPoolExecutor', wraps=executor_real) as executor:
+            self.bancos.buscar_em_todos_servidores()
+        executor.assert_called_once_with(max_workers=8)
+
+        self.bancos.limpar_cache_global()
+        with patch.dict(self.bancos.SERVIDORES, servidores, clear=True), \
+                patch.object(self.bancos, 'obter_dados_servidor_linux', return_value=([], 0, [])), \
+                patch.object(self.bancos, 'calcular_runway_disco', return_value={}), \
+                patch.object(self.bancos, 'ThreadPoolExecutor', wraps=executor_real) as executor:
+            self.bancos.obter_metricas_servidores(salvar_db=False)
+        executor.assert_called_once_with(max_workers=8)
+
+    def test_varredura_de_orfaos_so_quando_solicitada_e_cache_expresso(self):
+        arquivo_conf = MagicMock()
+        arquivo_conf.__enter__.return_value.read.return_value = b'db = /opt/infobrasil/db.fdb\n'
+        stat = MagicMock(st_size=1024, st_mtime=1)
+        sftp = MagicMock()
+        sftp.open.return_value = arquivo_conf
+        sftp.stat.return_value = stat
+        ssh = MagicMock()
+        ssh.open_sftp.return_value = sftp
+        ssh.exec_command.return_value = (MagicMock(), MagicMock(), MagicMock())
+        ssh.exec_command.return_value[1].read.return_value = b''
+        ssh.exec_command.return_value[1].channel.recv_exit_status.return_value = 0
+        ssh.exec_command.return_value[2].read.return_value = b''
+        info = {'ip': 'localhost', 'porta_fb': 3050}
+
+        self.bancos.limpar_cache_global()
+        with patch.object(self.bancos, 'conectar_ssh', return_value=ssh):
+            self.bancos.obter_dados_servidor_linux('DB01', info)
+        ssh.exec_command.assert_not_called()
+        self.assertFalse(self.bancos.CACHE_DADOS['bancos_por_servidor']['DB01']['orfaos_coletados'])
+
+        ssh.reset_mock()
+        with patch.object(self.bancos, 'conectar_ssh', return_value=ssh):
+            self.bancos.obter_dados_servidor_linux('DB01', info, varrer_orfaos=True)
+        ssh.exec_command.assert_called_once()
+        self.assertTrue(self.bancos.CACHE_DADOS['bancos_por_servidor']['DB01']['orfaos_coletados'])
+
+        ssh.reset_mock()
+        with patch.object(self.bancos, 'conectar_ssh', return_value=ssh):
+            self.bancos.obter_dados_servidor_linux('DB01', info, varrer_orfaos=True)
+        ssh.exec_command.assert_not_called()
+
+        # Uma atualização comum forçada não pode descartar a lista rica já coletada.
+        with patch.object(self.bancos, 'conectar_ssh', return_value=ssh):
+            self.bancos.obter_dados_servidor_linux('DB01', info, forcar_atualizacao=True)
+        cache = self.bancos.CACHE_DADOS['bancos_por_servidor']['DB01']
+        self.assertTrue(cache['orfaos_coletados'])
+
+    def test_cache_concorrente_descarta_coleta_anterior_a_atualizacao(self):
+        iniciou = threading.Event()
+        liberar = threading.Event()
+        arquivo_conf = MagicMock()
+        arquivo_conf.__enter__.return_value.read.return_value = b'db = /opt/infobrasil/db.fdb\n'
+        sftp = MagicMock()
+        sftp.stat.return_value = MagicMock(st_size=1024, st_mtime=1)
+        def abrir(*_args, **_kwargs):
+            iniciou.set()
+            liberar.wait(2)
+            return arquivo_conf
+        sftp.open.side_effect = abrir
+        ssh = MagicMock()
+        ssh.open_sftp.return_value = sftp
+        info = {'ip': 'localhost', 'porta_fb': 3050}
+
+        self.bancos.limpar_cache_global()
+        with patch.object(self.bancos, 'conectar_ssh', return_value=ssh):
+            thread = threading.Thread(
+                target=self.bancos.obter_dados_servidor_linux,
+                args=('DB01', info), daemon=True
+            )
+            thread.start()
+            self.assertTrue(iniciou.wait(1))
+            geracao_nova = self.bancos.limpar_cache_global()
+            liberar.set()
+            thread.join(2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(self.bancos.CACHE_DADOS['generation'], geracao_nova)
+        self.assertNotIn('DB01', self.bancos.CACHE_DADOS['bancos_por_servidor'])
+
+        # A primeira leitura após invalidar precisa abrir uma conexão e gravar a geração nova.
+        sftp.open.side_effect = None
+        sftp.open.return_value = arquivo_conf
+        with patch.object(self.bancos, 'conectar_ssh', return_value=ssh) as conectar:
+            dados, _, _ = self.bancos.obter_dados_servidor_linux('DB01', info)
+        conectar.assert_called_once()
+        self.assertEqual(dados[0]['alias'], 'db')
+        self.assertIn('DB01', self.bancos.CACHE_DADOS['bancos_por_servidor'])
+
+    def test_cache_de_orfaos_tem_frescor_independente_e_fast_path_sem_lock(self):
+        self.bancos.limpar_cache_global()
+        self.bancos.CACHE_DADOS['ttl_segundos'] = 100
+        self.bancos.CACHE_DADOS['bancos_por_servidor']['DB01'] = {
+            'dados': [{'alias': 'db', 'eh_inativo': False}], 'bytes': 10,
+            'orfaos': [{'caminho': '/opt/infobrasil/orfao.fdb'}],
+            'orfaos_coletados': True, 'timestamp': 200, 'orfaos_timestamp': 100,
+        }
+        with patch.object(self.bancos.time, 'time', return_value=250), \
+                patch.object(self.bancos, '_lock_servidor', side_effect=AssertionError('lock desnecessario')):
+            dados, total, orfaos = self.bancos.obter_dados_servidor_linux('DB01', {})
+        self.assertEqual((dados[0]['alias'], total, orfaos), ('db', 10, []))
+        with patch.object(self.bancos.time, 'time', return_value=250):
+            self.assertIsNone(self.bancos._obter_resultado_cache_servidor(
+                'DB01', None, False, False, True
+            ))
+        self.bancos.CACHE_DADOS['ttl_segundos'] = 600
+
+    def test_falha_na_varredura_nao_cacheia_orfaos_nem_grava_snapshot_parcial(self):
+        arquivo_conf = MagicMock()
+        arquivo_conf.__enter__.return_value.read.return_value = b'db = /opt/infobrasil/db.fdb\n'
+        sftp = MagicMock()
+        sftp.open.return_value = arquivo_conf
+        sftp.stat.return_value = MagicMock(st_size=100, st_mtime=1)
+        stdout = MagicMock()
+        stdout.read.return_value = b''
+        stdout.channel.recv_exit_status.return_value = 1
+        stderr = MagicMock()
+        stderr.read.return_value = b'permission denied'
+        ssh = MagicMock()
+        ssh.open_sftp.return_value = sftp
+        ssh.exec_command.return_value = (MagicMock(), stdout, stderr)
+        info = {'ip': 'localhost', 'porta_fb': 3050}
+        self.bancos.limpar_cache_global()
+        with patch.object(self.bancos, 'conectar_ssh', return_value=ssh):
+            dados, _, orfaos = self.bancos.obter_dados_servidor_linux(
+                'DB01', info, modo_busca_unificada=True, varrer_orfaos=True
+            )
+        self.assertIn('erro', dados[0])
+        self.assertEqual(orfaos, [])
+        self.assertNotIn('DB01', self.bancos.CACHE_DADOS['bancos_por_servidor'])
+
+        for nome, saida, efeito_stat in (
+            ('decode', b'\xff', None),
+            ('banco_configurado', b'', [
+                MagicMock(st_size=100, st_mtime=1),
+                OSError('stat do banco falhou'),
+            ]),
+            ('stat', b'/opt/infobrasil/orfao.fdb\n', [
+                MagicMock(st_size=100, st_mtime=1),
+                MagicMock(st_size=100, st_mtime=1),
+                OSError('stat falhou'),
+            ]),
+        ):
+            with self.subTest(falha=nome):
+                self.bancos.limpar_cache_global()
+                stdout.read.return_value = saida
+                stdout.channel.recv_exit_status.return_value = 0
+                sftp.stat.side_effect = efeito_stat
+                with patch.object(self.bancos, 'conectar_ssh', return_value=ssh):
+                    resultado, _, _ = self.bancos.obter_dados_servidor_linux(
+                        'DB01', info, modo_busca_unificada=True, varrer_orfaos=True
+                    )
+                self.assertIn('erro', resultado[0])
+                self.assertNotIn('DB01', self.bancos.CACHE_DADOS['bancos_por_servidor'])
+        sftp.stat.side_effect = None
+
+        caminho = str(Path(self.temp.name) / 'snapshot-incompleto.db')
+        with patch.dict(self.bancos.SERVIDORES, {'DB01': info}, clear=True), \
+                patch.object(self.bancos, 'DB_HISTORICO', caminho), \
+                patch.object(self.bancos, 'obter_dados_servidor_linux', return_value=(dados, 100, [])):
+            self.bancos.init_db_historico()
+            self.bancos.salvar_historico_diario()
+        with closing(sqlite3.connect(caminho)) as conn:
+            quantidade = conn.execute('SELECT COUNT(*) FROM historico_servidores').fetchone()[0]
+        self.assertEqual(quantidade, 0)
+
+    def test_snapshot_historico_faz_uma_coleta_ssh_por_servidor(self):
+        bancos = [
+            {'arquivo_existe': True, 'eh_inativo': False},
+            {'arquivo_existe': True, 'eh_inativo': True},
+        ]
+        orfaos = [{'tamanho_bytes': 25}]
+        info = {'ip': 'localhost', 'porta_fb': 3050}
+        with patch.dict(self.bancos.SERVIDORES, {'DB01': info}, clear=True), \
+                patch.object(self.bancos, 'obter_dados_servidor_linux', return_value=(bancos, 100, orfaos)) as coletar:
+            self.assertEqual(
+                self.bancos.calcular_espaco_total_incluindo_sombra('DB01', info, True), 125
+            )
+        coletar.assert_called_once_with(
+            'DB01', info, modo_busca_unificada=True,
+            varrer_orfaos=True, forcar_atualizacao=True
+        )
+
+        caminho = str(Path(self.temp.name) / 'snapshot-historico.db')
+        with patch.dict(self.bancos.SERVIDORES, {'DB01': info}, clear=True), \
+                patch.object(self.bancos, 'DB_HISTORICO', caminho), \
+                patch.object(self.bancos, 'obter_dados_servidor_linux', return_value=(bancos, 100, orfaos)) as coletar:
+            self.bancos.init_db_historico()
+            self.bancos.salvar_historico_diario()
+        coletar.assert_called_once()
+        with closing(sqlite3.connect(caminho)) as conn:
+            total, quantidade = conn.execute(
+                'SELECT total_bytes, qtd_bancos FROM historico_servidores WHERE servidor = ?',
+                ('DB01',)
+            ).fetchone()
+        self.assertEqual((total, quantidade), (125, 1))
+
+    def test_alias_e_caminho_remotos_nao_entram_em_javascript_ou_innerhtml(self):
+        html_publico = self.bancos.HTML_LAYOUT
+        html_admin = self.bancos.HTML_ADMIN
+        self.assertNotIn("toggleDetalhes('{{ banco.alias }}')", html_publico)
+        self.assertNotIn("copiarString('{{ banco.cname_string }}'", html_publico)
+        self.assertIn('onclick="toggleDetalhes(this)"', html_publico)
+        self.assertIn('data-cname="{{ banco.cname_string }}"', html_publico)
+        self.assertNotIn("confirm('Inativar o alias {{ b.alias }}?')", html_admin)
+        self.assertNotIn('${originalAlias}', html_admin)
+        self.assertNotIn('${originalCaminho}', html_admin)
+        self.assertIn('textContent = originalAlias', html_admin)
+        self.assertIn('textContent = originalCaminho', html_admin)
+
+    def test_admin_sem_servidores_responde_controladamente(self):
+        with patch.dict(self.bancos.SERVIDORES, {}, clear=True), \
+                patch.object(self.bancos, 'conectar_ssh') as conectar:
+            resposta = self.client.get('/admin')
+        self.assertEqual(resposta.status_code, 503)
+        self.assertIn(b'Nenhum servidor', resposta.data)
+        conectar.assert_not_called()
+
+    def test_pagina_orfaos_exibe_falha_sem_falso_sucesso(self):
+        erro = {
+            'servidor': 'DB01', 'erro': 'Erro SSH: varredura incompleta',
+            'arquivo_existe': False, 'tamanho_bytes': 0,
+        }
+        with patch.object(self.bancos, 'buscar_em_todos_servidores', return_value=([erro], 0, [])), \
+                patch.object(self.bancos, 'obter_metricas_servidores', return_value=[]):
+            resposta = self.client.get('/orfaos')
+        self.assertEqual(resposta.status_code, 200)
+        self.assertIn(b'N\xc3\xa3o foi poss\xc3\xadvel concluir a varredura', resposta.data)
+        self.assertIn(b'DB01', resposta.data)
+        self.assertIn(b'varredura incompleta', resposta.data)
+        self.assertNotIn(b'Nenhum arquivo \xc3\xb3rf\xc3\xa3o', resposta.data)
+
+    def test_cache_backups_respeita_geracao_e_timestamp_pos_io(self):
+        iniciou = threading.Event()
+        liberar = threading.Event()
+        resposta_http = MagicMock()
+        resposta_http.__enter__.return_value = resposta_http
+        resposta_http.read.side_effect = lambda: (
+            iniciou.set(), liberar.wait(2), b'ultima atualizacao: teste'
+        )[-1]
+        self.bancos.limpar_cache_global()
+        with patch.object(self.bancos.urllib.request, 'urlopen', return_value=resposta_http), \
+                patch.object(self.bancos, 'interpretar_status_backups', return_value={'clientes': []}):
+            thread = threading.Thread(target=self.bancos.obter_status_backups_ftp, daemon=True)
+            thread.start()
+            self.assertTrue(iniciou.wait(1))
+            self.bancos.limpar_cache_global()
+            liberar.set()
+            thread.join(2)
+        self.assertFalse(thread.is_alive())
+        self.assertIsNone(self.bancos.CACHE_DADOS['backups_ftp']['dados'])
+
+        resposta_http.read.side_effect = None
+        resposta_http.read.return_value = b'ok'
+        with patch.object(self.bancos.urllib.request, 'urlopen', return_value=resposta_http), \
+                patch.object(self.bancos, 'interpretar_status_backups', return_value={'clientes': []}), \
+                patch.object(self.bancos.time, 'time', side_effect=[10, 20]):
+            self.bancos.obter_status_backups_ftp()
+        self.assertEqual(self.bancos.CACHE_DADOS['backups_ftp']['timestamp'], 20)
+
+    def test_atualizacao_invalida_cache_uma_vez_sem_propagar_forcado(self):
+        with patch.dict(self.bancos.SERVIDORES, {}, clear=True), \
+                patch.object(self.bancos, 'limpar_cache_global', wraps=self.bancos.limpar_cache_global) as limpar, \
+                patch.object(self.bancos, 'obter_metricas_servidores', return_value=[]) as metricas, \
+                patch.object(self.bancos, 'buscar_em_todos_servidores', return_value=([], 0, [])) as buscar:
+            resposta = self.client.get('/todos?atualizar=1')
+        self.assertEqual(resposta.status_code, 200)
+        limpar.assert_called_once_with()
+        self.assertNotIn('forcar_atualizacao', metricas.call_args.kwargs)
+        self.assertNotIn('forcar_atualizacao', buscar.call_args.kwargs)
+
     def test_backup_atrasado_aparece_no_filtro_e_totalizador(self):
         from backups import interpretar_status_backups
         status = interpretar_status_backups(
@@ -258,8 +616,9 @@ class SegurancaTest(unittest.TestCase):
         for salvo in (True, False):
             with self.subTest(salvo=salvo), \
                     patch.dict(self.bancos.SERVIDORES, {'test': {'ip': 'localhost'}}), \
-                    patch.object(self.bancos, 'verificar_alias_existente_global', return_value=None), \
-                    patch.object(self.bancos, 'ler_databases_conf_remoto', return_value='# configuracao'), \
+                    patch.object(self.bancos, 'verificar_alias_existente_global', return_value=(None, None)), \
+                    patch.object(self.bancos, 'ler_databases_conf_remoto_estruturado',
+                                 return_value={'ok': True, 'conteudo': '# configuracao', 'erro': None}), \
                     patch.object(self.bancos, 'conectar_ssh'), \
                     patch.object(self.bancos, 'adicionar_banco', return_value='/opt/infobrasil/cliente/filial.fdb') as adicionar, \
                     patch.object(self.bancos, 'salvar_databases_conf_remoto', return_value=salvo) as salvar:
@@ -272,6 +631,320 @@ class SegurancaTest(unittest.TestCase):
                 self.assertIn('sucesso=' if salvo else 'erro=', response.location)
                 self.assertEqual(adicionar.call_args.args[3:6], ('existente', '/opt/infobrasil/cliente', 'filial.fdb'))
                 self.assertIn('filial = /opt/infobrasil/cliente/filial.fdb', salvar.call_args.args[1])
+
+    def test_verificacao_global_de_alias_falha_fechada(self):
+        with patch.dict(self.bancos.SERVIDORES, {'DB01': {}, 'DB02': {}}, clear=True), \
+                patch.object(self.bancos, 'ler_databases_conf_remoto_estruturado', side_effect=[
+                    {'ok': True, 'conteudo': '# vazio', 'erro': None},
+                    {'ok': False, 'conteudo': None, 'erro': 'sem conexao'},
+                ]):
+            self.assertEqual(
+                self.bancos.verificar_alias_existente_global('novo'), (None, 'sem conexao')
+            )
+
+    def test_escrita_databases_conf_e_atomica_e_limpa_temporario_na_falha(self):
+        sftp = MagicMock()
+        sftp.normalize.return_value = '/srv/firebird/databases.conf.real'
+        sftp.stat.return_value = MagicMock(st_mode=0o100640, st_uid=123, st_gid=456)
+        def abrir(_caminho, modo):
+            arquivo = MagicMock()
+            arquivo.__enter__.return_value = arquivo
+            if modo == 'rb':
+                arquivo.read.return_value = b'conteudo atual\n'
+            return arquivo
+        sftp.open.side_effect = abrir
+        ssh = MagicMock()
+        ssh.open_sftp.return_value = sftp
+        with patch.dict(self.bancos.SERVIDORES, {'DB01': {'ip': 'localhost'}}, clear=True), \
+                patch.object(self.bancos, 'conectar_ssh', return_value=ssh), \
+                patch.object(self.bancos, 'limpar_cache_global'):
+            self.assertTrue(self.bancos.salvar_databases_conf_remoto(
+                'DB01', 'alias = /opt/infobrasil/alias/dados.fdb\n'
+            ))
+        chamada_temp = next(c for c in sftp.open.call_args_list if c.args[1] == 'x')
+        caminho_temp = chamada_temp.args[0]
+        self.assertEqual(self.bancos.posixpath.dirname(caminho_temp), '/srv/firebird')
+        sftp.lstat.assert_called_once_with(self.bancos.CAMINHO_DATABASES_CONF)
+        sftp.normalize.assert_called_once_with(self.bancos.CAMINHO_DATABASES_CONF)
+        sftp.chown.assert_called_once_with(caminho_temp, 123, 456)
+        sftp.chmod.assert_called_once_with(caminho_temp, 0o640)
+        sftp.posix_rename.assert_called_once_with(caminho_temp, '/srv/firebird/databases.conf.real')
+
+        sftp.reset_mock()
+        sftp.normalize.return_value = '/srv/firebird/databases.conf.real'
+        sftp.stat.return_value = MagicMock(st_mode=0o100640, st_uid=123, st_gid=456)
+        sftp.open.side_effect = abrir
+        sftp.posix_rename.side_effect = OSError('rename falhou')
+        with patch.dict(self.bancos.SERVIDORES, {'DB01': {'ip': 'localhost'}}, clear=True), \
+                patch.object(self.bancos, 'conectar_ssh', return_value=ssh):
+            self.assertFalse(self.bancos.salvar_databases_conf_remoto(
+                'DB01', 'alias = /opt/infobrasil/alias/dados.fdb\n'
+            ))
+        sftp.remove.assert_called_once()
+
+    def test_escrita_databases_conf_detecta_cas_e_falha_se_nao_preservar_owner(self):
+        sftp = MagicMock()
+        sftp.normalize.return_value = '/real/databases.conf'
+        sftp.stat.return_value = MagicMock(st_mode=0o100600, st_uid=10, st_gid=20)
+        leituras = iter((b'original', b'alterado por outro processo'))
+        def abrir(_caminho, modo):
+            arquivo = MagicMock()
+            arquivo.__enter__.return_value = arquivo
+            if modo == 'rb':
+                arquivo.read.side_effect = lambda: next(leituras)
+            return arquivo
+        sftp.open.side_effect = abrir
+        ssh = MagicMock()
+        ssh.open_sftp.return_value = sftp
+        hash_original = self.bancos.hashlib.sha256(b'original').hexdigest()
+        with patch.dict(self.bancos.SERVIDORES, {'DB01': {'ip': 'localhost'}}, clear=True), \
+                patch.object(self.bancos, 'conectar_ssh', return_value=ssh):
+            self.assertFalse(self.bancos.salvar_databases_conf_remoto(
+                'DB01', 'novo', hash_original
+            ))
+        sftp.posix_rename.assert_not_called()
+        sftp.remove.assert_called_once()
+
+        sftp.reset_mock()
+        sftp.normalize.return_value = '/real/databases.conf'
+        sftp.stat.return_value = MagicMock(st_mode=0o100600, st_uid=10, st_gid=20)
+        def abrir_estavel(_caminho, modo):
+            arquivo = MagicMock()
+            arquivo.__enter__.return_value = arquivo
+            if modo == 'rb':
+                arquivo.read.return_value = b'original'
+            return arquivo
+        sftp.open.side_effect = abrir_estavel
+        sftp.chown.side_effect = OSError('chown negado')
+        with patch.dict(self.bancos.SERVIDORES, {'DB01': {'ip': 'localhost'}}, clear=True), \
+                patch.object(self.bancos, 'conectar_ssh', return_value=ssh):
+            self.assertFalse(self.bancos.salvar_databases_conf_remoto(
+                'DB01', 'novo', hash_original
+            ))
+        sftp.posix_rename.assert_not_called()
+        sftp.remove.assert_called_once()
+
+    def test_admin_inativar_nao_anuncia_sucesso_em_falha_ou_alias_ausente(self):
+        for leitura, alias, salvar in (
+            ({'ok': False, 'conteudo': None, 'erro': 'falha'}, 'alias', True),
+            ({'ok': True, 'conteudo': 'outro = /opt/infobrasil/outro/dados.fdb\n', 'erro': None}, 'alias', True),
+            ({'ok': True, 'conteudo': 'alias = /opt/infobrasil/alias/dados.fdb\n', 'erro': None}, 'alias', False),
+        ):
+            with self.subTest(leitura=leitura, salvar=salvar), \
+                    patch.dict(self.bancos.SERVIDORES, {'DB01': {}}, clear=True), \
+                    patch.object(self.bancos, 'ler_databases_conf_remoto_estruturado', return_value=leitura), \
+                    patch.object(self.bancos, 'salvar_databases_conf_remoto', return_value=salvar):
+                resposta = self.client.post('/admin/inativar', data={
+                    'csrf_token': self.token, 'servidor': 'DB01', 'alias': alias,
+                    'senha_confirmacao': self.password,
+                })
+            self.assertIn('erro=', resposta.location)
+            self.assertNotIn('sucesso=', resposta.location)
+
+    def test_admin_salvar_raw_valida_leitura_conteudo_e_escrita(self):
+        hash_atual = 'a' * 64
+        casos = (
+            ({'ok': False, 'conteudo': None, 'erro': 'falha'}, 'alias = /opt/x.fdb', True),
+            ({'ok': True, 'conteudo': '# atual', 'erro': None, 'hash': hash_atual}, 'invalido\x00', True),
+            ({'ok': True, 'conteudo': '# atual', 'erro': None, 'hash': hash_atual},
+             'alias = /opt/infobrasil/alias/dados.fdb', False),
+        )
+        for leitura, conteudo, salvo in casos:
+            with self.subTest(leitura=leitura, salvo=salvo), \
+                    patch.dict(self.bancos.SERVIDORES, {'DB01': {}}, clear=True), \
+                    patch.object(self.bancos, 'ler_databases_conf_remoto_estruturado', return_value=leitura), \
+                    patch.object(self.bancos, 'salvar_databases_conf_remoto', return_value=salvo):
+                resposta = self.client.post('/admin/salvar_raw', data={
+                    'csrf_token': self.token, 'servidor': 'DB01', 'conteudo_raw': conteudo,
+                    'senha_confirmacao': self.password, 'hash_original': hash_atual.upper(),
+                })
+            self.assertIn('erro=', resposta.location)
+            self.assertNotIn('sucesso=', resposta.location)
+
+        bloco_firebird = '''cliente = /opt/infobrasil/cliente/dados.fdb
+{
+    RemoteAccess = false
+}
+'''
+        self.assertEqual(
+            self.bancos.validar_conteudo_databases_conf(bloco_firebird), (True, None)
+        )
+        self.assertFalse(self.bancos.validar_conteudo_databases_conf(
+            '# Não foi possível ler databases.conf em DB01.'
+        )[0])
+
+    def test_editor_raw_preserva_hash_do_get_e_rejeita_edicao_obsoleta(self):
+        hash_get = '1' * 64
+        leitura_get = {'ok': True, 'conteudo': '# versao H0', 'erro': None, 'hash': hash_get}
+        with patch.dict(self.bancos.SERVIDORES, {'DB01': {'rotulo': 'DB01'}}, clear=True), \
+                patch.object(self.bancos, 'ler_databases_conf_remoto_estruturado', return_value=leitura_get), \
+                patch.object(self.bancos, 'obter_dados_servidor_linux', return_value=([], 0, [])):
+            pagina = self.client.get('/admin?servidor=DB01&sucesso=ok').get_data(as_text=True)
+        self.assertIn(f'name="hash_original" value="{hash_get}"', pagina)
+        self.assertIn('# versao H0', pagina)
+
+        leitura_post = {'ok': True, 'conteudo': '# versao H1', 'erro': None, 'hash': '2' * 64}
+        with patch.dict(self.bancos.SERVIDORES, {'DB01': {}}, clear=True), \
+                patch.object(self.bancos, 'ler_databases_conf_remoto_estruturado', return_value=leitura_post), \
+                patch.object(self.bancos, 'salvar_databases_conf_remoto') as salvar:
+            resposta = self.client.post('/admin/salvar_raw', data={
+                'csrf_token': self.token, 'servidor': 'DB01', 'conteudo_raw': '# minha edicao',
+                'senha_confirmacao': self.password, 'hash_original': hash_get,
+            })
+        self.assertIn('Conflito', resposta.location)
+        salvar.assert_not_called()
+
+    def test_editor_raw_repassa_exatamente_hash_get_time_normalizado(self):
+        hash_get_maiusculo = 'ABCDEF' * 10 + 'ABCD'
+        self.assertEqual(len(hash_get_maiusculo), 64)
+        leitura = {
+            'ok': True, 'conteudo': '# atual', 'erro': None,
+            'hash': hash_get_maiusculo.lower(),
+        }
+        with patch.dict(self.bancos.SERVIDORES, {'DB01': {}}, clear=True), \
+                patch.object(self.bancos, 'ler_databases_conf_remoto_estruturado', return_value=leitura), \
+                patch.object(self.bancos, 'salvar_databases_conf_remoto', return_value=True) as salvar:
+            resposta = self.client.post('/admin/salvar_raw', data={
+                'csrf_token': self.token, 'servidor': 'DB01', 'conteudo_raw': '# novo',
+                'senha_confirmacao': self.password, 'hash_original': hash_get_maiusculo,
+            })
+        self.assertIn('sucesso=', resposta.location)
+        salvar.assert_called_once_with('DB01', '# novo', hash_get_maiusculo.lower())
+
+        for invalido in ('', 'a' * 63, 'g' * 64, 'a' * 65):
+            with self.subTest(hash=invalido), \
+                    patch.dict(self.bancos.SERVIDORES, {'DB01': {}}, clear=True), \
+                    patch.object(self.bancos, 'ler_databases_conf_remoto_estruturado') as ler:
+                resposta = self.client.post('/admin/salvar_raw', data={
+                    'csrf_token': self.token, 'servidor': 'DB01', 'conteudo_raw': '# novo',
+                    'senha_confirmacao': self.password, 'hash_original': invalido,
+                })
+            self.assertIn('erro=', resposta.location)
+            ler.assert_not_called()
+
+    def test_admin_adicionar_aborta_se_servidor_global_estiver_ilegivel(self):
+        with patch.dict(self.bancos.SERVIDORES, {'DB01': {}}, clear=True), \
+                patch.object(self.bancos, 'verificar_alias_existente_global',
+                             return_value=(None, 'DB02 indisponivel')), \
+                patch.object(self.bancos, 'conectar_ssh') as conectar:
+            resposta = self.client.post('/admin/adicionar', data={
+                'csrf_token': self.token, 'servidor': 'DB01', 'alias': 'novo',
+                'senha_confirmacao': self.password,
+            })
+        self.assertIn('erro=', resposta.location)
+        conectar.assert_not_called()
+
+    def test_rota_de_perfil_legada_exige_senha_atual_e_politica(self):
+        dados = {'csrf_token': self.token, 'nova_senha': 'curta',
+                 'confirmar_nova_senha': 'curta', 'senha_atual': self.password}
+        self.client.post('/admin/perfil', data=dados)
+        with self.client.session_transaction() as sessao:
+            self.assertTrue(any('mínimo' in mensagem for _, mensagem in sessao.get('_flashes', [])))
+            sessao.pop('_flashes', None)
+        dados.update(nova_senha='nova-senha-segura', confirmar_nova_senha='nova-senha-segura',
+                     senha_atual='incorreta')
+        self.client.post('/admin/perfil', data=dados)
+        with self.client.session_transaction() as sessao:
+            self.assertTrue(any('Senha atual incorreta' in mensagem for _, mensagem in sessao.get('_flashes', [])))
+
+    def test_api_historico_filtra_paginar_e_rejeita_parametros_invalidos(self):
+        with closing(sqlite3.connect(self.bancos.DB_HISTORICO)) as conn, conn:
+            conn.execute('DELETE FROM historico_servidores')
+            conn.executemany(
+                'INSERT INTO historico_servidores (data, servidor, total_bytes, qtd_bancos) VALUES (?, ?, ?, ?)',
+                [('2026-01-01', 'DB01', 1, 1), ('2026-01-02', 'DB01', 2, 2),
+                 ('2026-01-02', 'DB02', 3, 3)],
+            )
+        with patch.dict(self.bancos.SERVIDORES, {'DB01': {}, 'DB02': {}}, clear=True):
+            resposta = self.client.get('/api/historico?servidor=DB01&data_inicio=2026-01-01&limite=1')
+            self.assertEqual(resposta.status_code, 200)
+            self.assertIsInstance(resposta.get_json(), list)
+            self.assertEqual(resposta.get_json()[0]['servidor'], 'DB01')
+            self.assertEqual(resposta.headers['X-Total-Count'], '2')
+            self.assertEqual(resposta.headers['X-Limit'], '1')
+            self.assertIn('rel="next"', resposta.headers['Link'])
+            self.assertEqual(self.client.get('/api/historico?servidor=desconhecido').status_code, 400)
+            self.assertEqual(self.client.get('/api/historico?limite=1001').status_code, 400)
+            self.assertEqual(self.client.get('/api/historico?offset=10000001').status_code, 400)
+            self.assertEqual(self.client.get('/api/historico?offset=999999999999999999999999').status_code, 400)
+            self.assertEqual(self.client.get('/api/historico?data_inicio=ontem').status_code, 400)
+
+    def test_historico_rejeita_servidor_desconhecido_e_excesso(self):
+        with patch.dict(self.bancos.SERVIDORES, {'DB01': {}}, clear=True):
+            self.assertEqual(self.client.get('/historico?servidores=desconhecido').status_code, 400)
+        servidores = {f'DB{i}': {} for i in range(51)}
+        with patch.dict(self.bancos.SERVIDORES, servidores, clear=True):
+            query = '&'.join(f'servidores=DB{i}' for i in range(51))
+            self.assertEqual(self.client.get('/historico?' + query).status_code, 400)
+
+    def test_secret_key_curta_e_bootstrap_fraco_sao_recusados(self):
+        app = Flask(__name__)
+        with patch.dict(os.environ, {'SECRET_KEY': 'curta'}), self.assertRaises(RuntimeError):
+            self.security.aplicar_config_flask(app)
+        with patch.dict(os.environ, {
+            'ADMIN_MASTER_EMAIL': 'novo-master@example.invalid',
+            'ADMIN_MASTER_PASSWORD': 'curta',
+        }), self.assertRaises(RuntimeError):
+            self.bancos.init_db_sistema()
+
+    def test_bootstrap_fraco_nao_bloqueia_master_ja_existente(self):
+        with closing(self.bancos.get_db_connection()) as conn:
+            email = conn.execute('SELECT email FROM usuarios WHERE id = ?', (self.user_id,)).fetchone()[0]
+        with patch.dict(os.environ, {
+            'ADMIN_MASTER_EMAIL': email,
+            'ADMIN_MASTER_PASSWORD': 'curta',
+        }):
+            self.bancos.init_db_sistema()
+
+    def test_refresh_publico_repetido_e_coalescido(self):
+        self.bancos.ULTIMO_REFRESH.clear()
+        with patch.object(self.bancos.time, 'monotonic', side_effect=[100, 101, 120]), \
+                self.app.test_request_context('/?atualizar=1'):
+            self.assertTrue(self.bancos.solicitar_refresh('dados'))
+            self.assertFalse(self.bancos.solicitar_refresh('dados'))
+            self.assertTrue(self.bancos.solicitar_refresh('dados'))
+
+        self.bancos.ULTIMO_REFRESH.clear()
+        with patch.dict(self.bancos.SERVIDORES, {}, clear=True), \
+                patch.object(self.bancos, 'limpar_cache_global') as limpar, \
+                patch.object(self.bancos, 'obter_metricas_servidores', return_value=[]), \
+                patch.object(self.bancos, 'buscar_em_todos_servidores', return_value=([], 0, [])), \
+                patch.object(self.bancos, 'obter_status_backups_ftp', return_value={'erro': 'indisponível'}), \
+                patch.object(self.bancos.time, 'monotonic', side_effect=[200, 201]):
+            self.client.get('/todos?atualizar=1')
+            self.client.get('/todos?atualizar=1')
+        limpar.assert_called_once_with()
+
+    def test_cache_retorna_copias_e_nao_vaza_detalhe_ssh(self):
+        self.bancos.limpar_cache_global()
+        self.bancos.CACHE_DADOS['bancos_por_servidor']['DB01'] = {
+            'dados': [{'alias': 'db', 'eh_inativo': False}], 'bytes': 1,
+            'orfaos': [], 'orfaos_coletados': False,
+            'timestamp': self.bancos.time.time(), 'orfaos_timestamp': 0,
+        }
+        primeira, _, _ = self.bancos.obter_dados_servidor_linux('DB01', {})
+        primeira[0]['alias'] = 'mutado'
+        segunda, _, _ = self.bancos.obter_dados_servidor_linux('DB01', {})
+        self.assertEqual(segunda[0]['alias'], 'db')
+
+        self.bancos.CACHE_DADOS['bancos_por_servidor']['DB01']['dados'].append(
+            {'alias': 'outro', 'eh_inativo': False}
+        )
+        deepcopy_real = self.bancos.copy.deepcopy
+        with patch.object(self.bancos.copy, 'deepcopy', wraps=deepcopy_real) as copiar:
+            filtrados, _, _ = self.bancos._obter_resultado_cache_servidor(
+                'DB01', 'db', False, False, False
+            )
+        self.assertEqual([b['alias'] for b in filtrados], ['db'])
+        listas_copiadas = [c.args[0] for c in copiar.call_args_list if isinstance(c.args[0], list)]
+        self.assertTrue(listas_copiadas)
+        self.assertTrue(all(len(lista) == 1 for lista in listas_copiadas))
+
+        with patch.object(self.bancos, 'conectar_ssh', side_effect=OSError('segredo-remoto')):
+            dados, _, _ = self.bancos.obter_dados_servidor_linux(
+                'DB02', {'ip': '10.0.0.1', 'porta_fb': 3050}, forcar_atualizacao=True
+            )
+        self.assertNotIn('segredo-remoto', dados[0]['erro'])
 
     def test_email_cname_destinatario_e_nome_sem_master(self):
         from email import message_from_string
