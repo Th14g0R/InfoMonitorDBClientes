@@ -193,7 +193,8 @@ class SegurancaTest(unittest.TestCase):
         with patch.dict(self.bancos.SERVIDORES, {'DB01': {}}, clear=True):
             pagina = self.client.get('/historico?servidores=DB01').get_data(as_text=True)
         self.assertIn('class="historico-scroll" role="region"', pagina)
-        self.assertIn('chart.js@4.4.7/dist/chart.umd.min.js', pagina)
+        self.assertIn('/static/vendor/chart.js/chart.umd.min.js', pagina)
+        self.assertNotIn('cdn.jsdelivr.net/npm/chart.js', pagina)
         self.assertIn('id="chart-historico-linha"', pagina)
         self.assertIn('id="chart-historico-area"', pagina)
         self.assertIn('role="img" aria-label="Evolução do consumo', pagina)

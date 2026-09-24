@@ -5,7 +5,7 @@ import os
 # leem variáveis de ambiente (ex: SERVIDORES_CONFIG) assim que são importados.
 load_dotenv()
 
-from flask import Flask, redirect, url_for
+from flask import Flask, redirect, url_for, jsonify, send_from_directory
 from bancos import bancos_bp
 from horarios import horarios_bp
 from seguranca import aplicar_config_flask
@@ -15,6 +15,18 @@ aplicar_config_flask(app)
 
 app.register_blueprint(bancos_bp)
 app.register_blueprint(horarios_bp)
+
+@app.get('/healthz')
+def healthz():
+    """Sonda barata: nao consulta SSH, backups nem bancos remotos."""
+    return jsonify(status='ok'), 200
+
+@app.get('/static/fotos/<path:nome>')
+def foto_dados(nome):
+    data_dir = os.getenv('DATA_DIR', '').strip()
+    if not data_dir:
+        return app.send_static_file(f'fotos/{nome}')
+    return send_from_directory(os.path.join(data_dir, 'fotos'), nome)
 
 # ADICIONE ESTA ROTA PARA EVITAR ERRO AO ACESSAR A RAIZ
 @app.route('/')

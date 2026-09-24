@@ -1,351 +1,775 @@
 [CmdletBinding()]
-param()
+param(
+    [ValidateSet('', 'install', 'apply_prepared', 'configure', 'configure_apply', 'status', 'restart', 'stop', 'uninstall', 'register', 'acl')]
+    [string]$Action = '',
+    [string]$Target = '',
+    [string]$Staging = '',
+    [string]$ExpectedCommit = '',
+    [string]$ExpectedMetadataHash = '',
+    [switch]$Elevated
+)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$repoUrl = 'https://github.com/Th14g0R/InfoMonitorDBClientes.git'
-$branch = 'main'
-$defaultDir = 'C:\Tomcat 9.0\webapps\InfoMonitorDBClientes'
-$defaultService = 'InfoMonitorDBClientes'
-$entryPoint = 'InfoMonitorDBClientes.py'
-$serviceToRecover = $null
-$env:GIT_TERMINAL_PROMPT = '0'
-$env:GCM_INTERACTIVE = 'Never'
-$env:GIT_ASKPASS = 'echo'
+$RepoUrl = 'https://github.com/Th14g0R/InfoMonitorDBClientes.git'
+$Branch = 'main'
+$ServiceName = 'InfoMonitorDBClientes'
+$DefaultDir = 'C:\InfoMonitorDBClientes'
+$ScriptPath = $MyInvocation.MyCommand.Path
+$installerMutex = $null
 
-function Write-Title([string]$Text) {
-    Write-Host "`n============================================================================" -ForegroundColor Cyan
-    Write-Host " $Text" -ForegroundColor Cyan
-    Write-Host "============================================================================" -ForegroundColor Cyan
+function Enter-InstallerMutex([string]$Folder) {
+    $created = $false
+    $mutex = New-Object Threading.Mutex($true, 'Global\InfoMonitorDBClientes-Installer', [ref]$created)
+    if (-not $created) { $mutex.Dispose(); throw 'Outro instalador para este destino ja esta em execucao.' }
+    return $mutex
 }
 
-function Read-YesNo([string]$Question, [bool]$DefaultYes = $true) {
-    $suffix = if ($DefaultYes) { '[S/n]' } else { '[s/N]' }
-    $answer = (Read-Host "$Question $suffix").Trim()
-    if (-not $answer) { return $DefaultYes }
-    return $answer -match '^(s|sim|y|yes)$'
+function Test-Administrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-function Select-Folder([string]$Initial, [bool]$AllowNew) {
-    Add-Type -AssemblyName System.Windows.Forms
-    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dialog.Description = 'Selecione a pasta do InfoMonitorDBClientes'
-    $dialog.ShowNewFolderButton = $AllowNew
-    if (Test-Path -LiteralPath $Initial -PathType Container) { $dialog.SelectedPath = $Initial }
-    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { return $dialog.SelectedPath }
-    return $null
+function Invoke-Elevated([string]$Operation, [string]$Folder) {
+    if ($Elevated) {
+        Invoke-ServiceOperation $Operation $Folder
+        return
+    }
+    $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $ScriptPath),
+        '-Action', $Operation, '-Target', ('"{0}"' -f $Folder), '-Elevated')
+    $process = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList $arguments
+    if ($process.ExitCode -ne 0) { throw "A operacao administrativa '$Operation' falhou." }
 }
 
-function Get-SafeTarget([string]$Path) {
-    if (-not $Path) { throw 'Nenhuma pasta foi selecionada.' }
+function Invoke-ElevatedPrepared([string]$Folder, [string]$Prepared, [string]$Commit, [string]$MetadataHash) {
+    $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $ScriptPath),
+        '-Action', 'apply_prepared', '-Target', ('"{0}"' -f $Folder), '-Staging', ('"{0}"' -f $Prepared),
+        '-ExpectedCommit', $Commit, '-ExpectedMetadataHash', $MetadataHash, '-Elevated')
+    $process = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList $arguments
+    if ($process.ExitCode -ne 0) { throw 'A aplicacao elevada do pacote preparado falhou.' }
+}
+
+function Assert-Administrator {
+    if (-not (Test-Administrator)) { throw 'Esta operacao de servico requer permissao de Administrador.' }
+}
+
+function Resolve-SafeTarget([string]$Path, [bool]$ForInstall) {
+    if (-not $Path) { throw 'Pasta de destino vazia.' }
     $full = [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
     $root = [IO.Path]::GetPathRoot($full).TrimEnd('\', '/')
-    $protectedPaths = @($env:windir, $env:ProgramFiles, ${env:ProgramFiles(x86)}) |
-        Where-Object { $_ } |
+    $protected = @($env:windir, $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData,
+        $env:SystemRoot, (Join-Path $env:SystemRoot 'System32')) | Where-Object { $_ } |
         ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\', '/') }
-    if ($full -eq $root -or $protectedPaths -contains $full) {
-        throw "Pasta de destino insegura: $full"
+    if ($full -eq $root) { throw 'A raiz do disco nao e um destino permitido.' }
+    foreach ($item in $protected) {
+        if ($full.Equals($item, [StringComparison]::OrdinalIgnoreCase) -or
+            $full.StartsWith($item + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Destino protegido pelo sistema: $full"
+        }
+    }
+    $cursor = [IO.Path]::GetPathRoot($full)
+    foreach ($segment in $full.Substring($cursor.Length).Split(@('\'), [StringSplitOptions]::RemoveEmptyEntries)) {
+        $cursor = Join-Path $cursor $segment
+        if (Test-Path -LiteralPath $cursor) {
+            $attributes = (Get-Item -LiteralPath $cursor -Force).Attributes
+            if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Destino contem junction/reparse point: $cursor" }
+        }
+    }
+    if (Test-Path (Join-Path $full '.git')) {
+        throw 'Um checkout de desenvolvimento nao pode ser usado como destino instalado.'
+    }
+    if ($ForInstall -and (Test-Path $full)) {
+        $entries = @(Get-ChildItem -LiteralPath $full -Force)
+        $installed = (Test-Path (Join-Path $full '.infomonitor-manifest')) -or
+            (Test-Path (Join-Path $full 'InfoMonitorDBClientes.py'))
+        if ($entries.Count -gt 0 -and -not $installed) {
+            throw 'A pasta nao esta vazia e nao possui manifesto de instalacao.'
+        }
     }
     return $full
 }
 
-function Get-AppService([string]$Target) {
-    $escaped = [Regex]::Escape($Target)
-    return Get-CimInstance Win32_Service -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -eq $defaultService -or $_.DisplayName -eq $defaultService -or $_.PathName -match $escaped } |
-        Select-Object -First 1
+function Resolve-ManifestPath([string]$Folder, [string]$Relative) {
+    if (-not $Relative -or [IO.Path]::IsPathRooted($Relative)) { throw "Entrada de manifesto invalida: $Relative" }
+    $normalized = $Relative.Replace('/', '\')
+    if ($normalized.Split('\') -contains '..') { throw "Travessia no manifesto: $Relative" }
+    $root = [IO.Path]::GetFullPath($Folder).TrimEnd('\') + '\'
+    $candidate = [IO.Path]::GetFullPath((Join-Path $Folder $normalized))
+    if (-not $candidate.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { throw "Entrada fora do destino: $Relative" }
+    return $candidate
 }
 
-function Get-LocalVersion([string]$Target) {
-    $marker = Join-Path $Target '.infomonitor-version'
-    if (Test-Path -LiteralPath $marker -PathType Leaf) {
-        $value = (Get-Content -LiteralPath $marker -Raw).Trim()
-        if ($value -match '^[0-9a-fA-F]{40}$') { return $value.ToLowerInvariant() }
+function Get-DataDirectory([string]$Folder) {
+    $configured = 'data'
+    $envPath = Join-Path $Folder '.env'
+    if (Test-Path $envPath) {
+        $line = Get-Content -LiteralPath $envPath | Where-Object { $_ -match '^DATA_DIR=' } | Select-Object -Last 1
+        if ($line) { $configured = (($line -split '=', 2)[1]).Trim().Trim('"').Trim("'") }
     }
-    $gitDir = Join-Path $Target '.git'
-    if (Test-Path -LiteralPath $gitDir -PathType Container) {
-        $previousErrorPreference = $ErrorActionPreference
-        $ErrorActionPreference = 'SilentlyContinue'
-        try {
-            $value = & git "--git-dir=$gitDir" "--work-tree=$Target" rev-parse --verify HEAD 2>$null
-            if ($LASTEXITCODE -eq 0 -and $value) {
-                $commit = ($value | Select-Object -First 1).Trim()
-                if ($commit -match '^[0-9a-fA-F]{40}$') { return $commit.ToLowerInvariant() }
-            }
-        } finally {
-            $ErrorActionPreference = $previousErrorPreference
+    $candidate = if ([IO.Path]::IsPathRooted($configured)) { $configured } else { Join-Path $Folder $configured }
+    $resolved = Resolve-SafeTarget $candidate $false
+    if ($resolved.Equals([IO.Path]::GetFullPath($Folder).TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'DATA_DIR nao pode ser a raiz do codigo no Windows.'
+    }
+    return $resolved
+}
+
+function Find-Nssm([string]$Folder) {
+    $path = Join-Path $env:ProgramFiles 'nssm\win64\nssm.exe'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    $owner = (Get-Acl -LiteralPath $path).Owner
+    if ($owner -notmatch '(?i)(Administrators|Administradores|SYSTEM|TrustedInstaller)$') {
+        throw "nssm.exe nao pertence a uma identidade administrativa confiavel: $owner"
+    }
+    $expected = $env:NSSM_SHA256
+    if (-not $expected -or $expected -notmatch '^[0-9a-fA-F]{64}$') { throw 'Defina NSSM_SHA256 com o hash SHA-256 oficial esperado.' }
+    $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+    if (-not $actual.Equals($expected, [StringComparison]::OrdinalIgnoreCase)) { throw 'O SHA-256 do nssm.exe nao corresponde a NSSM_SHA256.' }
+    return $path
+}
+
+function Invoke-Nssm([string]$Nssm, [string[]]$Arguments) {
+    & $Nssm @Arguments | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "NSSM falhou: $($Arguments -join ' ')" }
+}
+
+function Invoke-Icacls([string[]]$Arguments) {
+    & icacls.exe @Arguments | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Falha ao aplicar ACL: $($Arguments -join ' ')" }
+}
+
+function Set-AppAcl([string]$Folder) {
+    Assert-Administrator
+    $installer = "${env:USERDOMAIN}\${env:USERNAME}"
+    Invoke-Icacls @($Folder, '/inheritance:r', '/grant:r', "$installer`:(OI)(CI)M", '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F', '*S-1-5-19:(OI)(CI)RX')
+    $data = Get-DataDirectory $Folder
+    if (Test-Path $data) { Invoke-Icacls @($data, '/grant:r', '*S-1-5-19:(OI)(CI)M') }
+    foreach ($relative in @('.env', 'known_hosts', '.infomonitor-manifest', '.infomonitor-version')) {
+        $sensitive = Join-Path $Folder $relative
+        if (Test-Path $sensitive) {
+            Invoke-Icacls @($sensitive, '/inheritance:r', '/grant:r', "$installer`:M", '*S-1-5-32-544:F', '*S-1-5-18:F', '*S-1-5-19:R')
         }
     }
-    return $null
-}
-
-function Get-RemoteVersion {
-    $line = $null
-    $previousErrorPreference = $ErrorActionPreference
-    $ErrorActionPreference = 'SilentlyContinue'
-    try {
-        $line = & git -c core.askPass= -c credential.interactive=never ls-remote $repoUrl "refs/heads/$branch" 2>$null
-    } finally {
-        $ErrorActionPreference = $previousErrorPreference
-    }
-    if ($LASTEXITCODE -eq 0 -and $line) {
-        $commit = (($line | Select-Object -First 1) -split '\s+')[0]
-        if ($commit -match '^[0-9a-fA-F]{40}$') { return $commit.ToLowerInvariant() }
-    }
-
-    try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $headers = @{ 'User-Agent' = 'InfoMonitorDBClientes-Installer'; 'Accept' = 'application/vnd.github+json' }
-        $response = Invoke-RestMethod -Uri 'https://api.github.com/repos/Th14g0R/InfoMonitorDBClientes/commits/main' -Headers $headers -TimeoutSec 15
-        if ($response.sha -match '^[0-9a-fA-F]{40}$') { return $response.sha.ToLowerInvariant() }
-    } catch {}
-    throw 'Nao foi possivel consultar a versao no GitHub. Verifique internet, proxy e acesso ao repositorio.'
-}
-
-function New-Backup([string]$Target) {
-    $backupDir = Join-Path (Split-Path -Parent $Target) 'InfoMonitorDBClientes-backups'
-    [IO.Directory]::CreateDirectory($backupDir) | Out-Null
-    $zipPath = Join-Path $backupDir ("InfoMonitorDBClientes-{0}.zip" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
-    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
-    $zip = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
-    $excluded = @('.git', '.venv', '__pycache__', '.pytest_cache', '.test-security-browser')
-    try {
-        Get-ChildItem -LiteralPath $Target -File -Recurse -Force | ForEach-Object {
-            $relative = $_.FullName.Substring($Target.Length).TrimStart('\', '/')
-            $first = ($relative -split '[\\/]')[0]
-            if ($excluded -notcontains $first -and $_.Extension -notin @('.pyc', '.log')) {
-                [IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
-                    $zip, $_.FullName, $relative, [IO.Compression.CompressionLevel]::Optimal) | Out-Null
+    $manifest = Join-Path $Folder '.infomonitor-manifest'
+    if (Test-Path $manifest) {
+        foreach ($relative in Get-Content -LiteralPath $manifest) {
+            $codeFile = Resolve-ManifestPath $Folder $relative
+            if (Test-Path $codeFile -PathType Leaf) {
+                Invoke-Icacls @($codeFile, '/inheritance:r', '/grant:r', "$installer`:M", '*S-1-5-32-544:F', '*S-1-5-18:F', '*S-1-5-19:R')
             }
         }
-    } finally { $zip.Dispose() }
-    if (-not (Test-Path -LiteralPath $zipPath) -or (Get-Item -LiteralPath $zipPath).Length -eq 0) {
-        throw 'O backup de seguranca nao foi criado.'
-    }
-    return $zipPath
-}
-
-function Get-Nssm([string]$Target, $Service) {
-    $candidates = @(
-        (Join-Path $Target 'nssm.exe'),
-        (Join-Path $PSScriptRoot 'nssm.exe'),
-        (Join-Path (Split-Path -Parent $PSScriptRoot) 'nssm.exe')
-    )
-    if ($Service -and ($Service.PathName -match '(?i)^\s*"([^"]*nssm\.exe)"' -or
-        $Service.PathName -match '(?i)^\s*(.*?nssm\.exe)\s')) {
-        $candidates = @($Matches[1]) + $candidates
-    }
-    $command = Get-Command nssm.exe -ErrorAction SilentlyContinue
-    if ($command) { $candidates += $command.Source }
-    return $candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1
-}
-
-function Copy-RepositoryFiles([string]$Source, [string]$Target) {
-    [IO.Directory]::CreateDirectory($Target) | Out-Null
-    $tracked = (& git -C $Source ls-files) | Where-Object { $_ }
-    if ($LASTEXITCODE -ne 0 -or -not $tracked) { throw 'Nao foi possivel obter a lista segura de arquivos do Git.' }
-    foreach ($relative in $tracked) {
-        $extension = [IO.Path]::GetExtension($relative)
-        $leaf = [IO.Path]::GetFileName($relative)
-        if ($leaf -in @('.env', 'known_hosts', 'nssm.exe') -or
-            $extension -in @('.db', '.sqlite', '.sqlite3', '.fdb', '.fbk', '.pem', '.key', '.p12', '.pfx')) { continue }
-        $sourceFile = Join-Path $Source $relative
-        $targetFile = Join-Path $Target $relative
-        [IO.Directory]::CreateDirectory((Split-Path -Parent $targetFile)) | Out-Null
-        Copy-Item -LiteralPath $sourceFile -Destination $targetFile -Force
     }
 }
 
-function Ensure-Environment([string]$Target) {
-    $envPath = Join-Path $Target '.env'
-    if (Test-Path -LiteralPath $envPath) { return }
-    $example = Join-Path $Target '.env.example'
-    if (-not (Test-Path -LiteralPath $example)) { throw '.env.example nao foi encontrado.' }
+function Register-Service([string]$Folder) {
+    Assert-Administrator
+    $nssm = Find-Nssm $Folder
+    if (-not $nssm) { throw 'NSSM nao encontrado. Instale-o pelo site oficial e coloque nssm.exe no PATH ou na pasta do projeto.' }
+    $python = Join-Path $Folder '.venv\Scripts\python.exe'
+    $runner = Join-Path $Folder 'production.py'
+    if (-not (Test-Path -LiteralPath $python) -or -not (Test-Path -LiteralPath $runner)) {
+        throw 'Ambiente virtual ou production.py nao encontrado.'
+    }
+    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if (-not $service) { Invoke-Nssm $nssm @('install', $ServiceName, $python, $runner) }
+    Invoke-Nssm $nssm @('set', $ServiceName, 'Application', $python)
+    $runnerArgument = '"' + $runner + '"'
+    Invoke-Nssm $nssm @('set', $ServiceName, 'AppParameters', $runnerArgument)
+    Invoke-Nssm $nssm @('set', $ServiceName, 'AppDirectory', $Folder)
+    Invoke-Nssm $nssm @('set', $ServiceName, 'ObjectName', 'NT AUTHORITY\LocalService')
+    Invoke-Nssm $nssm @('set', $ServiceName, 'Start', 'SERVICE_AUTO_START')
+    $dataDir = Get-DataDirectory $Folder
+    Invoke-Nssm $nssm @('set', $ServiceName, 'AppStdout', (Join-Path $dataDir 'logs\servico-saida.log'))
+    Invoke-Nssm $nssm @('set', $ServiceName, 'AppStderr', (Join-Path $dataDir 'logs\servico-erro.log'))
+    Invoke-Nssm $nssm @('set', $ServiceName, 'AppRotateFiles', '1')
+    Invoke-Nssm $nssm @('set', $ServiceName, 'AppRotateBytes', '10485760')
+    Invoke-Nssm $nssm @('set', $ServiceName, 'AppExit', 'Default', 'Restart')
+    Invoke-Nssm $nssm @('set', $ServiceName, 'AppEnvironmentExtra', 'PYTHONDONTWRITEBYTECODE=1')
+    Set-AppAcl $Folder
+    if ((Get-Service -Name $ServiceName).Status -eq 'Running') { Restart-Service $ServiceName -Force }
+    else { Start-Service $ServiceName }
+    $running = Get-Service -Name $ServiceName
+    $running.WaitForStatus('Running', [TimeSpan]::FromSeconds(20))
+    $running.Refresh()
+    if ($running.Status -ne 'Running') { throw 'O servico nao atingiu o estado Running.' }
+}
+
+function Invoke-ServiceOperation([string]$Operation, [string]$Folder) {
+    Assert-Administrator
+    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    switch ($Operation) {
+        'register' { Register-Service $Folder }
+        'acl' { Set-AppAcl $Folder }
+        'restart' {
+            if (-not $service) { throw 'Servico nao instalado.' }
+            Restart-Service $ServiceName -Force
+            $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(20))
+        }
+        'stop' {
+            if ($service -and $service.Status -ne 'Stopped') {
+                Stop-Service $ServiceName -Force
+                $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20))
+            }
+        }
+        'uninstall' {
+            if ($service -and $service.Status -ne 'Stopped') {
+                Stop-Service $ServiceName -Force
+                $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20))
+                $service.Refresh()
+                if ($service.Status -ne 'Stopped') { throw 'Servico nao parou; remocao abortada.' }
+            }
+            $nssm = Find-Nssm $Folder
+            if ($service -and $nssm) { Invoke-Nssm $nssm @('remove', $ServiceName, 'confirm') }
+            elseif ($service) {
+                & sc.exe delete $ServiceName | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw 'sc.exe nao conseguiu remover o servico.' }
+            }
+            for ($attempt = 0; $attempt -lt 20; $attempt++) {
+                if (-not (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) { break }
+                Start-Sleep -Milliseconds 500
+            }
+            if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) { throw 'Servico ainda existe apos a remocao.' }
+        }
+    }
+}
+
+function Ensure-Environment([string]$Folder) {
+    $envPath = Join-Path $Folder '.env'
+    if (Test-Path -LiteralPath $envPath) {
+        if (-not (Select-String -LiteralPath $envPath -Pattern '^DATA_DIR=' -Quiet)) { Add-Content -LiteralPath $envPath -Value "`nDATA_DIR=data" }
+        Initialize-DataDirectory $Folder
+        return
+    }
+    $example = Join-Path $Folder '.env.example'
     $bytes = New-Object byte[] 32
     $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
     try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
     $secret = ([BitConverter]::ToString($bytes)).Replace('-', '').ToLowerInvariant()
     $content = (Get-Content -LiteralPath $example -Raw) -replace '(?m)^SECRET_KEY=.*$', "SECRET_KEY=$secret"
     [IO.File]::WriteAllText($envPath, $content, (New-Object Text.UTF8Encoding($false)))
-    Write-Host "Arquivo .env criado com SECRET_KEY aleatoria: $envPath" -ForegroundColor Yellow
-    Write-Host 'Revise as configuracoes antes de usar o sistema em producao.' -ForegroundColor Yellow
-    Start-Process notepad.exe -ArgumentList @($envPath) -Wait
+    Write-Host '.env criado com chave aleatoria; revise-o antes de produzir.' -ForegroundColor Yellow
+    Initialize-DataDirectory $Folder
 }
 
-function Ensure-Venv([string]$Target, [string]$Python) {
-    $venvPython = Join-Path $Target '.venv\Scripts\python.exe'
-    if (-not (Test-Path -LiteralPath $venvPython)) {
-        & $Python -m venv (Join-Path $Target '.venv')
+function Initialize-DataDirectory([string]$Folder) {
+    $data = Get-DataDirectory $Folder
+    New-Item -ItemType Directory -Force $data, (Join-Path $data 'fotos'), (Join-Path $data 'logs') | Out-Null
+    foreach ($name in @('sistema.db', 'historico_bancos.db')) {
+        $old = Join-Path $Folder $name; $new = Join-Path $data $name
+        if ((Test-Path $old -PathType Leaf) -and -not (Test-Path $new)) { Copy-Item -LiteralPath $old -Destination $new }
     }
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $venvPython)) {
-        throw 'Falha ao criar o ambiente virtual Python.'
+    $oldPhotos = Join-Path $Folder 'static\fotos'
+    if (Test-Path $oldPhotos) {
+        Get-ChildItem -LiteralPath $oldPhotos -File | Where-Object { $_.Name -notin @('site.webmanifest', '.gitkeep') } | ForEach-Object {
+            $destination = Join-Path (Join-Path $data 'fotos') $_.Name
+            if (-not (Test-Path $destination)) { Copy-Item -LiteralPath $_.FullName -Destination $destination }
+        }
     }
+}
 
-    & $venvPython -m pip install --disable-pip-version-check -r (Join-Path $Target 'requirements.txt') | Out-Null
+function Ensure-Runtime([string]$Folder, [string]$WheelDir = '') {
+    $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
+    if (-not $pythonCommand) { throw 'Python 3 nao encontrado.' }
+    & $pythonCommand.Source -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)"
+    if ($LASTEXITCODE -ne 0) { throw 'Python 3.10 ou superior e obrigatorio.' }
+    $venvPython = Join-Path $Folder '.venv\Scripts\python.exe'
+    if (-not (Test-Path -LiteralPath $venvPython)) { & $pythonCommand.Source -m venv (Join-Path $Folder '.venv') }
+    $lock = Join-Path $Folder 'requirements.lock'
+    if (-not (Test-Path -LiteralPath $lock)) { throw 'requirements.lock obrigatorio e nao encontrado.' }
+    if ($WheelDir) { & $venvPython -m pip install --disable-pip-version-check --no-index --find-links $WheelDir -r $lock }
+    else { & $venvPython -m pip install --disable-pip-version-check -r $lock }
+    if ($LASTEXITCODE -ne 0) { throw 'Falha ao instalar dependencias no ambiente virtual.' }
+    & $venvPython -m pip check
+    if ($LASTEXITCODE -ne 0) { throw 'As dependencias instaladas sao inconsistentes.' }
+    New-Item -ItemType Directory -Force (Join-Path $Folder 'logs') | Out-Null
+}
+
+function Build-CandidateRuntime([string]$Source, [string]$Folder, [string]$WheelDir) {
+    $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
+    $next = Join-Path $Folder '.venv.next'
+    if (Test-Path $next) { Remove-Item -LiteralPath $next -Recurse -Force }
+    & $pythonCommand.Source -m venv $next
+    if ($LASTEXITCODE -ne 0) { throw 'Falha ao criar ambiente candidato.' }
+    $candidatePython = Join-Path $next 'Scripts\python.exe'
+    & $candidatePython -m pip install --disable-pip-version-check --no-index --find-links $WheelDir -r (Join-Path $Source 'requirements.lock')
+    if ($LASTEXITCODE -ne 0) { throw 'Falha ao instalar ambiente candidato.' }
+    & $candidatePython -m pip check
+    if ($LASTEXITCODE -ne 0) { throw 'Ambiente candidato inconsistente.' }
+    Push-Location $Source
+    try { & $candidatePython -c "import os,sys; os.environ.update(SECRET_KEY='0123456789abcdef0123456789abcdef', SERVIDORES_CONFIG='{}', DATA_DIR=sys.argv[1]); import production; production.configuracao_servidor(); import InfoMonitorDBClientes" (Join-Path $Source 'smoke-data') }
+    finally { Pop-Location }
+    if ($LASTEXITCODE -ne 0) { throw 'Smoke import do ambiente candidato falhou.' }
+}
+
+function Swap-CandidateRuntime([string]$Folder) {
+    $current = Join-Path $Folder '.venv'; $next = Join-Path $Folder '.venv.next'; $previous = Join-Path $Folder '.venv.previous'
+    $script:RuntimeSwapState = 'None'
+    if (Test-Path $previous) {
+        if (Test-Path $current) { Remove-Item -LiteralPath $previous -Recurse -Force }
+        else { Move-Item -LiteralPath $previous -Destination $current }
+    }
+    if (Test-Path $current) {
+        Move-Item -LiteralPath $current -Destination $previous
+        $script:RuntimeSwapState = 'PreviousMoved'
+    } else { $script:RuntimeSwapState = 'FreshPending' }
+    Move-Item -LiteralPath $next -Destination $current
+    if ($script:RuntimeSwapState -eq 'PreviousMoved') { $script:RuntimeSwapState = 'CompleteWithPrevious' }
+    else { $script:RuntimeSwapState = 'CompleteFresh' }
+}
+
+function Restore-PreviousRuntime([string]$Folder) {
+    $current = Join-Path $Folder '.venv'; $next = Join-Path $Folder '.venv.next'; $previous = Join-Path $Folder '.venv.previous'
+    switch ($script:RuntimeSwapState) {
+        'PreviousMoved' { if (Test-Path $current) { throw 'Estado parcial de runtime inconsistente.' }; Move-Item $previous $current }
+        'CompleteWithPrevious' { if (Test-Path $current) { Remove-Item $current -Recurse -Force }; Move-Item $previous $current }
+        'FreshPending' { Remove-Item $next -Recurse -Force -ErrorAction SilentlyContinue }
+        'CompleteFresh' { Remove-Item $current -Recurse -Force -ErrorAction SilentlyContinue }
+        'None' { Remove-Item $next -Recurse -Force -ErrorAction SilentlyContinue }
+        default { throw 'Estado de troca de runtime desconhecido.' }
+    }
+    $script:RuntimeSwapState = 'None'
+}
+
+function Copy-TrackedFiles([string]$Source, [string]$Folder) {
+    New-Item -ItemType Directory -Force $Folder | Out-Null
+    $tracked = & git -C $Source ls-files
+    if ($LASTEXITCODE -ne 0) { throw 'Falha ao listar arquivos versionados.' }
+    foreach ($relative in $tracked) {
+        if (Test-ProtectedRelative $relative) { continue }
+        $destination = Resolve-ManifestPath $Folder $relative
+        New-Item -ItemType Directory -Force (Split-Path $destination -Parent) | Out-Null
+        Copy-Item -LiteralPath (Join-Path $Source $relative) -Destination $destination -Force
+    }
+}
+
+function Test-ProtectedRelative([string]$Relative) {
+    $normalized = $Relative.Replace('\', '/').TrimStart('/')
+    $first = ($normalized -split '/')[0]
+    $leaf = [IO.Path]::GetFileName($normalized)
+    $extension = [IO.Path]::GetExtension($normalized)
+    return $first -in @('.venv', '.venv.next', '.venv.previous', 'data', 'logs', 'backups') -or
+        ($normalized.StartsWith('static/fotos/') -and $leaf -notin @('site.webmanifest', '.gitkeep')) -or
+        $leaf -in @('.env', 'known_hosts', 'nssm.exe', '.infomonitor-version', '.infomonitor-manifest') -or
+        $extension -in @('.db', '.sqlite', '.sqlite3', '.fdb', '.fbk', '.pem', '.key', '.pfx', '.log')
+}
+
+function Read-InstalledFingerprint([string]$Folder) {
+    $appPath = Join-Path $Folder 'InfoMonitorDBClientes.py'
+    $manifestPath = Join-Path $Folder '.infomonitor-manifest'
+    $versionPath = Join-Path $Folder '.infomonitor-version'
+    $manifestExists = Test-Path -LiteralPath $manifestPath -PathType Leaf
+    $versionExists = Test-Path -LiteralPath $versionPath -PathType Leaf
+    return [pscustomobject]@{
+        fresh=(-not (Test-Path -LiteralPath $appPath -PathType Leaf))
+        manifestExists=$manifestExists
+        manifestSha256=$(if ($manifestExists) { (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash } else { $null })
+        versionExists=$versionExists
+        version=$(if ($versionExists) { Get-Content -LiteralPath $versionPath -Raw } else { $null })
+    }
+}
+
+function Test-InstalledFingerprintEqual($Left, $Right) {
+    return ([bool]$Left.fresh -eq [bool]$Right.fresh) -and
+        ([bool]$Left.manifestExists -eq [bool]$Right.manifestExists) -and
+        ([bool]$Left.versionExists -eq [bool]$Right.versionExists) -and
+        ((-not $Left.manifestExists) -or ([string]$Left.manifestSha256).Equals(
+            [string]$Right.manifestSha256, [StringComparison]::OrdinalIgnoreCase)) -and
+        ((-not $Left.versionExists) -or ([string]$Left.version -ceq [string]$Right.version))
+}
+
+function Capture-InstalledBase([string]$Source, [string]$Folder) {
+    $before = Read-InstalledFingerprint $Folder
+    $ownedManifest = @(Get-InstalledManifest $Source $Folder)
+    $after = Read-InstalledFingerprint $Folder
+    if (-not (Test-InstalledFingerprintEqual $before $after)) {
+        throw 'installation changed during preparation; retry'
+    }
+    return [pscustomobject]@{
+        fresh=$before.fresh
+        manifestExists=$before.manifestExists
+        manifestSha256=$before.manifestSha256
+        versionExists=$before.versionExists
+        version=$before.version
+        ownedManifest=@($ownedManifest)
+    }
+}
+
+function Get-InstalledManifest([string]$Source, [string]$Folder) {
+    $manifest = Join-Path $Folder '.infomonitor-manifest'
+    if (Test-Path $manifest) {
+        $entries = @(Get-Content -LiteralPath $manifest | Where-Object { $_ -and -not (Test-ProtectedRelative $_) })
+        foreach ($entry in $entries) { Resolve-ManifestPath $Folder $entry | Out-Null }
+        return $entries
+    }
+    if (-not (Test-Path (Join-Path $Folder 'InfoMonitorDBClientes.py') -PathType Leaf)) { return @() }
+    $versionFile = Join-Path $Folder '.infomonitor-version'
+    if (-not (Test-Path $versionFile -PathType Leaf)) {
+        throw 'Instalacao legada sem manifesto/versao. Faca backup manual e migre com uma instalacao limpa.'
+    }
+    $oldSha = (Get-Content -LiteralPath $versionFile -Raw).Trim()
+    if ($oldSha -notmatch '^[0-9a-fA-F]{40}$') {
+        throw 'Marcador de versao legado invalido. Faca backup manual e migre com uma instalacao limpa.'
+    }
+    & git -C $Source cat-file -e "$oldSha^{commit}" 2>$null
     if ($LASTEXITCODE -ne 0) {
-        throw 'Falha ao instalar as dependencias Python.'
+        & git -C $Source fetch --quiet --depth 1 origin $oldSha
+        if ($LASTEXITCODE -ne 0) { throw 'Commit da versao instalada nao foi encontrado; faca backup manual e migracao limpa.' }
+        & git -C $Source cat-file -e "$oldSha^{commit}" 2>$null
+        if ($LASTEXITCODE -ne 0) { throw 'Commit legado baixado nao e valido; atualizacao abortada.' }
     }
-
-    & $Python -m pip install --disable-pip-version-check -r (Join-Path $Target 'requirements.txt') | Out-Null
-
-    return $venvPython
+    $tracked = & git -C $Source ls-tree -r --name-only $oldSha
+    if ($LASTEXITCODE -ne 0) { throw 'Falha ao ler manifesto do commit legado.' }
+    return @($tracked | Where-Object {
+        -not (Test-ProtectedRelative $_) -and (Test-Path (Resolve-ManifestPath $Folder $_) -PathType Leaf)
+    })
 }
 
-function Configure-Service([string]$Target, [string]$Python, $CurrentService) {
-    $nssm = Get-Nssm $Target $CurrentService
-    if (-not $nssm) {
-        Write-Host 'NSSM nao encontrado. Os arquivos foram instalados, mas o servico nao foi criado.' -ForegroundColor Yellow
-        Write-Host 'Coloque nssm.exe ao lado do BAT ou na pasta instalada e execute novamente.' -ForegroundColor Yellow
-        if ($CurrentService) { Start-Service -Name $CurrentService.Name }
-        return $null
-    }
-    $serviceName = if ($CurrentService) { $CurrentService.Name } else { $defaultService }
-    $existingApp = $null
-    if ($CurrentService) {
-        $existingApp = (& $nssm get $serviceName Application 2>$null)
-        if ($existingApp) { $existingApp = $existingApp.Trim() }
-    }
-    $pythonToUse = if ($existingApp -and (Test-Path -LiteralPath $existingApp -PathType Leaf)) { $existingApp } else { $Python }
+function Backup-Code([string]$Source, [string]$Folder, [string[]]$OldManifest) {
+    if (-not (Test-Path -LiteralPath (Join-Path $Folder 'InfoMonitorDBClientes.py'))) { return }
+    $backupDir = Join-Path (Split-Path $Folder -Parent) 'InfoMonitorDBClientes-backups'
+    New-Item -ItemType Directory -Force $backupDir | Out-Null
+    $stage = Join-Path ([IO.Path]::GetTempPath()) ("infomonitor-code-{0}" -f [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory $stage | Out-Null
+    try {
+        foreach ($relative in $OldManifest) {
+            $installedFile = Resolve-ManifestPath $Folder $relative
+            if (-not (Test-Path -LiteralPath $installedFile -PathType Leaf)) { continue }
+            if (Test-ProtectedRelative $relative) { continue }
+            $backupFile = Join-Path $stage $relative
+            New-Item -ItemType Directory -Force (Split-Path $backupFile -Parent) | Out-Null
+            Copy-Item -LiteralPath $installedFile -Destination $backupFile -Force
+        }
+        [IO.File]::WriteAllLines((Join-Path $stage 'MANIFESTO-INSTALADO.txt'), $OldManifest, [Text.Encoding]::UTF8)
+        $zip = Join-Path $backupDir ("codigo-{0}.zip" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
+        Write-Host "Backup somente do codigo: $zip"
+        return $zip
+    } finally { Remove-Item -LiteralPath $stage -Recurse -Force }
+}
 
-    if (-not $CurrentService) {
-        & $nssm install $serviceName $pythonToUse $entryPoint
-        if ($LASTEXITCODE -ne 0) { throw 'Falha ao registrar o servico com NSSM.' }
+function Apply-Release([string]$Source, [string]$Folder, [string[]]$OldManifest) {
+    $newManifest = @(& git -C $Source ls-files | Where-Object { -not (Test-ProtectedRelative $_) })
+    if ($LASTEXITCODE -ne 0 -or $newManifest.Count -eq 0) { throw 'Manifesto novo invalido.' }
+    Copy-TrackedFiles $Source $Folder
+    foreach ($relative in $OldManifest) {
+        if ($relative -notin $newManifest -and -not (Test-ProtectedRelative $relative)) {
+            $obsolete = Resolve-ManifestPath $Folder $relative
+            if (Test-Path $obsolete -PathType Leaf) { Remove-Item -LiteralPath $obsolete -Force }
+        }
     }
-    & $nssm set $serviceName Application $pythonToUse | Out-Null
-    & $nssm set $serviceName AppParameters $entryPoint | Out-Null
-    & $nssm set $serviceName AppDirectory $Target | Out-Null
-    & $nssm set $serviceName Start SERVICE_AUTO_START | Out-Null
-    & $nssm set $serviceName AppStdout (Join-Path $Target 'servico-saida.log') | Out-Null
-    & $nssm set $serviceName AppStderr (Join-Path $Target 'servico-erro.log') | Out-Null
-    Start-Service -Name $serviceName
-    return Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
+    $manifest = Join-Path $Folder '.infomonitor-manifest'
+    $temporary = "$manifest.tmp"
+    [IO.File]::WriteAllLines($temporary, $newManifest, [Text.Encoding]::UTF8)
+    Move-Item -LiteralPath $temporary -Destination $manifest -Force
+    return $newManifest
+}
+
+function Test-HttpHealth([string]$Folder) {
+    $values = @{}
+    Get-Content (Join-Path $Folder '.env') | ForEach-Object {
+        if ($_ -match '^([A-Z_]+)=(.*)$') { $values[$Matches[1]] = $Matches[2].Trim().Trim('"').Trim("'") }
+    }
+    $hostName = if ($values.BIND_HOST) { $values.BIND_HOST } else { '127.0.0.1' }
+    if ($hostName -in @('0.0.0.0', '::')) { $hostName = '127.0.0.1' }
+    $port = if ($values.BIND_PORT) { [int]$values.BIND_PORT } else { 8888 }
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        try {
+            $response = Invoke-WebRequest -Uri "http://${hostName}:$port/healthz" -UseBasicParsing -TimeoutSec 3
+            if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400) { return }
+        } catch { Start-Sleep -Seconds 1 }
+    }
+    throw "Health check falhou em http://${hostName}:$port/"
+}
+
+function Apply-ConfiguredEnvironment([string]$Folder) {
+    Get-DataDirectory $Folder | Out-Null
+    Initialize-DataDirectory $Folder
+    Invoke-ServiceOperation 'acl' $Folder
+    if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
+        Invoke-ServiceOperation 'restart' $Folder
+        Test-HttpHealth $Folder
+    }
+}
+
+function Install-Or-Update([string]$Folder) {
+    $git = Get-Command git.exe -ErrorAction SilentlyContinue
+    if (-not $git) { throw 'Git for Windows nao encontrado.' }
+    $temp = Join-Path ([IO.Path]::GetTempPath()) ("infomonitor-{0}" -f [Guid]::NewGuid().ToString('N'))
+    $wheels = Join-Path ([IO.Path]::GetTempPath()) ("infomonitor-wheels-{0}" -f [Guid]::NewGuid().ToString('N'))
+    $wasRunning = $false
+    $stopped = $false
+    $backup = $null
+    $oldManifest = @()
+    $candidateManifest = @()
+    $createdPaths = @()
+    $script:RuntimeSwapState = 'None'
+    $mutated = $false
+    $freshInstall = $false
+    $oldVersion = $null
+    $oldManifestExisted = $false
+    try {
+        & git clone --quiet --depth 1 --branch $Branch $RepoUrl $temp
+        if ($LASTEXITCODE -ne 0) { throw 'Falha ao baixar o repositorio.' }
+        if (-not (Test-Path (Join-Path $temp 'requirements.lock'))) { throw 'Download sem requirements.lock.' }
+        $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
+        if (-not $pythonCommand) { throw 'Python 3 nao encontrado.' }
+        & $pythonCommand.Source -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)"
+        if ($LASTEXITCODE -ne 0) { throw 'Python 3.10 ou superior e obrigatorio.' }
+        New-Item -ItemType Directory $wheels | Out-Null
+        & $pythonCommand.Source -m pip download --disable-pip-version-check -r (Join-Path $temp 'requirements.lock') -d $wheels
+        if ($LASTEXITCODE -ne 0) { throw 'Falha no preflight das dependencias.' }
+        New-Item -ItemType Directory -Force $Folder | Out-Null
+        Build-CandidateRuntime $temp $Folder $wheels
+        $commit = (& git -C $temp rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{40}$') { throw 'Commit baixado invalido.' }
+        $oldManifest = @(Get-InstalledManifest $temp $Folder)
+        $oldManifestExisted = Test-Path (Join-Path $Folder '.infomonitor-manifest')
+        if (Test-Path (Join-Path $Folder '.infomonitor-version')) { $oldVersion = Get-Content (Join-Path $Folder '.infomonitor-version') -Raw }
+        $candidateManifest = @(& git -C $temp ls-files | Where-Object { -not (Test-ProtectedRelative $_) })
+        if ($LASTEXITCODE -ne 0 -or $candidateManifest.Count -eq 0) { throw 'Manifesto candidato invalido.' }
+        $createdPaths = @($candidateManifest | Where-Object { $_ -notin $oldManifest })
+        foreach ($relative in $createdPaths) {
+            $collision = Resolve-ManifestPath $Folder $relative
+            if (Test-Path -LiteralPath $collision) { throw "Colisao com caminho local nao gerenciado: $relative" }
+        }
+        $backup = Backup-Code $temp $Folder $oldManifest
+        $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        $freshInstall = -not $service
+        $wasRunning = $service -and $service.Status -eq 'Running'
+        if ($wasRunning) { Invoke-Elevated 'stop' $Folder; $stopped = $true }
+        $mutated = $true
+        $newManifest = @(Apply-Release $temp $Folder $oldManifest)
+        Ensure-Environment $Folder
+        Swap-CandidateRuntime $Folder
+        [IO.File]::WriteAllText((Join-Path $Folder '.infomonitor-version'), $commit, [Text.Encoding]::ASCII)
+        if ($freshInstall -or $wasRunning) {
+            Invoke-Elevated 'register' $Folder
+            Test-HttpHealth $Folder
+        } else { Invoke-Elevated 'acl' $Folder }
+        $stopped = $false
+        Remove-Item -LiteralPath (Join-Path $Folder '.venv.previous') -Recurse -Force -ErrorAction SilentlyContinue
+    } catch {
+        $failure = $_
+        if ($mutated) {
+            try {
+                if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) { Invoke-Elevated 'stop' $Folder }
+                foreach ($relative in $createdPaths) {
+                    if (-not (Test-ProtectedRelative $relative)) {
+                        $added = Resolve-ManifestPath $Folder $relative
+                        if (Test-Path $added -PathType Leaf) { Remove-Item -LiteralPath $added -Force }
+                    }
+                }
+                if ($backup -and (Test-Path $backup)) { Expand-Archive -LiteralPath $backup -DestinationPath $Folder -Force }
+                Remove-Item -LiteralPath (Join-Path $Folder 'MANIFESTO-INSTALADO.txt') -Force -ErrorAction SilentlyContinue
+                if ($oldManifestExisted) { [IO.File]::WriteAllLines((Join-Path $Folder '.infomonitor-manifest'), $oldManifest, [Text.Encoding]::UTF8) }
+                else { Remove-Item (Join-Path $Folder '.infomonitor-manifest') -Force -ErrorAction SilentlyContinue }
+                if ($null -ne $oldVersion) { [IO.File]::WriteAllText((Join-Path $Folder '.infomonitor-version'), $oldVersion, [Text.Encoding]::ASCII) }
+                else { Remove-Item (Join-Path $Folder '.infomonitor-version') -Force -ErrorAction SilentlyContinue }
+                Restore-PreviousRuntime $Folder
+                if ($wasRunning) { Invoke-Elevated 'register' $Folder }
+                elseif ($freshInstall) { Invoke-Elevated 'uninstall' $Folder }
+            } catch { Write-Host "Rollback incompleto: $($_.Exception.Message)" -ForegroundColor Red }
+        }
+        throw $failure
+    } finally {
+        if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force }
+        if (Test-Path -LiteralPath $wheels) { Remove-Item -LiteralPath $wheels -Recurse -Force }
+        if (Test-Path -LiteralPath (Join-Path $Folder '.venv.next')) { Remove-Item -LiteralPath (Join-Path $Folder '.venv.next') -Recurse -Force }
+    }
+}
+
+function Prepare-And-Apply([string]$Folder) {
+    $git = Get-Command git.exe -ErrorAction SilentlyContinue
+    $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
+    if (-not $git -or -not $pythonCommand) { throw 'Git for Windows e Python 3 sao obrigatorios.' }
+    $prepared = Join-Path ([IO.Path]::GetTempPath()) ("infomonitor-prepared-{0}" -f [Guid]::NewGuid().ToString('N'))
+    $source = Join-Path $prepared 'source'; $wheels = Join-Path $prepared 'wheels'
+    try {
+        New-Item -ItemType Directory -Force $prepared, $wheels | Out-Null
+        & git clone --quiet --depth 1 --branch $Branch $RepoUrl $source
+        if ($LASTEXITCODE -ne 0) { throw 'Falha ao baixar o repositorio.' }
+        $commit = (& git -C $source rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{40}$') { throw 'Commit preparado invalido.' }
+        & $pythonCommand.Source -m pip download --disable-pip-version-check -r (Join-Path $source 'requirements.lock') -d $wheels
+        if ($LASTEXITCODE -ne 0) { throw 'Falha ao baixar dependencias.' }
+        Build-CandidateRuntime $source $prepared $wheels
+        $runtimeZip = Join-Path $prepared 'runtime.zip'
+        Compress-Archive -Path (Join-Path $prepared '.venv.next\*') -DestinationPath $runtimeZip
+        Remove-Item (Join-Path $prepared '.venv.next') -Recurse -Force
+        $installedBase = Capture-InstalledBase $source $Folder
+        $oldManifest = @($installedBase.ownedManifest)
+        $candidateManifest = @(& git -C $source ls-files | Where-Object { -not (Test-ProtectedRelative $_) })
+        if ($LASTEXITCODE -ne 0) { throw 'Falha ao preparar manifesto candidato.' }
+        $createdPaths = @($candidateManifest | Where-Object { $_ -notin $oldManifest })
+        foreach ($relative in $createdPaths) {
+            if (Test-Path -LiteralPath (Resolve-ManifestPath $Folder $relative)) { throw "Colisao com caminho local nao gerenciado: $relative" }
+        }
+        $hashes = @()
+        foreach ($relative in $candidateManifest) {
+            $hashes += [pscustomobject]@{ path=$relative; sha256=(Get-FileHash (Join-Path $source $relative) -Algorithm SHA256).Hash }
+        }
+        $metadata = [pscustomobject]@{
+            commit=$commit; oldManifest=$oldManifest; candidateManifest=$candidateManifest; createdPaths=$createdPaths
+            targetWasFresh=$installedBase.fresh
+            oldManifestExisted=$installedBase.manifestExists
+            oldManifestSha256=$installedBase.manifestSha256
+            oldVersionExisted=$installedBase.versionExists
+            oldVersion=$installedBase.version
+            runtimeSha256=(Get-FileHash $runtimeZip -Algorithm SHA256).Hash; hashes=$hashes
+        }
+        $metadataPath = Join-Path $prepared 'metadata.json'
+        $metadata | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $metadataPath -Encoding UTF8
+        $metadataHash = (Get-FileHash $metadataPath -Algorithm SHA256).Hash
+        Invoke-ElevatedPrepared $Folder $prepared $commit $metadataHash
+    } finally {
+        if (Test-Path $prepared) { Remove-Item $prepared -Recurse -Force }
+    }
+}
+
+function Apply-PreparedRelease([string]$Folder, [string]$Prepared, [string]$Commit) {
+    $preparedFull = Resolve-SafeTarget $Prepared $false
+    if (-not (Test-Path $preparedFull -PathType Container) -or
+        ((Get-Item $preparedFull -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Staging preparado invalido.' }
+    $metadataPath = Join-Path $preparedFull 'metadata.json'
+    $actualMetadataHash = (Get-FileHash $metadataPath -Algorithm SHA256).Hash
+    if ($ExpectedMetadataHash -notmatch '^[0-9a-fA-F]{64}$' -or
+        -not $actualMetadataHash.Equals($ExpectedMetadataHash, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Hash dos metadados preparados divergente.'
+    }
+    $metadata = Get-Content $metadataPath -Raw | ConvertFrom-Json
+    if ($Commit -notmatch '^[0-9a-f]{40}$' -or $metadata.commit -ne $Commit) { throw 'Commit preparado divergente.' }
+    $source = Join-Path $preparedFull 'source'; $runtimeZip = Join-Path $preparedFull 'runtime.zip'
+    if ((Get-FileHash $runtimeZip -Algorithm SHA256).Hash -ne $metadata.runtimeSha256) { throw 'Hash do runtime preparado divergente.' }
+    foreach ($item in $metadata.hashes) {
+        $file = Resolve-ManifestPath $source ([string]$item.path)
+        if ((Get-FileHash $file -Algorithm SHA256).Hash -ne $item.sha256) { throw "Hash divergente: $($item.path)" }
+    }
+    $currentFresh = -not (Test-Path (Join-Path $Folder 'InfoMonitorDBClientes.py') -PathType Leaf)
+    $currentManifestPath = Join-Path $Folder '.infomonitor-manifest'
+    $currentVersionPath = Join-Path $Folder '.infomonitor-version'
+    $currentManifestExists = Test-Path $currentManifestPath -PathType Leaf
+    $currentVersionExists = Test-Path $currentVersionPath -PathType Leaf
+    $baseChanged = ([bool]$metadata.targetWasFresh -ne $currentFresh) -or
+        ([bool]$metadata.oldManifestExisted -ne $currentManifestExists) -or
+        ([bool]$metadata.oldVersionExisted -ne $currentVersionExists)
+    if (-not $baseChanged -and $currentManifestExists) {
+        $currentManifestHash = (Get-FileHash $currentManifestPath -Algorithm SHA256).Hash
+        $baseChanged = -not $currentManifestHash.Equals(
+            [string]$metadata.oldManifestSha256, [StringComparison]::OrdinalIgnoreCase)
+    }
+    if (-not $baseChanged -and $currentVersionExists) {
+        $baseChanged = (Get-Content $currentVersionPath -Raw) -cne [string]$metadata.oldVersion
+    }
+    if ($baseChanged) { throw 'installation changed; prepare again' }
+    $oldManifest = @($metadata.oldManifest); $candidateManifest = @($metadata.candidateManifest); $createdPaths = @($metadata.createdPaths)
+    foreach ($relative in $createdPaths) {
+        if (Test-Path -LiteralPath (Resolve-ManifestPath $Folder $relative)) { throw "Colisao elevada com caminho nao gerenciado: $relative" }
+    }
+    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    $freshInstall = -not $service; $wasRunning = $service -and $service.Status -eq 'Running'
+    $backup = Backup-Code $source $Folder $oldManifest
+    $script:RuntimeSwapState = 'None'; $mutated = $false
+    try {
+        if ($wasRunning) { Invoke-ServiceOperation 'stop' $Folder }
+        $mutated = $true
+        foreach ($relative in $candidateManifest) {
+            $destination = Resolve-ManifestPath $Folder $relative
+            New-Item -ItemType Directory -Force (Split-Path $destination -Parent) | Out-Null
+            Copy-Item -LiteralPath (Resolve-ManifestPath $source $relative) -Destination $destination -Force
+        }
+        foreach ($relative in $oldManifest) {
+            if ($relative -notin $candidateManifest -and -not (Test-ProtectedRelative $relative)) {
+                Remove-Item (Resolve-ManifestPath $Folder $relative) -Force -ErrorAction SilentlyContinue
+            }
+        }
+        [IO.File]::WriteAllLines((Join-Path $Folder '.infomonitor-manifest'), $candidateManifest, [Text.Encoding]::UTF8)
+        Ensure-Environment $Folder
+        $next = Join-Path $Folder '.venv.next'; if (Test-Path $next) { Remove-Item $next -Recurse -Force }
+        New-Item -ItemType Directory $next | Out-Null
+        Expand-Archive $runtimeZip -DestinationPath $next
+        Swap-CandidateRuntime $Folder
+        [IO.File]::WriteAllText((Join-Path $Folder '.infomonitor-version'), $Commit, [Text.Encoding]::ASCII)
+        if ($freshInstall -or $wasRunning) { Invoke-ServiceOperation 'register' $Folder; Test-HttpHealth $Folder }
+        else { Invoke-ServiceOperation 'acl' $Folder }
+        Remove-Item (Join-Path $Folder '.venv.previous') -Recurse -Force -ErrorAction SilentlyContinue
+    } catch {
+        if ($mutated) {
+            if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) { Invoke-ServiceOperation 'stop' $Folder }
+            foreach ($relative in $createdPaths) { Remove-Item (Resolve-ManifestPath $Folder $relative) -Force -ErrorAction SilentlyContinue }
+            if ($backup -and (Test-Path $backup)) { Expand-Archive $backup -DestinationPath $Folder -Force }
+            Remove-Item (Join-Path $Folder 'MANIFESTO-INSTALADO.txt') -Force -ErrorAction SilentlyContinue
+            if ($metadata.oldManifestExisted) { [IO.File]::WriteAllLines((Join-Path $Folder '.infomonitor-manifest'), $oldManifest, [Text.Encoding]::UTF8) }
+            else { Remove-Item (Join-Path $Folder '.infomonitor-manifest') -Force -ErrorAction SilentlyContinue }
+            if ($null -ne $metadata.oldVersion) { [IO.File]::WriteAllText((Join-Path $Folder '.infomonitor-version'), [string]$metadata.oldVersion, [Text.Encoding]::ASCII) }
+            else { Remove-Item (Join-Path $Folder '.infomonitor-version') -Force -ErrorAction SilentlyContinue }
+            Restore-PreviousRuntime $Folder
+            if ($wasRunning) { Invoke-ServiceOperation 'register' $Folder } elseif ($freshInstall) { Invoke-ServiceOperation 'uninstall' $Folder }
+        }
+        throw
+    }
+}
+
+if ($Elevated) {
+    if ($Action -notin @('apply_prepared', 'configure_apply', 'register', 'restart', 'stop', 'uninstall', 'acl')) {
+        throw 'Operacao elevada invalida.'
+    }
+    $elevatedTarget = Resolve-SafeTarget $Target ($Action -eq 'apply_prepared')
+    $installerMutex = Enter-InstallerMutex $elevatedTarget
+    try {
+        if ($Action -eq 'apply_prepared') { Apply-PreparedRelease $elevatedTarget $Staging $ExpectedCommit }
+        elseif ($Action -eq 'configure_apply') { Apply-ConfiguredEnvironment $elevatedTarget }
+        else { Invoke-ServiceOperation $Action $elevatedTarget }
+    } finally {
+        try { $installerMutex.ReleaseMutex() } catch {}
+        $installerMutex.Dispose()
+    }
+    exit 0
 }
 
 try {
-    Write-Title 'InfoMonitorDBClientes - instalacao, verificacao e atualizacao'
-    Write-Host '[1] Verificar instalacao e oferecer atualizacao'
-    Write-Host '[2] Instalar em uma nova pasta'
-    Write-Host '[3] Apenas verificar versao e servico'
-    Write-Host '[0] Sair'
-    $choice = (Read-Host 'Escolha uma opcao [1]').Trim()
-    if (-not $choice) { $choice = '1' }
-    if ($choice -eq '0') { exit 0 }
-    if ($choice -notin @('1', '2', '3')) { throw 'Opcao invalida.' }
-
-    $git = Get-Command git.exe -ErrorAction SilentlyContinue
-    if (-not $git) { throw 'Git nao encontrado. Instale o Git for Windows e execute novamente.' }
-    $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
-    if (-not $pythonCommand) { throw 'Python nao encontrado. Instale Python 3 de 64 bits e execute novamente.' }
-    & $pythonCommand.Source --version | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'O comando python.exe existe, mas nao aponta para uma instalacao valida do Python.' }
-
-    $scriptProjectDir = Split-Path -Parent $PSScriptRoot
-    $detectedDir = $null
-    if (Test-Path -LiteralPath (Join-Path $defaultDir $entryPoint) -PathType Leaf) {
-        $detectedDir = $defaultDir
-    } elseif ((Test-Path -LiteralPath (Join-Path $scriptProjectDir $entryPoint) -PathType Leaf) -and
-              ((Test-Path -LiteralPath (Join-Path $scriptProjectDir '.env') -PathType Leaf) -or
-               (Test-Path -LiteralPath (Join-Path $scriptProjectDir '.infomonitor-version') -PathType Leaf))) {
-        $detectedDir = $scriptProjectDir
+    if (-not $Target) {
+        $local = Split-Path (Split-Path $ScriptPath -Parent) -Parent
+        $suggestion = if ((Test-Path (Join-Path $local '.env')) -and -not (Test-Path (Join-Path $local '.git'))) { $local } else { $DefaultDir }
+        $entered = Read-Host "Pasta da instalacao [$suggestion]"
+        $Target = if ($entered) { $entered } else { $suggestion }
     }
-
-    if ($choice -ne '2' -and $detectedDir) {
-        Write-Host "`nInstalacao encontrada em: $detectedDir" -ForegroundColor Green
-        Write-Host '[ENTER/S] Confirmar  [G] Selecionar outra pasta  [M] Digitar outro caminho'
-        $folderChoice = (Read-Host 'Deseja verificar esta instalacao? [S]').Trim()
-        if (-not $folderChoice -or $folderChoice -match '^(?i:s|sim)$') { $target = $detectedDir }
-        elseif ($folderChoice -match '^(?i:g)$') { $target = Select-Folder $detectedDir $false }
-        elseif ($folderChoice -match '^(?i:m)$') { $target = Read-Host 'Caminho completo da instalacao' }
-        else { throw 'Opcao de pasta invalida.' }
-    } else {
-        if ($choice -ne '2') {
-            Write-Host "`nNenhuma instalacao foi encontrada no caminho sugerido." -ForegroundColor Yellow
-            Write-Host 'Selecione onde deseja instalar o sistema.' -ForegroundColor Yellow
-        }
-        Write-Host "`nPasta sugerida: $defaultDir"
-        Write-Host '[ENTER] Usar a pasta sugerida  [G] Selecionar graficamente  [M] Digitar caminho'
-        $folderChoice = (Read-Host 'Opcao').Trim()
-        $target = $defaultDir
-        if ($folderChoice -match '^(?i:g)$') { $target = Select-Folder $defaultDir $true }
-        elseif ($folderChoice -match '^(?i:m)$') { $target = Read-Host 'Caminho completo para instalacao' }
-        elseif ($folderChoice) { throw 'Opcao de pasta invalida.' }
+    $Target = Resolve-SafeTarget $Target $false
+    if (-not $Action) {
+        Write-Host "`n[1] Instalar/atualizar  [2] Configurar .env  [3] Status"
+        Write-Host '[4] Reiniciar          [5] Parar            [6] Remover servico  [0] Sair'
+        $choice = Read-Host 'Opcao'
+        $Action = @{'1'='install';'2'='configure';'3'='status';'4'='restart';'5'='stop';'6'='uninstall';'0'=''}[$choice]
+        if ($null -eq $Action) { throw 'Opcao invalida.' }
+        if (-not $Action) { exit 0 }
     }
-    $target = Get-SafeTarget $target
-    $installed = Test-Path -LiteralPath (Join-Path $target $entryPoint) -PathType Leaf
-    $service = Get-AppService $target
-    $localVersion = if ($installed) { Get-LocalVersion $target } else { $null }
-    $remoteVersion = Get-RemoteVersion
-
-    Write-Title 'Resultado da verificacao'
-    Write-Host "Pasta: $target"
-    Write-Host ("Instalacao: " + $(if ($installed) { 'encontrada' } else { 'nao encontrada' }))
-    Write-Host ("Versao local: " + $(if ($localVersion) { $localVersion.Substring(0, [Math]::Min(12, $localVersion.Length)) } else { 'nao identificada (instalacao anterior)' }))
-    Write-Host "Versao GitHub: $($remoteVersion.Substring(0, 12))"
-    Write-Host ("Servico: " + $(if ($service) { "$($service.Name) - $($service.State)" } else { 'nao encontrado' }))
-
-    if ($choice -eq '3') { exit 0 }
-    if ($installed -and $localVersion -eq $remoteVersion) {
-        if (-not (Read-YesNo 'A versao local ja e a mais atual. Deseja reinstalar os arquivos?' $false)) { exit 0 }
-    } elseif ($installed) {
-        if (-not (Read-YesNo 'Deseja atualizar a versao local para a versao do GitHub?' $true)) {
-            Write-Host 'Versao local mantida sem alteracoes.' -ForegroundColor Green
-            exit 0
+    $Target = Resolve-SafeTarget $Target ($Action -eq 'install')
+    switch ($Action) {
+        'install' { Prepare-And-Apply $Target }
+        'configure' {
+            Ensure-Environment $Target
+            Start-Process notepad.exe -ArgumentList @((Join-Path $Target '.env')) -Wait
+            Invoke-Elevated 'configure_apply' $Target
         }
-    } elseif (-not (Read-YesNo "Deseja instalar em '$target'?" $true)) { exit 0 }
-
-    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("InfoMonitorDBClientes-{0}" -f [Guid]::NewGuid().ToString('N'))
-    try {
-        Write-Title 'Preparando arquivos'
-        & git -c core.askPass= -c credential.interactive=never clone --quiet --depth 1 --branch $branch $repoUrl $tempRoot
-        if ($LASTEXITCODE -ne 0) { throw 'Falha ao baixar o repositorio do GitHub.' }
-        $downloadedVersion = (& git -C $tempRoot rev-parse HEAD).Trim()
-        if ($downloadedVersion -ne $remoteVersion) { throw 'A versao baixada nao corresponde a versao consultada.' }
-
-        if ($service -and $service.State -ne 'Stopped') {
-            $serviceToRecover = $service.Name
-            Stop-Service -Name $service.Name -Force
-            $service = Get-AppService $target
+        'status' {
+            $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            if ($service) { $service | Format-List Name, Status, StartType }
+            else { Write-Host 'Servico nao instalado.' }
+            Write-Host "Logs: $(Join-Path (Get-DataDirectory $Target) 'logs')"
         }
-        $backup = $null
-        if ($installed) {
-            $backup = New-Backup $target
-            Write-Host "Backup criado: $backup" -ForegroundColor Green
+        'restart' { Invoke-Elevated 'restart' $Target }
+        'stop' { Invoke-Elevated 'stop' $Target }
+        'uninstall' {
+            Invoke-Elevated 'uninstall' $Target
+            Write-Host 'Servico removido. .env, bancos, known_hosts, fotos e logs foram preservados.'
         }
-        Copy-RepositoryFiles $tempRoot $target
-        Ensure-Environment $target
-        $venvPython = Ensure-Venv $target $pythonCommand.Source
-        [IO.File]::WriteAllText((Join-Path $target '.infomonitor-version'), $downloadedVersion, [Text.Encoding]::ASCII)
-
-        $configuredService = Configure-Service $target $venvPython $service
-        if ($configuredService) {
-            $serviceToRecover = $null
-            Start-Sleep -Seconds 2
-            $configuredService = Get-AppService $target
-            Write-Host "Servico $($configuredService.Name): $($configuredService.State)" -ForegroundColor Green
-        }
-
-        $port = 8888
-        $portLine = Get-Content -LiteralPath (Join-Path $target '.env') | Where-Object { $_ -match '^BIND_PORT=\d+$' } | Select-Object -Last 1
-        if ($portLine) { $port = [int](($portLine -split '=', 2)[1]) }
-        try {
-            $response = Invoke-WebRequest -Uri "http://127.0.0.1:$port/" -UseBasicParsing -TimeoutSec 5
-            Write-Host "Site respondendo em http://127.0.0.1:$port/ (HTTP $($response.StatusCode))." -ForegroundColor Green
-        } catch {
-            Write-Host "O site ainda nao respondeu na porta $port. Consulte servico-erro.log e o .env." -ForegroundColor Yellow
-        }
-        Write-Title 'Operacao concluida'
-        Write-Host "Versao instalada: $($downloadedVersion.Substring(0, 12))"
-        Write-Host "Pasta: $target"
-        if ($backup) { Write-Host "Backup anterior: $backup" }
-    } finally {
-        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
     }
 } catch {
-    if ($serviceToRecover) {
-        try { Start-Service -Name $serviceToRecover -ErrorAction Stop } catch {
-            Write-Host "Nao foi possivel reiniciar o servico $serviceToRecover automaticamente." -ForegroundColor Red
-        }
-    }
-    Write-Host "`nERRO: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "ERRO: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
+} finally {
+    if ($installerMutex) {
+        try { $installerMutex.ReleaseMutex() } catch {}
+        $installerMutex.Dispose()
+    }
 }

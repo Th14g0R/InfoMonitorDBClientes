@@ -3,10 +3,14 @@ Monitor de clientes hospedados no datacenter da Infobrasil Sistemas
 
 ## Teste local
 
-Instale as dependências com `python -m pip install -r requirements.txt`, copie
+Instale as dependências com `python -m pip install -r requirements.lock`, copie
 `.env.example` para `.env` e preencha `SECRET_KEY` e as configurações necessárias.
 Use `BIND_HOST=127.0.0.1` para testar localmente e execute
 `python InfoMonitorDBClientes.py`.
+
+`SECRET_KEY` é obrigatória, deve ser aleatória e ter pelo menos 32 caracteres.
+Gere uma com `python -c "import secrets; print(secrets.token_hex(32))"`. Nunca
+publique `.env`, bancos, `known_hosts`, fotos ou logs no Git.
 
 O administrador inicial é criado somente com `ADMIN_MASTER_EMAIL` e
 `ADMIN_MASTER_PASSWORD`, se esse usuário ainda não existir. Remova a senha de
@@ -37,6 +41,11 @@ para um banco que já está no servidor, selecione a pasta e o nome corresponden
 e deixe o campo de envio vazio. Transferências novas usam um arquivo temporário,
 renomeado somente após o envio completo. Se a conexão cair, o temporário pode
 permanecer como `.nome.fdb.<identificador>.upload`, sem substituir o banco.
+
+Restaurações que substituem um destino dependem da extensão SFTP
+`posix-rename@openssh.com`; confirme que o servidor SSH a oferece. Sem essa
+operação atômica, o sistema recusa finalizar a substituição em vez de expor um
+banco parcialmente enviado.
 
 Execute `python -m unittest discover -s tests -v` para validar as proteções em
 um banco temporário, sem usar o `.env` ou os bancos locais.
@@ -75,24 +84,134 @@ da migração de horários. O processo adiciona campos e tabelas e preserva os d
 Atualize somente o código em produção; não copie o `sistema.db` de testes sobre
 o banco de produção. Essa cópia de migração não substitui backups periódicos.
 
-## Instalação e atualização no Windows
+## Produção
 
-Execute `INSTALAR_OU_ATUALIZAR.bat` como ponto de entrada. O assistente procura
-a instalação padrão em `C:\Tomcat 9.0\webapps\InfoMonitorDBClientes`, consulta o
-commit atual da branch `main` no GitHub e permite manter, instalar ou atualizar.
-Ele exige Git for Windows e Python 3 instalados.
+Use `python production.py`, nunca o servidor de desenvolvimento do Flask. O
+runner valida `BIND_HOST`, `BIND_PORT` (1–65535) e `WEB_THREADS` (1–64) e inicia
+Waitress. A configuração recomendada é `WEB_THREADS=4`; aumente somente depois
+de medir carga e memória.
 
-Quando encontra uma instalação, o assistente mostra o caminho e pede confirmação,
-permitindo selecionar ou digitar outra pasta. Se não encontrar, entra no fluxo de
-instalação limpa e permite escolher graficamente ou informar o diretório de destino.
+Mantenha **um único processo**. O APScheduler é criado dentro da aplicação e
+múltiplos processos executariam a mesma coleta agendada mais de uma vez. Waitress
+oferece concorrência por threads dentro desse processo. Para acesso externo,
+termine HTTPS em um proxy reverso e restrinja a porta do Waitress à rede adequada.
 
-Antes de atualizar, o serviço é interrompido e uma cópia ZIP é gravada na pasta
-`InfoMonitorDBClientes-backups`, ao lado da instalação. Apenas arquivos
-controlados pelo Git são copiados; `.env`, bancos SQLite, `known_hosts`, fotos,
-backups e demais dados locais são preservados. O commit aplicado fica registrado
-localmente em `.infomonitor-version` para as próximas comparações.
+O endpoint `GET /api/historico` aceita `servidor`/`servidores`, `data_inicio`,
+`data_fim`, `limite` e `offset`. `limite` usa 500 por padrão (máximo 1000) e
+`offset` usa 0 (máximo 10.000.000). A resposta informa `X-Total-Count`, `X-Limit`
+e `X-Offset`; quando aplicável, `Link` contém `rel="prev"` e `rel="next"`.
 
-O serviço Windows usa NSSM. Mantenha `nssm.exe` ao lado do BAT, disponível no
-`PATH` ou na pasta instalada. Sem ele, o assistente instala e atualiza os arquivos,
-mas informa que o serviço não pôde ser criado. Instalações já registradas pelo
-NSSM são detectadas, reconfiguradas para o ambiente virtual `.venv` e reiniciadas.
+## Instaladores e dados preservados
+
+Os lançadores são scripts legíveis, não binários. Eles criam `.venv`, exigem
+`requirements.lock`, verificam dependências e geram uma `SECRET_KEY` na primeira
+instalação e registram um único processo `production.py`. Permissão administrativa
+é solicitada apenas ao registrar ou controlar o serviço.
+
+O lock fixa versões, mas ainda não contém hashes para todas as rodas de Windows,
+macOS e Linux. Assim, ele melhora reprodutibilidade, porém não comprova a
+integridade criptográfica dos artefatos baixados; use índice PyPI confiável e TLS.
+
+Atualizações preservam `.env`, `*.db`, `known_hosts`, `static/fotos`, `backups` e
+`logs`. O backup automático contém **somente código versionado**, portanto não é
+backup dos dados operacionais. Mantenha cópias protegidas e independentes dos
+bancos e da configuração. A remoção pelo assistente remove somente o serviço.
+Uma atualização baixa e valida código/dependências antes da parada, registra um
+manifesto do código instalado, remove somente arquivos que pertenciam ao manifesto
+anterior e executa health check. Em falha, tenta restaurar o código e o estado
+anterior do serviço; ainda assim, mantenha backup externo dos dados.
+
+`DATA_DIR` separa SQLite, fotos e logs do código (novas instalações usam `data`).
+Ao migrar instalação antiga, os instaladores **copiam** bancos e fotos para esse
+diretório sem apagar os originais; remova a cópia antiga somente depois de validar
+e fazer backup. O runtime candidato é montado em `.venv.next`, testado e então
+trocado atomicamente, mantendo `.venv.previous` até o health check passar.
+
+### Windows
+
+Pré-requisitos: Python 3 de 64 bits, Git for Windows e NSSM obtido do site
+oficial. O repositório não distribui `nssm.exe`; instale-o exatamente em
+`C:\Program Files\nssm\win64\nssm.exe`. Antes de executar, defina `NSSM_SHA256`
+com o SHA-256 conferido do binário obtido; cópias no `PATH` ou na pasta do projeto
+não são executadas. Execute `INSTALAR_OU_ATUALIZAR.bat` e escolha instalar/atualizar,
+configurar, consultar status, reiniciar, parar ou remover. A pasta sugerida é
+`C:\InfoMonitorDBClientes`. O NSSM grava a saída e os erros na subpasta `logs`
+do `DATA_DIR` configurado.
+
+O serviço roda como `NT AUTHORITY\LocalService`, não como SYSTEM. O instalador
+restringe as ACLs da instalação aos administradores, SYSTEM, usuário instalador e
+LocalService; essa última identidade recebe escrita porque os SQLite e seus
+journals ficam na pasta da aplicação. Não use a pasta Windows, Program Files,
+ProgramData, a raiz de um disco, um checkout Git ou uma pasta não vazia sem o
+manifesto do instalador.
+
+Também é possível chamar, em PowerShell:
+
+```powershell
+.\INSTALAR_OU_ATUALIZAR.bat -Action install -Target C:\InfoMonitorDBClientes
+.\INSTALAR_OU_ATUALIZAR.bat -Action configure -Target C:\InfoMonitorDBClientes
+.\INSTALAR_OU_ATUALIZAR.bat -Action status -Target C:\InfoMonitorDBClientes
+.\INSTALAR_OU_ATUALIZAR.bat -Action restart -Target C:\InfoMonitorDBClientes
+.\INSTALAR_OU_ATUALIZAR.bat -Action stop -Target C:\InfoMonitorDBClientes
+```
+
+### macOS
+
+Com Python 3, Git, `curl` e as Command Line Tools instalados, dê permissão uma vez e abra
+o assistente:
+
+```bash
+chmod +x INSTALAR_OU_ATUALIZAR.command scripts/servico_unix.sh
+./INSTALAR_OU_ATUALIZAR.command
+```
+
+Ele registra `/Library/LaunchDaemons/com.infobrasil.infomonitor.plist`, com
+`WorkingDirectory` e caminhos absolutos. Comandos diretos:
+
+```bash
+./INSTALAR_OU_ATUALIZAR.command update
+./INSTALAR_OU_ATUALIZAR.command configure
+./INSTALAR_OU_ATUALIZAR.command status
+./INSTALAR_OU_ATUALIZAR.command restart
+./INSTALAR_OU_ATUALIZAR.command stop
+./INSTALAR_OU_ATUALIZAR.command logs
+./INSTALAR_OU_ATUALIZAR.command uninstall
+```
+
+Os logs ficam em `logs/servico-saida.log` e `logs/servico-erro.log`. Para inspeção
+nativa, use `sudo launchctl print system/com.infobrasil.infomonitor`.
+
+### Linux (systemd)
+
+Com Python 3 (incluindo o módulo `venv`), Git e `curl` instalados:
+
+```bash
+chmod +x INSTALAR_OU_ATUALIZAR.sh scripts/servico_unix.sh
+./INSTALAR_OU_ATUALIZAR.sh
+```
+
+O assistente registra `/etc/systemd/system/infomonitor.service` com `Type=simple`,
+usuário atual, `WorkingDirectory` absoluto, `Restart=on-failure`, `PrivateTmp`,
+`NoNewPrivileges` e proteção somente-leitura do sistema, liberando escrita apenas
+na pasta da aplicação. Comandos:
+
+```bash
+./INSTALAR_OU_ATUALIZAR.sh update
+./INSTALAR_OU_ATUALIZAR.sh configure
+./INSTALAR_OU_ATUALIZAR.sh status
+./INSTALAR_OU_ATUALIZAR.sh restart
+./INSTALAR_OU_ATUALIZAR.sh stop
+./INSTALAR_OU_ATUALIZAR.sh logs
+./INSTALAR_OU_ATUALIZAR.sh uninstall
+```
+
+Alternativamente: `systemctl status infomonitor` e
+`journalctl -u infomonitor -f`. Se o projeto estiver sob `/home`, confirme que o
+sistema de arquivos está disponível antes do serviço iniciar.
+
+## Atualização manual e versão
+
+O número da versão está em `VERSION` e as mudanças em `CHANGELOG.md`. Antes de
+atualizar, faça backup dos dados, pare o serviço, execute `git pull --ff-only`,
+instale `requirements.lock` dentro da `.venv` e reinicie. Não copie um
+`sistema.db` local sobre o servidor.

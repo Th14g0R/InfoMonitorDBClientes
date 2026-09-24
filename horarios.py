@@ -12,10 +12,13 @@ from escalas import (EQUIPES, TIPOS_SABADO, FAIXAS_SABADO, preservar_banco_antes
                      validar_participante_sabado, ajustar_escala, registrar_substituicao)
 
 horarios_bp = Blueprint('horarios', __name__, template_folder='templates')
-DB_NAME = 'sistema.db'
+DATA_DIR = os.path.abspath(os.getenv('DATA_DIR', '.'))
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_NAME = os.path.join(DATA_DIR, 'sistema.db')
 MAX_FOTO_BYTES = int(os.getenv('MAX_FOTO_KB', '2048')) * 1024
 
-UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'fotos')
+UPLOAD_FOLDER = (os.path.join(DATA_DIR, 'fotos') if os.getenv('DATA_DIR', '').strip()
+                 else os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'fotos'))
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 EXTENSOES_PERMITIDAS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 

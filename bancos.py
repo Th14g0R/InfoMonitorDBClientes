@@ -146,8 +146,10 @@ else:
 
 CAMINHO_DATABASES_CONF = '/opt/firebird/databases.conf'
 DIRETORIO_BASE = '/opt/infobrasil'
-DB_HISTORICO = 'historico_bancos.db'
-DB_SISTEMA = 'sistema.db'  # FIX: Ajustado para alinhar ao arquivo real do ambiente
+DATA_DIR = os.path.abspath(os.getenv('DATA_DIR', '.'))
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_HISTORICO = os.path.join(DATA_DIR, 'historico_bancos.db')
+DB_SISTEMA = os.path.join(DATA_DIR, 'sistema.db')
 URL_STATUS_BACKUPS_FTP = os.getenv('URL_STATUS_BACKUPS_FTP', 'http://192.168.254.19/cgi-bin/bkp-status.web')
    
 
@@ -1330,7 +1332,7 @@ HTML_LAYOUT = """
     <!-- Font Awesome Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     {% if modo_historico %}
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" defer></script>
+    <script src="/static/vendor/chart.js/chart.umd.min.js" defer></script>
     {% endif %}
     <style>
         :root {
