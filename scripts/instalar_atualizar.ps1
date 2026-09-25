@@ -55,11 +55,20 @@ function Invoke-Elevated([string]$Operation, [string]$Folder) {
 }
 
 function Invoke-ElevatedPrepared([string]$Folder, [string]$Prepared, [string]$Commit, [string]$MetadataHash) {
+    $resultFile = Join-Path $Prepared 'elevated-result.txt'
+    Remove-Item -LiteralPath $resultFile -Force -ErrorAction SilentlyContinue
     $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $ScriptPath),
         '-Action', 'apply_prepared', '-Target', ('"{0}"' -f $Folder), '-Staging', ('"{0}"' -f $Prepared),
         '-ExpectedCommit', $Commit, '-ExpectedMetadataHash', $MetadataHash, '-Elevated')
     $process = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList $arguments
-    if ($process.ExitCode -ne 0) { throw 'A aplicacao elevada do pacote preparado falhou.' }
+    $result = if (Test-Path -LiteralPath $resultFile -PathType Leaf) {
+        (Get-Content -LiteralPath $resultFile -Raw).Trim()
+    } else { '' }
+    if ($process.ExitCode -ne 0) {
+        $detail = if ($result) { $result } else { 'A janela elevada nao registrou detalhes; confirme se o UAC foi aceito.' }
+        throw "A aplicacao elevada do pacote preparado falhou. $detail"
+    }
+    if ($result -ne 'OK') { throw 'A aplicacao elevada terminou sem confirmacao de sucesso.' }
 }
 
 function Assert-Administrator {
@@ -619,6 +628,12 @@ function Prepare-And-Apply([string]$Folder, [ValidateSet('install', 'update')][s
     } else {
         Write-Host "Nova instalacao selecionada para: $Folder" -ForegroundColor Cyan
     }
+    $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if ($existingService) {
+        $nssm = Find-Nssm $Folder
+        if (-not $nssm) { throw 'O servico existe, mas o NSSM confiavel nao foi encontrado para concluir a atualizacao.' }
+        Write-Host "Servico existente validado: $($existingService.Status); NSSM: $nssm" -ForegroundColor Green
+    }
     $prepared = Join-Path ([IO.Path]::GetTempPath()) ("infomonitor-prepared-{0}" -f [Guid]::NewGuid().ToString('N'))
     $source = Join-Path $prepared 'source'; $wheels = Join-Path $prepared 'wheels'
     try {
@@ -753,15 +768,34 @@ if ($Elevated) {
     if ($Action -notin @('apply_prepared', 'configure_apply', 'register', 'restart', 'stop', 'uninstall', 'acl')) {
         throw 'Operacao elevada invalida.'
     }
-    $elevatedTarget = Resolve-SafeTarget $Target ($Action -eq 'apply_prepared')
-    $installerMutex = Enter-InstallerMutex $elevatedTarget
+    $elevatedFailure = $null
+    $elevatedResultFile = if ($Action -eq 'apply_prepared' -and $Staging) {
+        Join-Path ([IO.Path]::GetFullPath($Staging)) 'elevated-result.txt'
+    } else { $null }
     try {
+        $elevatedTarget = Resolve-SafeTarget $Target ($Action -eq 'apply_prepared')
+        $installerMutex = Enter-InstallerMutex $elevatedTarget
         if ($Action -eq 'apply_prepared') { Apply-PreparedRelease $elevatedTarget $Staging $ExpectedCommit }
         elseif ($Action -eq 'configure_apply') { Apply-ConfiguredEnvironment $elevatedTarget }
         else { Invoke-ServiceOperation $Action $elevatedTarget }
+        if ($elevatedResultFile) {
+            [IO.File]::WriteAllText($elevatedResultFile, 'OK', [Text.Encoding]::UTF8)
+        }
+    } catch {
+        $elevatedFailure = $_
+        if ($elevatedResultFile) {
+            $detail = "ERRO ELEVADO: $($_.Exception.Message)`r`n$($_.ScriptStackTrace)"
+            try { [IO.File]::WriteAllText($elevatedResultFile, $detail, [Text.Encoding]::UTF8) } catch {}
+        }
     } finally {
-        try { $installerMutex.ReleaseMutex() } catch {}
-        $installerMutex.Dispose()
+        if ($installerMutex) {
+            try { $installerMutex.ReleaseMutex() } catch {}
+            $installerMutex.Dispose()
+        }
+    }
+    if ($elevatedFailure) {
+        Write-Host "ERRO ELEVADO: $($elevatedFailure.Exception.Message)" -ForegroundColor Red
+        exit 1
     }
     exit 0
 }
@@ -813,6 +847,11 @@ try {
             Invoke-Elevated 'uninstall' $Target
             Write-Host 'Servico removido. .env, bancos, known_hosts, fotos e logs foram preservados.'
         }
+    }
+    if ($Action -in @('install', 'update')) {
+        $operationLabel = if ($Action -eq 'update') { 'Atualizacao' } else { 'Instalacao' }
+        Write-Host "SUCESSO: $operationLabel concluida em $Target" -ForegroundColor Green
+        Write-Host 'O pacote elevado confirmou a aplicacao e o assistente terminou sem erros.' -ForegroundColor Green
     }
 } catch {
     Write-Host "ERRO: $($_.Exception.Message)" -ForegroundColor Red

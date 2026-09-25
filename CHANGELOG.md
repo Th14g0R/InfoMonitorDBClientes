@@ -1,5 +1,11 @@
 # Histórico de versões
 
+## 1.1.3 - build 20260925.4 - 2026-09-25
+
+- registra e exibe o erro real ocorrido na etapa elevada do instalador Windows;
+- confirma explicitamente o sucesso da aplicação elevada antes de encerrar;
+- valida serviço e NSSM antes de baixar e preparar toda a atualização.
+
 ## 1.1.2 - build 20260925.3 - 2026-09-25
 
 - separa no instalador Windows os fluxos de instalação nova e atualização existente;
