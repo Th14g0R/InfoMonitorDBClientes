@@ -372,8 +372,8 @@ show_logs() {
 }
 
 if [ -z "$ACTION" ]; then
-    printf '\nInfoMonitorDBClientes (%s)\n1) instalar/configurar servico\n2) atualizar codigo e reiniciar\n3) editar configuracao e reiniciar\n4) status\n5) reiniciar\n6) parar\n7) logs\n8) remover servico\n0) sair\n' "$PLATFORM"
-    read -r -p 'Opcao: ' choice
+    printf '\nInfoMonitorDBClientes (%s)\nDiretorio de instalacao/atualizacao: %s\n\n1) instalar/configurar servico\n2) atualizar codigo e reiniciar\n3) editar configuracao e reiniciar\n4) status\n5) reiniciar\n6) parar\n7) logs\n8) remover servico\n0) sair\n' "$PLATFORM" "$PROJECT_DIR"
+    read -r -p "Opcao para $PROJECT_DIR: " choice
     case "$choice" in 1) ACTION=install;; 2) ACTION=update;; 3) ACTION=configure;; 4) ACTION=status;; 5) ACTION=restart;; 6) ACTION=stop;; 7) ACTION=logs;; 8) ACTION=uninstall;; 0) exit 0;; *) fail "opcao invalida";; esac
 fi
 

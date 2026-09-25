@@ -1,5 +1,12 @@
 # Histórico de versões
 
+## 1.1.1 - build 20260925.2 - 2026-09-25
+
+- corrige a seleção do diretório nos instaladores Windows, Linux e macOS;
+- detecta a pasta registrada no serviço ou sugere o diretório do próprio instalador;
+- permite atualizar um checkout Git local, criando backup e migrando-o para o manifesto gerenciado;
+- mantém bloqueios para raízes de disco e diretórios protegidos do sistema.
+
 ## 1.1.0 - build 20260925.1 - 2026-09-25
 
 - reorganiza as telas de administração, servidores e horários com temas claro/escuro e layout responsivo;

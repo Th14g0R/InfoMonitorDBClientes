@@ -31,6 +31,18 @@ function Test-Administrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Get-DetectedInstallDirectory {
+    $parametersPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName\Parameters"
+    try {
+        $configured = (Get-ItemProperty -LiteralPath $parametersPath -Name AppDirectory -ErrorAction Stop).AppDirectory
+        if ($configured) {
+            $full = [IO.Path]::GetFullPath([string]$configured).TrimEnd('\', '/')
+            if (Test-Path -LiteralPath (Join-Path $full 'InfoMonitorDBClientes.py') -PathType Leaf) { return $full }
+        }
+    } catch {}
+    return $null
+}
+
 function Invoke-Elevated([string]$Operation, [string]$Folder) {
     if ($Elevated) {
         Invoke-ServiceOperation $Operation $Folder
@@ -75,9 +87,6 @@ function Resolve-SafeTarget([string]$Path, [bool]$ForInstall) {
             $attributes = (Get-Item -LiteralPath $cursor -Force).Attributes
             if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Destino contem junction/reparse point: $cursor" }
         }
-    }
-    if (Test-Path (Join-Path $full '.git')) {
-        throw 'Um checkout de desenvolvimento nao pode ser usado como destino instalado.'
     }
     if ($ForInstall -and (Test-Path $full)) {
         $entries = @(Get-ChildItem -LiteralPath $full -Force)
@@ -403,6 +412,16 @@ function Get-InstalledManifest([string]$Source, [string]$Folder) {
         return $entries
     }
     if (-not (Test-Path (Join-Path $Folder 'InfoMonitorDBClientes.py') -PathType Leaf)) { return @() }
+    if (Test-Path (Join-Path $Folder '.git') -PathType Container) {
+        $tracked = @(& git -C $Folder ls-files)
+        if ($LASTEXITCODE -ne 0 -or $tracked.Count -eq 0) {
+            throw 'O checkout Git local nao pode ser lido para preparar a atualizacao.'
+        }
+        Write-Host 'Checkout Git local detectado; os arquivos atuais serao atualizados e registrados no manifesto da instalacao.' -ForegroundColor Yellow
+        return @($tracked | Where-Object {
+            -not (Test-ProtectedRelative $_) -and (Test-Path (Resolve-ManifestPath $Folder $_) -PathType Leaf)
+        })
+    }
     $versionFile = Join-Path $Folder '.infomonitor-version'
     if (-not (Test-Path $versionFile -PathType Leaf)) {
         throw 'Instalacao legada sem manifesto/versao. Faca backup manual e migre com uma instalacao limpa.'
@@ -730,11 +749,18 @@ if ($Elevated) {
 try {
     if (-not $Target) {
         $local = Split-Path (Split-Path $ScriptPath -Parent) -Parent
-        $suggestion = if ((Test-Path (Join-Path $local '.env')) -and -not (Test-Path (Join-Path $local '.git'))) { $local } else { $DefaultDir }
-        $entered = Read-Host "Pasta da instalacao [$suggestion]"
+        $detected = Get-DetectedInstallDirectory
+        $localProject = Test-Path -LiteralPath (Join-Path $local 'InfoMonitorDBClientes.py') -PathType Leaf
+        $suggestion = if ($detected) { $detected } elseif ($localProject) { $local } else { $DefaultDir }
+        Write-Host "`nDiretorio do instalador: $local" -ForegroundColor Cyan
+        if ($detected) { Write-Host "Instalacao detectada no servico: $detected" -ForegroundColor Green }
+        elseif ($localProject) { Write-Host 'Projeto local detectado; ele pode ser atualizado no proprio local.' -ForegroundColor Green }
+        else { Write-Host "Nenhuma instalacao existente foi detectada; sugestao: $DefaultDir" -ForegroundColor Yellow }
+        $entered = Read-Host "Pasta que sera instalada/atualizada (Enter usa: $suggestion)"
         $Target = if ($entered) { $entered } else { $suggestion }
     }
     $Target = Resolve-SafeTarget $Target $false
+    Write-Host "Destino selecionado: $Target" -ForegroundColor Cyan
     if (-not $Action) {
         Write-Host "`n[1] Instalar/atualizar  [2] Configurar .env  [3] Status"
         Write-Host '[4] Reiniciar          [5] Parar            [6] Remover servico  [0] Sair'

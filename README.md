@@ -134,16 +134,19 @@ oficial. O repositório não distribui `nssm.exe`; instale-o exatamente em
 `C:\Program Files\nssm\win64\nssm.exe`. Antes de executar, defina `NSSM_SHA256`
 com o SHA-256 conferido do binário obtido; cópias no `PATH` ou na pasta do projeto
 não são executadas. Execute `INSTALAR_OU_ATUALIZAR.bat` e escolha instalar/atualizar,
-configurar, consultar status, reiniciar, parar ou remover. A pasta sugerida é
-`C:\InfoMonitorDBClientes`. O NSSM grava a saída e os erros na subpasta `logs`
-do `DATA_DIR` configurado.
+configurar, consultar status, reiniciar, parar ou remover. O assistente mostra a
+pasta de onde está sendo executado e sugere, nesta ordem, o diretório já registrado
+no serviço, o diretório local do instalador ou `C:\InfoMonitorDBClientes`. Um checkout
+Git local pode ser atualizado no próprio lugar; na primeira atualização ele é
+convertido para o manifesto gerenciado pelo instalador. O NSSM grava a saída e os
+erros na subpasta `logs` do `DATA_DIR` configurado.
 
 O serviço roda como `NT AUTHORITY\LocalService`, não como SYSTEM. O instalador
 restringe as ACLs da instalação aos administradores, SYSTEM, usuário instalador e
 LocalService; essa última identidade recebe escrita porque os SQLite e seus
 journals ficam na pasta da aplicação. Não use a pasta Windows, Program Files,
-ProgramData, a raiz de um disco, um checkout Git ou uma pasta não vazia sem o
-manifesto do instalador.
+ProgramData, a raiz de um disco ou uma pasta não vazia que não seja uma instalação
+existente nem um checkout Git válido do projeto.
 
 Também é possível chamar, em PowerShell:
 
@@ -166,7 +169,8 @@ chmod +x INSTALAR_OU_ATUALIZAR.command scripts/servico_unix.sh
 ```
 
 Ele registra `/Library/LaunchDaemons/com.infobrasil.infomonitor.plist`, com
-`WorkingDirectory` e caminhos absolutos. Comandos diretos:
+`WorkingDirectory` e caminhos absolutos. O menu informa o diretório local que será
+instalado ou atualizado. Comandos diretos:
 
 ```bash
 ./INSTALAR_OU_ATUALIZAR.command update
@@ -193,7 +197,8 @@ chmod +x INSTALAR_OU_ATUALIZAR.sh scripts/servico_unix.sh
 O assistente registra `/etc/systemd/system/infomonitor.service` com `Type=simple`,
 usuário atual, `WorkingDirectory` absoluto, `Restart=on-failure`, `PrivateTmp`,
 `NoNewPrivileges` e proteção somente-leitura do sistema, liberando escrita apenas
-na pasta da aplicação. Comandos:
+na pasta da aplicação. O menu informa o diretório local que será instalado ou
+atualizado. Comandos:
 
 ```bash
 ./INSTALAR_OU_ATUALIZAR.sh update
