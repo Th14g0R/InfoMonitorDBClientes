@@ -1,5 +1,12 @@
 # Histórico de versões
 
+## 1.1.4 - build 20260925.5 - 2026-09-25
+
+- atualiza código e prepara dependências sem parar ou reconfigurar o serviço Windows;
+- pergunta ao final se o operador deseja ativar o runtime e reiniciar o serviço;
+- permite adiar a ativação e concluí-la posteriormente pela opção Reiniciar;
+- preserva o runtime anterior caso a ativação ou o health check falhem.
+
 ## 1.1.3 - build 20260925.4 - 2026-09-25
 
 - registra e exibe o erro real ocorrido na etapa elevada do instalador Windows;

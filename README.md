@@ -134,10 +134,13 @@ oficial. O repositório não distribui `nssm.exe`; instale-o exatamente em
 `C:\Program Files\nssm\win64\nssm.exe`. Antes de executar, defina `NSSM_SHA256`
 com o SHA-256 conferido do binário obtido; cópias no `PATH` ou na pasta do projeto
 não são executadas. Execute `INSTALAR_OU_ATUALIZAR.bat` e escolha separadamente
-**Instalar novo** ou **Atualizar existente**, além de configurar, consultar status,
+**Instalar novo** ou **Atualizar arquivos**, além de configurar, consultar status,
 reiniciar, parar ou remover. A atualização exige `InfoMonitorDBClientes.py` no destino,
 baixa o branch `main`, compara o manifesto e a versão e valida todas as dependências
-em um ambiente candidato antes de substituir os arquivos. O assistente mostra a
+em um ambiente candidato antes de substituir os arquivos. A opção de atualização não
+para, reinstala nem reinicia o serviço: ela deixa o novo runtime pendente e pergunta
+ao final se o operador deseja ativá-lo e reiniciar. Se o reinício for adiado, a opção
+**Reiniciar** ativa o runtime pendente posteriormente. O assistente mostra a
 pasta de onde está sendo executado e sugere, nesta ordem, o diretório já registrado
 no serviço, o diretório local do instalador ou `C:\InfoMonitorDBClientes`. Um checkout
 Git local pode ser atualizado no próprio lugar; na primeira atualização ele é

@@ -219,7 +219,12 @@ function Invoke-ServiceOperation([string]$Operation, [string]$Folder) {
     switch ($Operation) {
         'register' { Register-Service $Folder }
         'acl' { Set-AppAcl $Folder }
+        'activate_update' { Activate-PendingUpdate $Folder }
         'restart' {
+            if (Test-Path -LiteralPath (Join-Path $Folder '.venv.next') -PathType Container) {
+                Activate-PendingUpdate $Folder
+                break
+            }
             if (-not $service) { throw 'Servico nao instalado.' }
             Restart-Service $ServiceName -Force
             $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(20))
@@ -347,6 +352,37 @@ function Restore-PreviousRuntime([string]$Folder) {
         default { throw 'Estado de troca de runtime desconhecido.' }
     }
     $script:RuntimeSwapState = 'None'
+}
+
+function Activate-PendingUpdate([string]$Folder) {
+    Assert-Administrator
+    $next = Join-Path $Folder '.venv.next'
+    if (-not (Test-Path -LiteralPath $next -PathType Container)) {
+        throw 'Nao existe ambiente de dependencias pendente. Execute Atualizar existente primeiro.'
+    }
+    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if (-not $service) { throw 'Servico nao instalado; use Instalar novo para registra-lo.' }
+    $nssm = Find-Nssm $Folder
+    if (-not $nssm) { throw 'NSSM confiavel nao encontrado; o servico nao foi alterado.' }
+
+    $wasRunning = $service.Status -eq 'Running'
+    $script:RuntimeSwapState = 'None'
+    try {
+        if ($wasRunning) { Invoke-ServiceOperation 'stop' $Folder }
+        Swap-CandidateRuntime $Folder
+        Register-Service $Folder
+        Test-HttpHealth $Folder
+        Remove-Item -LiteralPath (Join-Path $Folder '.venv.previous') -Recurse -Force -ErrorAction SilentlyContinue
+    } catch {
+        $activationFailure = $_
+        try {
+            $currentService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            if ($currentService -and $currentService.Status -ne 'Stopped') { Invoke-ServiceOperation 'stop' $Folder }
+            Restore-PreviousRuntime $Folder
+            if ($wasRunning) { Register-Service $Folder }
+        } catch { Write-Host "Rollback do runtime pendente incompleto: $($_.Exception.Message)" -ForegroundColor Red }
+        throw $activationFailure
+    }
 }
 
 function Copy-TrackedFiles([string]$Source, [string]$Folder) {
@@ -628,11 +664,10 @@ function Prepare-And-Apply([string]$Folder, [ValidateSet('install', 'update')][s
     } else {
         Write-Host "Nova instalacao selecionada para: $Folder" -ForegroundColor Cyan
     }
-    $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    if ($existingService) {
+    if ($Mode -eq 'install') {
         $nssm = Find-Nssm $Folder
-        if (-not $nssm) { throw 'O servico existe, mas o NSSM confiavel nao foi encontrado para concluir a atualizacao.' }
-        Write-Host "Servico existente validado: $($existingService.Status); NSSM: $nssm" -ForegroundColor Green
+        if (-not $nssm) { throw 'O NSSM confiavel nao foi encontrado para registrar a nova instalacao.' }
+        Write-Host "NSSM validado para a nova instalacao: $nssm" -ForegroundColor Green
     }
     $prepared = Join-Path ([IO.Path]::GetTempPath()) ("infomonitor-prepared-{0}" -f [Guid]::NewGuid().ToString('N'))
     $source = Join-Path $prepared 'source'; $wheels = Join-Path $prepared 'wheels'
@@ -722,10 +757,11 @@ function Apply-PreparedRelease([string]$Folder, [string]$Prepared, [string]$Comm
     }
     $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     $freshInstall = -not $service; $wasRunning = $service -and $service.Status -eq 'Running'
+    $isUpdate = $metadata.mode -eq 'update'
     $backup = Backup-Code $source $Folder $oldManifest
     $script:RuntimeSwapState = 'None'; $mutated = $false
     try {
-        if ($wasRunning) { Invoke-ServiceOperation 'stop' $Folder }
+        if (-not $isUpdate -and $wasRunning) { Invoke-ServiceOperation 'stop' $Folder }
         $mutated = $true
         foreach ($relative in $candidateManifest) {
             $destination = Resolve-ManifestPath $Folder $relative
@@ -742,14 +778,19 @@ function Apply-PreparedRelease([string]$Folder, [string]$Prepared, [string]$Comm
         $next = Join-Path $Folder '.venv.next'; if (Test-Path $next) { Remove-Item $next -Recurse -Force }
         New-Item -ItemType Directory $next | Out-Null
         Expand-Archive $runtimeZip -DestinationPath $next
-        Swap-CandidateRuntime $Folder
         [IO.File]::WriteAllText((Join-Path $Folder '.infomonitor-version'), $Commit, [Text.Encoding]::ASCII)
-        if ($freshInstall -or $wasRunning) { Invoke-ServiceOperation 'register' $Folder; Test-HttpHealth $Folder }
-        else { Invoke-ServiceOperation 'acl' $Folder }
-        Remove-Item (Join-Path $Folder '.venv.previous') -Recurse -Force -ErrorAction SilentlyContinue
+        if ($isUpdate) {
+            Set-AppAcl $Folder
+            Write-Host 'Arquivos atualizados. O servico nao foi parado nem reiniciado; o novo runtime ficou pendente.' -ForegroundColor Yellow
+        } else {
+            Swap-CandidateRuntime $Folder
+            if ($freshInstall -or $wasRunning) { Invoke-ServiceOperation 'register' $Folder; Test-HttpHealth $Folder }
+            else { Invoke-ServiceOperation 'acl' $Folder }
+            Remove-Item (Join-Path $Folder '.venv.previous') -Recurse -Force -ErrorAction SilentlyContinue
+        }
     } catch {
         if ($mutated) {
-            if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) { Invoke-ServiceOperation 'stop' $Folder }
+            if (-not $isUpdate -and (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) { Invoke-ServiceOperation 'stop' $Folder }
             foreach ($relative in $createdPaths) { Remove-Item (Resolve-ManifestPath $Folder $relative) -Force -ErrorAction SilentlyContinue }
             if ($backup -and (Test-Path $backup)) { Expand-Archive $backup -DestinationPath $Folder -Force }
             Remove-Item (Join-Path $Folder 'MANIFESTO-INSTALADO.txt') -Force -ErrorAction SilentlyContinue
@@ -758,14 +799,16 @@ function Apply-PreparedRelease([string]$Folder, [string]$Prepared, [string]$Comm
             if ($null -ne $metadata.oldVersion) { [IO.File]::WriteAllText((Join-Path $Folder '.infomonitor-version'), [string]$metadata.oldVersion, [Text.Encoding]::ASCII) }
             else { Remove-Item (Join-Path $Folder '.infomonitor-version') -Force -ErrorAction SilentlyContinue }
             Restore-PreviousRuntime $Folder
-            if ($wasRunning) { Invoke-ServiceOperation 'register' $Folder } elseif ($freshInstall) { Invoke-ServiceOperation 'uninstall' $Folder }
+            if (-not $isUpdate) {
+                if ($wasRunning) { Invoke-ServiceOperation 'register' $Folder } elseif ($freshInstall) { Invoke-ServiceOperation 'uninstall' $Folder }
+            }
         }
         throw
     }
 }
 
 if ($Elevated) {
-    if ($Action -notin @('apply_prepared', 'configure_apply', 'register', 'restart', 'stop', 'uninstall', 'acl')) {
+    if ($Action -notin @('apply_prepared', 'configure_apply', 'activate_update', 'register', 'restart', 'stop', 'uninstall', 'acl')) {
         throw 'Operacao elevada invalida.'
     }
     $elevatedFailure = $null
@@ -818,7 +861,7 @@ try {
     $targetHasApp = Test-Path -LiteralPath (Join-Path $Target 'InfoMonitorDBClientes.py') -PathType Leaf
     Write-Host $(if ($targetHasApp) { 'Estado do destino: instalacao existente (use Atualizar).' } else { 'Estado do destino: pasta nova (use Instalar).' }) -ForegroundColor Yellow
     if (-not $Action) {
-        Write-Host "`n[1] Instalar novo      [2] Atualizar existente  [3] Configurar .env"
+        Write-Host "`n[1] Instalar novo      [2] Atualizar arquivos    [3] Configurar .env"
         Write-Host '[4] Status             [5] Reiniciar            [6] Parar'
         Write-Host '[7] Remover servico    [0] Sair'
         $choice = Read-Host 'Opcao'
@@ -828,8 +871,28 @@ try {
     }
     $Target = Resolve-SafeTarget $Target ($Action -eq 'install')
     switch ($Action) {
-        'install' { Prepare-And-Apply $Target 'install' }
-        'update' { Prepare-And-Apply $Target 'update' }
+        'install' {
+            Prepare-And-Apply $Target 'install'
+            Write-Host "SUCESSO: Instalacao concluida em $Target" -ForegroundColor Green
+            Write-Host 'O pacote elevado confirmou a aplicacao e o assistente terminou sem erros.' -ForegroundColor Green
+        }
+        'update' {
+            Prepare-And-Apply $Target 'update'
+            Write-Host "SUCESSO: arquivos atualizados em $Target" -ForegroundColor Green
+            Write-Host 'O servico permaneceu intacto. As novas dependencias serao ativadas no proximo reinicio pelo assistente.' -ForegroundColor Yellow
+            $restartChoice = Read-Host 'Deseja ativar as dependencias e reiniciar o servico agora? [s/N]'
+            if ($restartChoice -match '^s(im)?$') {
+                try {
+                    Invoke-Elevated 'activate_update' $Target
+                    Write-Host 'SUCESSO: dependencias ativadas e servico reiniciado.' -ForegroundColor Green
+                } catch {
+                    Write-Host "AVISO: os arquivos foram atualizados, mas o reinicio falhou: $($_.Exception.Message)" -ForegroundColor Yellow
+                    Write-Host 'O servico anterior foi preservado. Corrija o requisito informado e use a opcao Reiniciar.' -ForegroundColor Yellow
+                }
+            } else {
+                Write-Host 'Reinicio adiado. Use a opcao Reiniciar para ativar o runtime pendente.' -ForegroundColor Yellow
+            }
+        }
         'configure' {
             Ensure-Environment $Target
             Start-Process notepad.exe -ArgumentList @((Join-Path $Target '.env')) -Wait
@@ -847,11 +910,6 @@ try {
             Invoke-Elevated 'uninstall' $Target
             Write-Host 'Servico removido. .env, bancos, known_hosts, fotos e logs foram preservados.'
         }
-    }
-    if ($Action -in @('install', 'update')) {
-        $operationLabel = if ($Action -eq 'update') { 'Atualizacao' } else { 'Instalacao' }
-        Write-Host "SUCESSO: $operationLabel concluida em $Target" -ForegroundColor Green
-        Write-Host 'O pacote elevado confirmou a aplicacao e o assistente terminou sem erros.' -ForegroundColor Green
     }
 } catch {
     Write-Host "ERRO: $($_.Exception.Message)" -ForegroundColor Red
