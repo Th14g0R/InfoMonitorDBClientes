@@ -1,5 +1,11 @@
 # Histórico de versões
 
+## 1.1.2 - build 20260925.3 - 2026-09-25
+
+- separa no instalador Windows os fluxos de instalação nova e atualização existente;
+- exige destino novo para instalar e aplicação existente para atualizar;
+- mantém na atualização as verificações de Git, manifesto, versão, dependências, backup e rollback.
+
 ## 1.1.1 - build 20260925.2 - 2026-09-25
 
 - corrige a seleção do diretório nos instaladores Windows, Linux e macOS;

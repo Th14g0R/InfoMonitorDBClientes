@@ -133,8 +133,11 @@ Pré-requisitos: Python 3 de 64 bits, Git for Windows e NSSM obtido do site
 oficial. O repositório não distribui `nssm.exe`; instale-o exatamente em
 `C:\Program Files\nssm\win64\nssm.exe`. Antes de executar, defina `NSSM_SHA256`
 com o SHA-256 conferido do binário obtido; cópias no `PATH` ou na pasta do projeto
-não são executadas. Execute `INSTALAR_OU_ATUALIZAR.bat` e escolha instalar/atualizar,
-configurar, consultar status, reiniciar, parar ou remover. O assistente mostra a
+não são executadas. Execute `INSTALAR_OU_ATUALIZAR.bat` e escolha separadamente
+**Instalar novo** ou **Atualizar existente**, além de configurar, consultar status,
+reiniciar, parar ou remover. A atualização exige `InfoMonitorDBClientes.py` no destino,
+baixa o branch `main`, compara o manifesto e a versão e valida todas as dependências
+em um ambiente candidato antes de substituir os arquivos. O assistente mostra a
 pasta de onde está sendo executado e sugere, nesta ordem, o diretório já registrado
 no serviço, o diretório local do instalador ou `C:\InfoMonitorDBClientes`. Um checkout
 Git local pode ser atualizado no próprio lugar; na primeira atualização ele é
@@ -152,6 +155,7 @@ Também é possível chamar, em PowerShell:
 
 ```powershell
 .\INSTALAR_OU_ATUALIZAR.bat -Action install -Target C:\InfoMonitorDBClientes
+.\INSTALAR_OU_ATUALIZAR.bat -Action update -Target C:\InfoMonitorDBClientes
 .\INSTALAR_OU_ATUALIZAR.bat -Action configure -Target C:\InfoMonitorDBClientes
 .\INSTALAR_OU_ATUALIZAR.bat -Action status -Target C:\InfoMonitorDBClientes
 .\INSTALAR_OU_ATUALIZAR.bat -Action restart -Target C:\InfoMonitorDBClientes

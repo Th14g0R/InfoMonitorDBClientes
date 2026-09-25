@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('', 'install', 'apply_prepared', 'configure', 'configure_apply', 'status', 'restart', 'stop', 'uninstall', 'register', 'acl')]
+    [ValidateSet('', 'install', 'update', 'apply_prepared', 'configure', 'configure_apply', 'status', 'restart', 'stop', 'uninstall', 'register', 'acl')]
     [string]$Action = '',
     [string]$Target = '',
     [string]$Staging = '',
@@ -598,10 +598,27 @@ function Install-Or-Update([string]$Folder) {
     }
 }
 
-function Prepare-And-Apply([string]$Folder) {
+function Assert-RequestedMode([string]$Folder, [string]$Mode) {
+    $installed = Test-Path -LiteralPath (Join-Path $Folder 'InfoMonitorDBClientes.py') -PathType Leaf
+    if ($Mode -eq 'install' -and $installed) {
+        throw 'Uma instalacao existente foi encontrada neste destino. Escolha a opcao Atualizar.'
+    }
+    if ($Mode -eq 'update' -and -not $installed) {
+        throw 'Nenhuma instalacao existente foi encontrada neste destino. Escolha a opcao Instalar.'
+    }
+}
+
+function Prepare-And-Apply([string]$Folder, [ValidateSet('install', 'update')][string]$Mode) {
+    Assert-RequestedMode $Folder $Mode
     $git = Get-Command git.exe -ErrorAction SilentlyContinue
     $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
     if (-not $git -or -not $pythonCommand) { throw 'Git for Windows e Python 3 sao obrigatorios.' }
+    if ($Mode -eq 'update') {
+        Write-Host "Atualizacao selecionada para: $Folder" -ForegroundColor Cyan
+        Write-Host 'Baixando o main, comparando arquivos e validando dependencias antes de alterar a instalacao.'
+    } else {
+        Write-Host "Nova instalacao selecionada para: $Folder" -ForegroundColor Cyan
+    }
     $prepared = Join-Path ([IO.Path]::GetTempPath()) ("infomonitor-prepared-{0}" -f [Guid]::NewGuid().ToString('N'))
     $source = Join-Path $prepared 'source'; $wheels = Join-Path $prepared 'wheels'
     try {
@@ -629,7 +646,7 @@ function Prepare-And-Apply([string]$Folder) {
             $hashes += [pscustomobject]@{ path=$relative; sha256=(Get-FileHash (Join-Path $source $relative) -Algorithm SHA256).Hash }
         }
         $metadata = [pscustomobject]@{
-            commit=$commit; oldManifest=$oldManifest; candidateManifest=$candidateManifest; createdPaths=$createdPaths
+            commit=$commit; mode=$Mode; oldManifest=$oldManifest; candidateManifest=$candidateManifest; createdPaths=$createdPaths
             targetWasFresh=$installedBase.fresh
             oldManifestExisted=$installedBase.manifestExists
             oldManifestSha256=$installedBase.manifestSha256
@@ -658,6 +675,9 @@ function Apply-PreparedRelease([string]$Folder, [string]$Prepared, [string]$Comm
     }
     $metadata = Get-Content $metadataPath -Raw | ConvertFrom-Json
     if ($Commit -notmatch '^[0-9a-f]{40}$' -or $metadata.commit -ne $Commit) { throw 'Commit preparado divergente.' }
+    if ($metadata.mode -notin @('install', 'update')) { throw 'Modo preparado invalido.' }
+    if ($metadata.mode -eq 'install' -and -not [bool]$metadata.targetWasFresh) { throw 'Instalacao preparada sobre destino existente.' }
+    if ($metadata.mode -eq 'update' -and [bool]$metadata.targetWasFresh) { throw 'Atualizacao preparada sem instalacao existente.' }
     $source = Join-Path $preparedFull 'source'; $runtimeZip = Join-Path $preparedFull 'runtime.zip'
     if ((Get-FileHash $runtimeZip -Algorithm SHA256).Hash -ne $metadata.runtimeSha256) { throw 'Hash do runtime preparado divergente.' }
     foreach ($item in $metadata.hashes) {
@@ -761,17 +781,21 @@ try {
     }
     $Target = Resolve-SafeTarget $Target $false
     Write-Host "Destino selecionado: $Target" -ForegroundColor Cyan
+    $targetHasApp = Test-Path -LiteralPath (Join-Path $Target 'InfoMonitorDBClientes.py') -PathType Leaf
+    Write-Host $(if ($targetHasApp) { 'Estado do destino: instalacao existente (use Atualizar).' } else { 'Estado do destino: pasta nova (use Instalar).' }) -ForegroundColor Yellow
     if (-not $Action) {
-        Write-Host "`n[1] Instalar/atualizar  [2] Configurar .env  [3] Status"
-        Write-Host '[4] Reiniciar          [5] Parar            [6] Remover servico  [0] Sair'
+        Write-Host "`n[1] Instalar novo      [2] Atualizar existente  [3] Configurar .env"
+        Write-Host '[4] Status             [5] Reiniciar            [6] Parar'
+        Write-Host '[7] Remover servico    [0] Sair'
         $choice = Read-Host 'Opcao'
-        $Action = @{'1'='install';'2'='configure';'3'='status';'4'='restart';'5'='stop';'6'='uninstall';'0'=''}[$choice]
+        $Action = @{'1'='install';'2'='update';'3'='configure';'4'='status';'5'='restart';'6'='stop';'7'='uninstall';'0'=''}[$choice]
         if ($null -eq $Action) { throw 'Opcao invalida.' }
         if (-not $Action) { exit 0 }
     }
     $Target = Resolve-SafeTarget $Target ($Action -eq 'install')
     switch ($Action) {
-        'install' { Prepare-And-Apply $Target }
+        'install' { Prepare-And-Apply $Target 'install' }
+        'update' { Prepare-And-Apply $Target 'update' }
         'configure' {
             Ensure-Environment $Target
             Start-Process notepad.exe -ArgumentList @((Join-Path $Target '.env')) -Wait
