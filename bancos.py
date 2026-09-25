@@ -1254,6 +1254,44 @@ def validar_conteudo_databases_conf(conteudo):
         return False, 'Conteúdo de erro não pode substituir databases.conf.'
     return True, None
 
+
+def _salvar_databases_conf_direto_com_rollback(sftp, destino, novos_bytes, bytes_anteriores, hash_base):
+    """Fallback quando o usuário pode editar o arquivo, mas não criar/renomear no diretório."""
+    hash_novo = hashlib.sha256(novos_bytes).hexdigest()
+    try:
+        with sftp.open(destino, 'rb') as atual:
+            bytes_antes_escrita = atual.read()
+        hash_atual = hashlib.sha256(bytes_antes_escrita).hexdigest()
+        if hmac.compare_digest(hash_atual, hash_novo):
+            return True
+        if not hmac.compare_digest(hash_atual, hash_base):
+            LOGGER.warning('Conflito antes do fallback direto de databases.conf em %s', destino)
+            return False
+
+        with sftp.open(destino, 'wb') as arquivo:
+            arquivo.write(novos_bytes)
+            arquivo.flush()
+        with sftp.open(destino, 'rb') as confirmado:
+            if hmac.compare_digest(hashlib.sha256(confirmado.read()).hexdigest(), hash_novo):
+                return True
+        raise RuntimeError('A verificação da escrita direta divergiu.')
+    except Exception as exc:
+        LOGGER.warning('Falha na escrita direta de databases.conf em %s: %s', destino, exc)
+        try:
+            with sftp.open(destino, 'wb') as restaurado:
+                restaurado.write(bytes_anteriores)
+                restaurado.flush()
+            with sftp.open(destino, 'rb') as confirmado:
+                restauracao_ok = hmac.compare_digest(
+                    hashlib.sha256(confirmado.read()).hexdigest(),
+                    hashlib.sha256(bytes_anteriores).hexdigest(),
+                )
+            if not restauracao_ok:
+                LOGGER.critical('Não foi possível confirmar a restauração de %s', destino)
+        except Exception as restore_exc:
+            LOGGER.critical('Falha ao restaurar databases.conf em %s: %s', destino, restore_exc)
+        return False
+
 def salvar_databases_conf_remoto(nome_servidor, novo_conteudo, hash_esperado=None):
     info = SERVIDORES.get(nome_servidor)
     valido, erro = validar_conteudo_databases_conf(novo_conteudo)
@@ -1273,15 +1311,16 @@ def salvar_databases_conf_remoto(nome_servidor, novo_conteudo, hash_esperado=Non
                 )
                 with sftp.open(destino_real, 'rb') as atual:
                     bytes_atuais = atual.read()
-                if hash_esperado is not None and not hmac.compare_digest(
-                        hashlib.sha256(bytes_atuais).hexdigest(), hash_esperado):
+                hash_base = hashlib.sha256(bytes_atuais).hexdigest()
+                if hash_esperado is not None and not hmac.compare_digest(hash_base, hash_esperado):
                     LOGGER.warning('Conflito de edição de databases.conf em %s', nome_servidor)
                     return False
 
                 conteudo_unix = novo_conteudo.replace('\r\n', '\n').replace('\r', '\n')
+                novos_bytes = conteudo_unix.encode('utf-8')
                 try:
                     with sftp.open(temporario, 'x') as arquivo:
-                        arquivo.write(conteudo_unix.encode('utf-8'))
+                        arquivo.write(novos_bytes)
                         arquivo.flush()
                     # Falha fechada: o arquivo nunca é trocado sem preservar dono,
                     # grupo e permissões do alvo real.
@@ -1289,11 +1328,25 @@ def salvar_databases_conf_remoto(nome_servidor, novo_conteudo, hash_esperado=Non
                     sftp.chmod(temporario, stat.S_IMODE(metadados.st_mode))
                     with sftp.open(destino_real, 'rb') as atual:
                         hash_antes_swap = hashlib.sha256(atual.read()).hexdigest()
-                    if hash_esperado is not None and not hmac.compare_digest(
-                            hash_antes_swap, hash_esperado):
-                        raise RuntimeError('Conflito de edição concorrente.')
+                    if not hmac.compare_digest(hash_antes_swap, hash_base):
+                        LOGGER.warning('Conflito de edição concorrente em databases.conf de %s', nome_servidor)
+                        return False
                     sftp.posix_rename(temporario, destino_real)
                     temporario = None
+                except Exception as atomic_exc:
+                    LOGGER.warning(
+                        'Gravação atômica indisponível em %s; tentando escrita direta verificada: %s',
+                        nome_servidor, atomic_exc,
+                    )
+                    if temporario:
+                        try:
+                            sftp.remove(temporario)
+                        except Exception:
+                            pass
+                        temporario = None
+                    if not _salvar_databases_conf_direto_com_rollback(
+                            sftp, destino_real, novos_bytes, bytes_atuais, hash_base):
+                        return False
                 finally:
                     if temporario:
                         try:

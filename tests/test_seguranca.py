@@ -727,7 +727,7 @@ class SegurancaTest(unittest.TestCase):
             ))
         sftp.remove.assert_called_once()
 
-    def test_escrita_databases_conf_detecta_cas_e_falha_se_nao_preservar_owner(self):
+    def test_escrita_databases_conf_detecta_cas_e_usa_fallback_se_chown_for_negado(self):
         sftp = MagicMock()
         sftp.normalize.return_value = '/real/databases.conf'
         sftp.stat.return_value = MagicMock(st_mode=0o100600, st_uid=10, st_gid=20)
@@ -750,24 +750,30 @@ class SegurancaTest(unittest.TestCase):
         sftp.posix_rename.assert_not_called()
         sftp.remove.assert_called_once()
 
-        sftp.reset_mock()
-        sftp.normalize.return_value = '/real/databases.conf'
+        sftp = MagicMock()
+        destino = '/real/databases.conf'
+        arquivos = {destino: b'original'}
+        sftp.normalize.return_value = destino
         sftp.stat.return_value = MagicMock(st_mode=0o100600, st_uid=10, st_gid=20)
-        def abrir_estavel(_caminho, modo):
+        def abrir_com_estado(caminho, modo):
             arquivo = MagicMock()
             arquivo.__enter__.return_value = arquivo
             if modo == 'rb':
-                arquivo.read.return_value = b'original'
+                arquivo.read.side_effect = lambda: arquivos[caminho]
+            elif modo in {'wb', 'x'}:
+                arquivo.write.side_effect = lambda dados: arquivos.__setitem__(caminho, dados)
             return arquivo
-        sftp.open.side_effect = abrir_estavel
+        sftp.open.side_effect = abrir_com_estado
         sftp.chown.side_effect = OSError('chown negado')
+        ssh = MagicMock()
+        ssh.open_sftp.return_value = sftp
         with patch.dict(self.bancos.SERVIDORES, {'DB01': {'ip': 'localhost'}}, clear=True), \
-                patch.object(self.bancos, 'conectar_ssh', return_value=ssh):
-            self.assertFalse(self.bancos.salvar_databases_conf_remoto(
-                'DB01', 'novo', hash_original
-            ))
+                patch.object(self.bancos, 'conectar_ssh', return_value=ssh), \
+                patch.object(self.bancos, 'limpar_cache_global'):
+            self.assertTrue(self.bancos.salvar_databases_conf_remoto('DB01', 'novo', hash_original))
         sftp.posix_rename.assert_not_called()
         sftp.remove.assert_called_once()
+        self.assertEqual(arquivos[destino], b'novo')
 
     def test_admin_inativar_nao_anuncia_sucesso_em_falha_ou_alias_ausente(self):
         for leitura, alias, salvar in (

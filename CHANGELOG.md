@@ -1,5 +1,11 @@
 # Histórico de versões
 
+## 1.1.6 - build 20260925.7 - 2026-09-25
+
+- restaura a edição e inativação de aliases em servidores sem permissão para criar arquivos temporários;
+- mantém a troca atômica como primeira opção e usa escrita direta verificada como compatibilidade;
+- verifica o hash após a escrita e restaura o conteúdo anterior automaticamente em caso de falha.
+
 ## 1.1.5 - build 20260925.6 - 2026-09-25
 
 - reinicia o serviço Windows existente sem depender do NSSM e sem reconfigurá-lo;
