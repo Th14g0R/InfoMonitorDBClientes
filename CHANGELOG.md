@@ -1,5 +1,11 @@
 # Histórico de versões
 
+## 1.1.5 - build 20260925.6 - 2026-09-25
+
+- reinicia o serviço Windows existente sem depender do NSSM e sem reconfigurá-lo;
+- limita a ativação pendente a parar, trocar o runtime validado e iniciar o mesmo serviço;
+- restaura o runtime anterior e o serviço em execução se o health check falhar.
+
 ## 1.1.4 - build 20260925.5 - 2026-09-25
 
 - atualiza código e prepara dependências sem parar ou reconfigurar o serviço Windows;

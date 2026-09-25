@@ -362,15 +362,17 @@ function Activate-PendingUpdate([string]$Folder) {
     }
     $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if (-not $service) { throw 'Servico nao instalado; use Instalar novo para registra-lo.' }
-    $nssm = Find-Nssm $Folder
-    if (-not $nssm) { throw 'NSSM confiavel nao encontrado; o servico nao foi alterado.' }
 
     $wasRunning = $service.Status -eq 'Running'
     $script:RuntimeSwapState = 'None'
     try {
         if ($wasRunning) { Invoke-ServiceOperation 'stop' $Folder }
         Swap-CandidateRuntime $Folder
-        Register-Service $Folder
+        Start-Service $ServiceName
+        $running = Get-Service -Name $ServiceName
+        $running.WaitForStatus('Running', [TimeSpan]::FromSeconds(20))
+        $running.Refresh()
+        if ($running.Status -ne 'Running') { throw 'O servico nao atingiu o estado Running.' }
         Test-HttpHealth $Folder
         Remove-Item -LiteralPath (Join-Path $Folder '.venv.previous') -Recurse -Force -ErrorAction SilentlyContinue
     } catch {
@@ -379,7 +381,11 @@ function Activate-PendingUpdate([string]$Folder) {
             $currentService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
             if ($currentService -and $currentService.Status -ne 'Stopped') { Invoke-ServiceOperation 'stop' $Folder }
             Restore-PreviousRuntime $Folder
-            if ($wasRunning) { Register-Service $Folder }
+            if ($wasRunning) {
+                Start-Service $ServiceName
+                $restored = Get-Service -Name $ServiceName
+                $restored.WaitForStatus('Running', [TimeSpan]::FromSeconds(20))
+            }
         } catch { Write-Host "Rollback do runtime pendente incompleto: $($_.Exception.Message)" -ForegroundColor Red }
         throw $activationFailure
     }

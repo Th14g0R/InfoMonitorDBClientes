@@ -104,6 +104,12 @@ class ProductionConfigTests(unittest.TestCase):
         self.assertIn("'activate_update' { Activate-PendingUpdate $Folder }", windows)
         self.assertIn('Deseja ativar as dependencias e reiniciar o servico agora?', windows)
         self.assertIn('O servico permaneceu intacto.', windows)
+        activate_start = windows.index('function Activate-PendingUpdate')
+        activate_end = windows.index('function Copy-TrackedFiles', activate_start)
+        activate_slice = windows[activate_start:activate_end]
+        self.assertIn('Start-Service $ServiceName', activate_slice)
+        self.assertNotIn('Find-Nssm', activate_slice)
+        self.assertNotIn('Register-Service', activate_slice)
         self.assertNotIn("Join-Path $Folder 'nssm.exe'", windows)
         manifest_start = windows.index('function Get-InstalledManifest')
         manifest_end = windows.index('function Backup-Code', manifest_start)
