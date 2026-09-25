@@ -6,7 +6,7 @@ from contextlib import closing
 import os
 from datetime import datetime, date, timedelta
 from werkzeug.utils import secure_filename
-from seguranca import csrf_token
+from seguranca import csrf_token, registrar_acao_admin
 from escalas import (EQUIPES, TIPOS_SABADO, FAIXAS_SABADO, preservar_banco_antes_migracao,
                      migrar_horarios, validar_data, aplicar_troca, intervalos_cobertura,
                      validar_participante_sabado, ajustar_escala, registrar_substituicao)
@@ -30,18 +30,32 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
-def pode_editar_horarios():
-    """Substitui o antigo 'session.get(admin_logado)': checa Master ou perm_horarios, sempre fresco no banco."""
+PERMISSOES_MENU = {'perm_servidores', 'perm_gestao_bancos', 'perm_horarios'}
+
+
+def usuario_tem_permissao(codigo_permissao):
+    """Valida uma permissão do menu diretamente no banco, sem confiar em dados antigos da sessão."""
+    if codigo_permissao not in PERMISSOES_MENU:
+        return False
     if not session.get('logged_in') or not session.get('user_id'):
         return False
     conn = get_db()
-    usuario = conn.execute("SELECT eh_master, ativo, perm_horarios FROM usuarios WHERE id = ?", (session['user_id'],)).fetchone()
+    usuario = conn.execute(
+        "SELECT eh_master, ativo, perm_servidores, perm_gestao_bancos, perm_horarios FROM usuarios WHERE id = ?",
+        (session['user_id'],)
+    ).fetchone()
     conn.close()
     if not usuario or not usuario['ativo']:
         return False
-    return bool(usuario['eh_master']) or bool(usuario['perm_horarios'])
+    return bool(usuario['eh_master']) or bool(usuario[codigo_permissao])
+
+
+def pode_editar_horarios():
+    """Checa Master ou perm_horarios sempre com os dados atuais do banco."""
+    return usuario_tem_permissao('perm_horarios')
 
 horarios_bp.add_app_template_global(pode_editar_horarios, name='pode_editar_horarios')
+horarios_bp.add_app_template_global(usuario_tem_permissao, name='usuario_tem_permissao')
 
 @horarios_bp.context_processor
 def opcoes_funcionario():
@@ -280,114 +294,97 @@ HTML_INTERFACE = """
     <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
     <style>
-        :root {
-            --cor-primaria: #2563eb; --cor-primaria-escura: #1d4ed8;
-            --cor-texto: #1e293b; --cor-texto-suave: #64748b;
-            --cor-fundo: #f8fafc; --cor-superficie: #ffffff; --cor-borda: #e2e8f0;
-            --cor-sucesso: #16a34a; --cor-aviso: #d97706; --cor-perigo: #dc2626; --raio: 8px;
-        }
-        * { box-sizing: border-box; }
-        html { scroll-behavior: smooth; }
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: var(--cor-fundo); color: var(--cor-texto); margin: 0; padding: 20px; }
+        /* Horarios-specific styles that extend the design system */
         .nav-bar { 
             position: sticky; 
             top: 0; 
-            z-index: 1000; 
+            z-index: var(--z-sticky); 
             display: flex; 
             justify-content: space-between; 
             align-items: center; 
             background: var(--cor-superficie); 
             border: 1px solid var(--cor-borda);
-            padding: 15px 20px; 
-            border-radius: var(--raio); 
-            margin-bottom: 20px; 
-            box-shadow: 0 1px 3px rgba(0,0,0,0.06); 
+            padding: var(--space-3) var(--space-4); 
+            border-radius: var(--raio-lg); 
+            margin-bottom: var(--space-5); 
+            box-shadow: var(--shadow-sm); 
         }
-        /* Botões unificados com a mesma paleta do restante do site: neutros por padrão,
-           diferenciando por borda/texto em vez de fundo colorido "chapado". */
-        .btn { padding: 8px 14px; text-decoration: none; border-radius: var(--raio); font-weight: 600; border: 1px solid var(--cor-borda); background: var(--cor-superficie); color: var(--cor-texto); cursor: pointer; font-size: 0.9em; display: inline-block; text-align: center; transition: background-color .15s; }
-        .btn:hover { background-color: #f1f5f9; }
-        .btn-bancos { color: var(--cor-primaria); border-color: #bfdbfe; }
-        .btn-admin { color: var(--cor-sucesso); border-color: #bbf7d0; }
-        .btn-danger { color: var(--cor-perigo); border-color: #fecaca; }
-        .btn-edit { color: var(--cor-aviso); border-color: #fde68a; }
-        .btn-export { color: #7c3aed; border-color: #ddd6fe; }
-        .card { background: var(--cor-superficie); border: 1px solid var(--cor-borda); padding: 20px; border-radius: var(--raio); box-shadow: 0 1px 3px rgba(0,0,0,0.05); margin-bottom: 25px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-        th, td { border: 1px solid var(--cor-borda); padding: 9px; text-align: left; font-size: 0.92em; vertical-align: middle; }
-        th { background-color: #f8fafc; color: var(--cor-texto); user-select: none; }
+        .card { background: var(--cor-superficie); border: 1px solid var(--cor-borda); padding: var(--space-5); border-radius: var(--raio-lg); box-shadow: var(--shadow-sm); margin-bottom: var(--space-5); }
+        table { width: 100%; border-collapse: collapse; margin-top: var(--space-3); }
+        th, td { border: 1px solid var(--cor-borda); padding: var(--space-2) var(--space-3); text-align: left; font-size: var(--font-size-sm); vertical-align: middle; }
+        th { background-color: var(--cor-fundo); color: var(--cor-texto); font-weight: 600; user-select: none; position: sticky; top: 0; z-index: 1; }
         
-        .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-top: 15px; align-items: end; }
-        .form-grid input, .form-grid select { padding: 8px 10px; border: 1px solid var(--cor-borda); border-radius: 6px; width: 100%; height: 38px; box-sizing: border-box; }
+        .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: var(--space-3); margin-top: var(--space-3); align-items: end; }
+        .form-grid input, .form-grid select { padding: var(--space-2) var(--space-3); border: 1px solid var(--cor-borda); border-radius: var(--raio-md); width: 100%; box-sizing: border-box; font-family: inherit; font-size: var(--font-size-sm); }
+        .form-grid input:focus, .form-grid select:focus { outline: none; border-color: var(--cor-primaria); box-shadow: var(--shadow-focus); }
         
         .col-acoes { width: 120px; text-align: center; white-space: nowrap; }
-        .acoes-container { display: flex; gap: 8px; justify-content: center; align-items: center; }
+        .acoes-container { display: flex; gap: var(--space-2); justify-content: center; align-items: center; }
 
-        .badge-amarela { background-color: #fef9c3; color: #854d0e; padding: 3px 8px; border-radius: 4px; font-weight: 600; }
-        .badge-verde { background-color: #dcfce7; color: #166534; padding: 3px 8px; border-radius: 4px; font-weight: 600; }
-        .badge-prio { background-color: #ede9fe; color: #6d28d9; padding: 2px 6px; border-radius: 3px; font-weight: 600; font-size: 0.8em; }
-        .badge-inativo { background-color: #f1f5f9; color: var(--cor-texto-suave); padding: 2px 6px; border-radius: 3px; font-weight: 600; font-size: 0.8em; }
+        .badge-amarela { background: var(--cor-aviso-bg); color: var(--cor-aviso); border: 1px solid var(--cor-aviso-borda); }
+        .badge-verde { background: var(--cor-sucesso-bg); color: var(--cor-sucesso); border: 1px solid var(--cor-sucesso-borda); }
+        .badge-prio { background: var(--cor-roxo-bg); color: var(--cor-roxo); border: 1px solid var(--cor-roxo-borda); font-size: var(--font-size-xs); }
+        .badge-inativo { background: var(--cor-fundo); color: var(--cor-texto-suave); border: 1px solid var(--cor-borda); font-size: var(--font-size-xs); }
 
-        .tr-inativo { opacity: 0.6; background-color: #f8fafc; }
+        .tr-inativo { opacity: 0.6; background-color: var(--cor-fundo); }
 
-        .lista-rolagem { max-height: 360px; overflow: auto; margin-top: 15px; }
+        .lista-rolagem { max-height: 360px; overflow: auto; margin-top: var(--space-3); }
         .lista-rolagem table { margin-top: 0; }
-        .lista-rolagem thead th { position: sticky; top: 0; z-index: 1; background: var(--cor-superficie, #fff); }
-        .grid-cobertura { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin-top: 15px; }
-        .card-cobertura-slot { border-radius: 6px; border: 1px solid var(--cor-borda); padding: 8px; text-align: center; background: var(--cor-superficie); }
-        .cov-normal { border-top: 4px solid var(--cor-sucesso); background: #f0fdf4; }
-        .cov-atencao { border-top: 4px solid var(--cor-aviso); background: #fffbeb; }
-        .cov-critico { border-top: 4px solid var(--cor-perigo); background: #fef2f2; }
-        .slot-hora { font-weight: 600; font-size: 0.85em; color: var(--cor-texto); margin-bottom: 4px; }
-        .slot-qtd { font-size: 0.75em; color: var(--cor-texto-suave); margin-bottom: 6px; }
+        .lista-rolagem thead th { position: sticky; top: 0; z-index: 1; background: var(--cor-superficie); }
+        .grid-cobertura { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: var(--space-3); margin-top: var(--space-3); }
+        .card-cobertura-slot { border-radius: var(--raio-md); border: 1px solid var(--cor-borda); padding: var(--space-2); text-align: center; background: var(--cor-superficie); }
+        .cov-normal { border-top: 4px solid var(--cor-sucesso); background: var(--cor-sucesso-bg); }
+        .cov-atencao { border-top: 4px solid var(--cor-aviso); background: var(--cor-aviso-bg); }
+        .cov-critico { border-top: 4px solid var(--cor-perigo); background: var(--cor-perigo-bg); }
+        .slot-hora { font-weight: 600; font-size: var(--font-size-sm); color: var(--cor-texto); margin-bottom: var(--space-1); }
+        .slot-qtd { font-size: var(--font-size-xs); color: var(--cor-texto-suave); margin-bottom: var(--space-2); }
 
-        .avatars-container { display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; align-items: center; min-height: 36px; }
+        .avatars-container { display: flex; flex-wrap: wrap; gap: var(--space-1); justify-content: center; align-items: center; min-height: 36px; }
         .avatar-item { position: relative; display: inline-block; }
-        .avatar-img { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; border: 1px solid #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.2); transition: transform 0.2s ease, z-index 0.2s; cursor: pointer; }
+        .avatar-img { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; border: 1px solid var(--cor-superficie); box-shadow: 0 1px 2px rgba(0,0,0,0.2); transition: transform var(--transition-fast) ease, z-index var(--transition-fast); cursor: pointer; }
         .avatar-item:hover .avatar-img { transform: scale(2.5); z-index: 100; position: relative; }
         .foto-cobertura { padding: 0; border: 0; background: transparent; cursor: zoom-in; line-height: 0; }
         .foto-cobertura:hover .avatar-img { transform: none; }
-        .foto-cobertura:focus-visible { outline: 3px solid #2563eb; outline-offset: 3px; border-radius: 50%; }
-        .foto-cobertura.aniversariante .avatar-img { border: 2px solid #d97706; box-shadow: 0 0 0 2px #fde68a; }
+        .foto-cobertura:focus-visible { outline: 3px solid var(--cor-primaria); outline-offset: 3px; border-radius: 50%; }
+        .foto-cobertura.aniversariante .avatar-img { border: 2px solid var(--cor-aviso); box-shadow: 0 0 0 2px var(--cor-aviso-bg); }
         .aniversario-icone { position: absolute; bottom: -3px; right: -3px; font-size: 14px; line-height: 1; pointer-events: none; }
-        #foto-ampliada { max-width: min(90vw, 720px); padding: 20px; border: 0; border-radius: 12px; color: var(--cor-texto); background: var(--cor-superficie); }
+        #foto-ampliada { max-width: min(90vw, 720px); padding: var(--space-5); border: 0; border-radius: var(--raio-xl); color: var(--cor-texto); background: var(--cor-superficie); }
         #foto-ampliada::backdrop { background: rgba(0, 0, 0, .75); }
-        #foto-ampliada img { display: block; max-width: 100%; max-height: 75vh; margin: 12px auto 0; object-fit: contain; }
+        #foto-ampliada img { display: block; max-width: 100%; max-height: 75vh; margin: var(--space-3) auto 0; object-fit: contain; }
 
-        .grid-escala { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 15px; }
-        .coluna-turno { background: #f8fafc; border: 1px solid var(--cor-borda); border-radius: 6px; min-height: 180px; padding: 8px; }
-        .coluna-turno-header { font-weight: 600; font-size: 0.9em; text-align: center; padding: 6px; background: #eef2f7; border-radius: 4px; margin-bottom: 8px; color: var(--cor-texto); }
+        .grid-escala { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: var(--space-2); margin-top: var(--space-3); }
+        .coluna-turno { background: var(--cor-fundo); border: 1px solid var(--cor-borda); border-radius: var(--raio-md); min-height: 180px; padding: var(--space-2); }
+        .coluna-turno-header { font-weight: 600; font-size: var(--font-size-sm); text-align: center; padding: var(--space-1) var(--space-2); background: var(--cor-superficie-hover); border-radius: var(--raio-sm); margin-bottom: var(--space-2); color: var(--cor-texto); }
         
-                /* Cores de equipe (Verde/Amarela) mantidas intencionalmente: identificam a equipe real do técnico, não são decorativas. */
-        .card-tec { background: var(--cor-superficie); border: 1px solid var(--cor-borda); border-left: 4px solid var(--cor-primaria); border-radius: 6px; padding: 8px; margin-bottom: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); display: flex; align-items: center; gap: 8px; }
+        /* Cores de equipe (Verde/Amarela) mantidas intencionalmente: identificam a equipe real do técnico, não são decorativas. */
+        .card-tec { background: var(--cor-superficie); border: 1px solid var(--cor-borda); border-left: 4px solid var(--cor-primaria); border-radius: var(--raio-md); padding: var(--space-2); margin-bottom: var(--space-2); box-shadow: var(--shadow-sm); display: flex; align-items: center; gap: var(--space-2); }
         .card-tec[draggable="true"] { cursor: grab; }
         .card-tec[draggable="true"]:active { cursor: grabbing; opacity: 0.6; }
         .card-tec.eq-Verde { border-left-color: #005b41; }
         .card-tec.eq-Amarela { border-left-color: #f3c716; }
-        .card-avatar { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; background: #e2e8f0; flex-shrink: 0; transition: transform 0.2s ease; }
+        .card-avatar { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; background: var(--cor-borda); flex-shrink: 0; transition: transform var(--transition-fast) ease; }
         .card-avatar:hover { transform: scale(2); z-index: 50; }
         .card-info { flex: 1; overflow: hidden; }
-        .card-nome { font-weight: 600; font-size: 0.85em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .card-obs { font-size: 0.75em; color: var(--cor-texto-suave); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .card-nome { font-weight: 600; font-size: var(--font-size-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .card-obs { font-size: var(--font-size-xs); color: var(--cor-texto-suave); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-        .secao-sobreaviso-box { background: #fffbeb; border: 1px dashed #fde68a; border-radius: 6px; padding: 15px; margin-top: 15px; }
-        .grid-sobreaviso-apoio { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 10px; }
-        .subcoluna-box { background: var(--cor-superficie); border: 1px solid var(--cor-borda); border-radius: 6px; padding: 10px; }
-        .subcoluna-title { font-weight: 600; font-size: 0.85em; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .secao-sobreaviso-box { background: var(--cor-aviso-bg); border: 1px dashed var(--cor-aviso-borda); border-radius: var(--raio-md); padding: var(--space-4); margin-top: var(--space-4); }
+        .grid-sobreaviso-apoio { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin-top: var(--space-3); }
+        .subcoluna-box { background: var(--cor-superficie); border: 1px solid var(--cor-borda); border-radius: var(--raio-md); padding: var(--space-3); }
+        .subcoluna-title { font-weight: 600; font-size: var(--font-size-xs); margin-bottom: var(--space-2); text-transform: uppercase; letter-spacing: 0.5px; color: var(--cor-texto-suave); }
 
         .pdf-header {
             display: flex;
             align-items: center;
             justify-content: space-between;
-            padding: 12px 20px;
-            border-radius: 6px;
-            margin-bottom: 15px;
-            color: #ffffff;
+            padding: var(--space-3) var(--space-5);
+            border-radius: var(--raio-md);
+            margin-bottom: var(--space-4);
+            color: var(--cor-texto-invertido);
         }
 
         .pdf-header.tema-verde {
             background-color: #005b41;
-            color: #ffffff;
         }
 
         .pdf-header.tema-amarela {
@@ -397,7 +394,7 @@ HTML_INTERFACE = """
 
         .pdf-date-badge {
             background: rgba(255, 255, 255, 0.25);
-            padding: 6px 14px;
+            padding: var(--space-1) var(--space-3);
             border-radius: 4px;
             font-weight: bold;
             font-size: 16px;
@@ -442,22 +439,42 @@ HTML_INTERFACE = """
     </style>
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <script src="{{ url_for('static', filename='csrf.js') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
-<script src="{{ url_for('static', filename='ui.js') }}" defer></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='horarios-20260925-1') }}">
+<script src="{{ url_for('static', filename='ui.js', v='horarios-20260925-1') }}" defer></script>
 </head>
 <body>
+    <!-- Skip link para acessibilidade -->
+    <a href="#conteudo-principal" class="skip-link">Pular para o conteúdo principal</a>
+
+    <!-- Overlay para focus trap em modais -->
+    <div class="focus-trap-overlay" aria-hidden="true"></div>
 
     <div class="nav-bar">
         <h2 style="margin: 0;">🗓️ Controle de Horários, Cobertura e Rodízio</h2>
-        <div>
-            <a href="{{ url_for('bancos.exibir_servidor') }}" class="btn btn-bancos">🖥️ Servidores Firebird</a>
-            {% if pode_editar_horarios() %}
-                <form action="/horarios/logout" method="POST" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit"  class="btn btn-danger">🔒 Sair da Edição</button></form>
+        <div class="d-flex items-center gap-2">
+            <a href="{{ url_for('bancos.exibir_servidor') }}" class="btn btn-primary">🖥️ Servidores</a>
+            {% if not session.get('logged_in') %}
+                <a href="{{ url_for('bancos.admin_login', next='/admin') }}" class="btn btn-bancos">🗄️ Gestão de Bancos</a>
+            {% elif usuario_tem_permissao('perm_gestao_bancos') %}
+                <a href="{{ url_for('bancos.admin_painel') }}" class="btn btn-bancos">🗄️ Gestão de Bancos</a>
             {% else %}
-                <a href="/horarios/login" class="btn btn-admin">🔑 Área de Gestão</a>
+                <button type="button" class="btn btn-bancos" onclick="return avisarSemPermissao('Gestão de Bancos')">🗄️ Gestão de Bancos</button>
             {% endif %}
+            {% if pode_editar_horarios() %}
+                <form action="/horarios/logout" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn btn-danger">🔒 Sair da Edição</button></form>
+            {% elif session.get('logged_in') %}
+                <button type="button" class="btn btn-success" onclick="return avisarSemPermissao('Gestão de Horários')">🔑 Login</button>
+            {% else %}
+                <a href="/horarios/login" class="btn btn-success">🔑 Login</a>
+            {% endif %}
+            <button id="theme-toggle" class="theme-toggle" aria-label="Alternar tema" title="Alternar tema claro/escuro">
+                <svg class="moon-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+                <svg class="sun-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+            </button>
         </div>
     </div>
+
+    <div id="conteudo-principal" role="main">
 
     {% with messages = get_flashed_messages() %}
       {% if messages %}
@@ -469,75 +486,90 @@ HTML_INTERFACE = """
 
     <!-- 1. ESCALA DE SÁBADOS -->
     <div class="card" id="secao-escala-sabado">
-        <div style="display:flex; justify-content:space-between; align-items:center;">
-            <h3 style="margin:0;">📅 Escala de Sábados (4h Por Técnico)</h3>
+        <div class="section-header">
+            <h3>📅 Escala de Sábados (4h Por Técnico)</h3>
         </div>
         
-        <div style="display: flex; flex-wrap: wrap; gap: 15px; margin: 15px 0; justify-content: space-between; align-items: center; background: #f8f9fa; padding: 12px; border-radius: 6px;">
-            <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+        <div class="info-box info-box-primary d-flex flex-wrap justify-between items-center gap-3">
+            <div class="d-flex gap-2 items-center flex-wrap">
                 {% if pode_editar_horarios() %}
-                    <form action="/horarios/gerar_sugestao_sabado" method="POST" style="display: flex; gap: 10px; align-items: center;" onsubmit="return validarSabadoForm(this.data_sabado)">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <form action="/horarios/gerar_sugestao_sabado" method="POST" class="form-inline d-flex gap-2 items-center" onsubmit="return validarSabadoForm(this.data_sabado)">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <label>⚡ <strong>Gerar Rodízio:</strong></label>
-                        <input type="date" name="data_sabado" id="input_gerar_sabado" required class="form-control" onchange="validarApenasSabado(this)">
-                        <button type="submit" class="btn btn-admin">Montar Escala do Sábado</button>
+                        <input type="date" name="data_sabado" id="input_gerar_sabado" required class="form-control" onchange="validarApenasSabado(this)" style="width: auto;">
+                        <button type="submit" class="btn btn-success">Montar Escala do Sábado</button>
                     </form>
                 {% endif %}
-                <button onclick="exportarEscalaPDF()" class="btn btn-export">🖨️ Exportar Escala</button>
+                <button onclick="exportarEscalaPDF()" class="btn btn-export btn-with-icon">🖨️ Exportar Escala</button>
             </div>
 
-            <form action="/horarios#secao-escala-sabado" method="GET" style="display: flex; gap: 10px; align-items: center;">
+            <form action="/horarios#secao-escala-sabado" method="GET" class="d-flex gap-2 items-center flex-wrap">
                 {% if busca_func_id %}<input type="hidden" name="busca_funcionario" value="{{ busca_func_id }}">{% endif %}
                 <label>🔍 <strong>Ver Data Específica:</strong></label>
-                <input type="date" name="data_filtro_sabado" value="{{ data_filtro_sabado }}" onchange="validarApenasSabado(this)">
-                <button type="submit" class="btn btn-bancos">Filtrar</button>
+                <input type="date" name="data_filtro_sabado" value="{{ data_filtro_sabado }}" onchange="validarApenasSabado(this)" class="form-control" style="width: auto;">
+                <button type="submit" class="btn btn-primary">Filtrar</button>
                 {% if data_filtro_sabado or modo_todos %}
                     <a href="/horarios#secao-escala-sabado" class="btn btn-danger">Ver Próximo Sábado</a>
                 {% else %}
-                    <a href="/horarios?modo=todos#secao-escala-sabado" class="btn btn-bancos" style="background-color:#64748b;">Ver Histórico Completo</a>
+                    <a href="/horarios?modo=todos#secao-escala-sabado" class="btn btn-secondary">Ver Histórico Completo</a>
                 {% endif %}
             </form>
         </div>
 
         {% if data_filtro_sabado_formatada %}
-            <div style="background-color: #f0fdf4; color: #166534; padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; font-size: 0.9em; font-weight: bold; display: flex; justify-content: space-between; align-items: center;">
+            <div class="alert alert-success d-flex justify-between items-center" style="margin-bottom: var(--space-3);">
                 <span>📅 Exibindo Escala do Sábado: {{ data_filtro_sabado_formatada }}</span>
                 {% if pode_editar_horarios() and data_filtro_sabado %}
-                    <form action="/horarios/excluir_dia_inteiro/{{ data_filtro_sabado }}" method="POST" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit"  onclick="return confirm('Apagar a escala do dia {{ data_filtro_sabado_formatada }}?')" class="btn btn-danger" style="padding: 4px 8px; font-size:0.8em;">🗑️ Limpar Este Dia</button></form>
+                    <form action="/horarios/excluir_dia_inteiro/{{ data_filtro_sabado }}" method="POST" class="form-inline">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('Apagar a escala do dia {{ data_filtro_sabado_formatada }}?')">🗑️ Limpar Este Dia</button>
+                    </form>
                 {% endif %}
             </div>
         {% endif %}
 
         {% if pode_editar_horarios() and data_filtro_sabado %}
-            <div style="background: #fdfefe; border: 1px solid #dcdde1; padding: 12px; border-radius: 6px; margin-bottom: 15px;">
-                <h4 style="margin: 0 0 10px 0; font-size: 0.95em; color: #2c3e50;">➕ Adicionar / Encaixar Técnico Nesta Escala</h4>
-                <form action="/horarios/adicionar_item_escala" method="POST" style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="card" style="margin-bottom: var(--space-4);">
+                <h4 style="margin: 0 0 var(--space-3); font-size: var(--font-size-base);">➕ Adicionar / Encaixar Técnico Nesta Escala</h4>
+                <form action="/horarios/adicionar_item_escala" method="POST" class="form-grid" style="grid-template-columns: auto auto auto auto 1fr auto; align-items: end; gap: var(--space-2);">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="data_sabado" value="{{ data_filtro_sabado }}">
-                    <select name="funcionario_id" required style="padding: 6px; border-radius: 4px; border: 1px solid #ccc;">
-                        <option value="">Selecione o Funcionário...</option>
-                        {% for f in funcionarios %}
-                            {% if f[11] == 1 and f[12] == 0 %}
-                                <option value="{{ f[0] }}">{{ f[1] }} ({{ f[4] }})</option>
-                            {% endif %}
-                        {% endfor %}
-                    </select>
-                    <select name="horario" required style="padding: 6px; border-radius: 4px; border: 1px solid #ccc;">
-                        <option value="07:30 - 11:30">07:30 - 11:30</option>
-                        <option value="08:00 - 12:00">08:00 - 12:00</option>
-                        <option value="09:00 - 13:00">09:00 - 13:00</option>
-                        <option value="10:00 - 14:00">10:00 - 14:00</option>
-                        <option value="13:00 - 17:00">13:00 - 17:00</option>
-                        <option value="14:00 - 18:00">14:00 - 18:00</option>
-                        <option value="Sobreaviso">Sobreaviso</option>
-                    </select>
-                    <select name="tipo_sabado" style="padding: 6px; border-radius: 4px; border: 1px solid #ccc;">
-                        <option value="rodizio">Rodízio Normal</option>
-                        <option value="apoio">Apoio Fixo Dev/Com/Fin</option>
-                        <option value="sobreaviso">Sobreaviso Oficial</option>
-                    </select>
-                    <input type="text" name="observacao" placeholder="Obs / Motivo (Opcional)" style="padding: 6px; border-radius: 4px; border: 1px solid #ccc; flex: 1;">
-                    <button type="submit" class="btn btn-admin" style="padding: 6px 12px;">Adicionar à Escala</button>
+                    <div>
+                        <label class="form-label">Funcionário</label>
+                        <select name="funcionario_id" required class="form-select">
+                            <option value="">Selecione o Funcionário...</option>
+                            {% for f in funcionarios %}
+                                {% if f[11] == 1 and f[12] == 0 %}
+                                    <option value="{{ f[0] }}">{{ f[1] }} ({{ f[4] }})</option>
+                                {% endif %}
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="form-label">Horário</label>
+                        <select name="horario" required class="form-select">
+                            <option value="07:30 - 11:30">07:30 - 11:30</option>
+                            <option value="08:00 - 12:00">08:00 - 12:00</option>
+                            <option value="09:00 - 13:00">09:00 - 13:00</option>
+                            <option value="10:00 - 14:00">10:00 - 14:00</option>
+                            <option value="13:00 - 17:00">13:00 - 17:00</option>
+                            <option value="14:00 - 18:00">14:00 - 18:00</option>
+                            <option value="Sobreaviso">Sobreaviso</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="form-label">Tipo</label>
+                        <select name="tipo_sabado" class="form-select">
+                            <option value="rodizio">Rodízio Normal</option>
+                            <option value="apoio">Apoio Fixo Dev/Com/Fin</option>
+                            <option value="sobreaviso">Sobreaviso Oficial</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="form-label">Observação</label>
+                        <input type="text" name="observacao" placeholder="Obs / Motivo (Opcional)" class="form-control">
+                    </div>
+                    <button type="submit" class="btn btn-success">Adicionar à Escala</button>
                 </form>
             </div>
         {% endif %}
@@ -567,9 +599,9 @@ HTML_INTERFACE = """
                                         <div class="card-obs">{{ e[5] or 'Rodízio' }}</div>
                                     </div>
                                     {% if pode_editar_horarios() %}
-                                        <div style="display: flex; gap: 4px;">
-                                            <a href="/horarios/editar_item_escala/{{ e[0] }}" title="Editar Item" style="color:orange; text-decoration:none; font-size:0.8em;">✏️</a>
-                                            <form action="/horarios/excluir_escala_sabado/{{ e[0] }}" method="POST" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit"  onclick="return confirm('Remover item?')" title="Excluir Item" style="color:red; text-decoration:none; font-size:0.8em;">❌</button></form>
+                                        <div class="acoes-container">
+                                            <a href="/horarios/editar_item_escala/{{ e[0] }}" class="btn-icon btn-icon-warning" title="Editar Item" aria-label="Editar item da escala"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></a>
+                                            <form action="/horarios/excluir_escala_sabado/{{ e[0] }}" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn-icon btn-icon-danger" onclick="return confirm('Remover item?')" aria-label="Excluir item da escala"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg></button></form>
                                         </div>
                                     {% endif %}
                                 </div>
@@ -595,9 +627,9 @@ HTML_INTERFACE = """
                                             <div class="card-obs">{{ e[5] or 'Sobreaviso Oficial' }}</div>
                                         </div>
                                         {% if pode_editar_horarios() %}
-                                            <div style="display: flex; gap: 4px;">
-                                                <a href="/horarios/editar_item_escala/{{ e[0] }}" title="Editar Item" style="color:orange; text-decoration:none; font-size:0.8em;">✏️</a>
-                                                <form action="/horarios/excluir_escala_sabado/{{ e[0] }}" method="POST" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit"  onclick="return confirm('Remover item?')" title="Excluir Item" style="color:red; text-decoration:none; font-size:0.8em;">❌</button></form>
+                                            <div class="acoes-container">
+                                                <a href="/horarios/editar_item_escala/{{ e[0] }}" class="btn-icon btn-icon-warning" title="Editar Item" aria-label="Editar item da escala"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></a>
+                                                <form action="/horarios/excluir_escala_sabado/{{ e[0] }}" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn-icon btn-icon-danger" onclick="return confirm('Remover item?')" aria-label="Excluir item da escala"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg></button></form>
                                             </div>
                                         {% endif %}
                                     </div>
@@ -618,9 +650,9 @@ HTML_INTERFACE = """
                                             <div class="card-obs">{{ e[4] }} - {{ e[5] }}</div>
                                         </div>
                                         {% if pode_editar_horarios() %}
-                                            <div style="display: flex; gap: 4px;">
-                                                <a href="/horarios/editar_item_escala/{{ e[0] }}" title="Editar Item" style="color:orange; text-decoration:none; font-size:0.8em;">✏️</a>
-                                                <form action="/horarios/excluir_escala_sabado/{{ e[0] }}" method="POST" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit"  onclick="return confirm('Remover item?')" title="Excluir Item" style="color:red; text-decoration:none; font-size:0.8em;">❌</button></form>
+                                            <div class="acoes-container">
+                                                <a href="/horarios/editar_item_escala/{{ e[0] }}" class="btn-icon btn-icon-warning" title="Editar Item" aria-label="Editar item da escala"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></a>
+                                                <form action="/horarios/excluir_escala_sabado/{{ e[0] }}" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn-icon btn-icon-danger" onclick="return confirm('Remover item?')" aria-label="Excluir item da escala"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg></button></form>
                                             </div>
                                         {% endif %}
                                     </div>
@@ -636,20 +668,20 @@ HTML_INTERFACE = """
 
     <!-- 2. COBERTURA DE ATENDIMENTO -->
     <div class="card" id="secao-cobertura">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-            <h3 style="margin:0;">📊 Cobertura de Atendimento</h3>
-            <form action="/horarios#secao-cobertura" method="GET" style="display: flex; gap: 10px; align-items: center;">
+        <div class="section-header">
+            <h3>📊 Cobertura de Atendimento</h3>
+            <form action="/horarios#secao-cobertura" method="GET" class="d-flex gap-2 items-center">
                 {% if data_filtro_sabado %}<input type="hidden" name="data_filtro_sabado" value="{{ data_filtro_sabado }}">{% endif %}
                 <label>📅 <strong>Consultar dia:</strong></label>
-                <input type="date" name="data_cobertura" value="{{ data_cobertura or '' }}" onchange="this.form.submit()">
+                <input type="date" name="data_cobertura" value="{{ data_cobertura or '' }}" onchange="this.form.submit()" class="form-control" style="width: auto;">
                 {% if data_cobertura %}
-                    <a href="/horarios#secao-cobertura" class="btn btn-danger" style="padding: 4px 8px; font-size: 0.8em;">Limpar</a>
+                    <a href="/horarios#secao-cobertura" class="btn btn-danger btn-sm">Limpar</a>
                 {% endif %}
             </form>
         </div>
 
         {% if data_cobertura %}
-            <div style="background-color: #eff6ff; color: #1d4ed8; padding: 8px 12px; border-radius: 4px; margin-bottom: 10px; font-size: 0.9em;">
+            <div class="info-box info-box-primary" style="margin-bottom: 10px;">
                 ℹ️ Exibindo cobertura para o dia <strong>{{ data_cobertura_formatada }}</strong>.
             </div>
         {% endif %}
@@ -678,48 +710,48 @@ HTML_INTERFACE = """
 
     <!-- 3. AUSÊNCIAS, FÉRIAS E LICENÇAS -->
     <div class="card" id="secao-ausencias">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-            <h3 style="margin: 0;">🏖️ Ausências, Férias e Licenças</h3>
-            <span style="font-size: 0.85em; color: #666; font-weight: bold;">{{ 'Resultados do filtro' if filtro_ausencias else 'Ausências vigentes hoje' }}</span>
+        <div class="section-header">
+            <h3>🏖️ Ausências, Férias e Licenças</h3>
+            <span class="text-muted" style="font-size: 0.85em; font-weight: bold;">{{ 'Resultados do filtro' if filtro_ausencias else 'Ausências vigentes hoje' }}</span>
         </div>
 
         {% if pode_editar_horarios() %}
             <form action="/horarios/salvar_ausencia" method="POST" class="form-grid" style="margin-bottom: 20px;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <select name="funcionario_id" required>
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <select name="funcionario_id" required class="form-select">
                     <option value="">Selecione o Técnico...</option>
                     {% for f in funcionarios %}{% if f[11] == 1 %}<option value="{{ f[0] }}">{{ f[1] }}</option>{% endif %}{% endfor %}
                 </select>
-                <input type="text" name="motivo" placeholder="Motivo (Férias, Atestado, Licença...)" required>
+                <input type="text" name="motivo" placeholder="Motivo (Férias, Atestado, Licença...)" required class="form-control">
                 <div>
-                    <label style="font-size: 0.8em;">Data Início:</label>
-                    <input type="date" name="data_inicio" required style="width: 100%;">
+                    <label class="form-label">Data Início:</label>
+                    <input type="date" name="data_inicio" required class="form-control">
                 </div>
                 <div>
-                    <label style="font-size: 0.8em;">Hora Início (Opcional):</label>
-                    <input type="time" name="hora_inicio" style="width: 100%;">
+                    <label class="form-label">Hora Início (Opcional):</label>
+                    <input type="time" name="hora_inicio" class="form-control">
                 </div>
                 <div>
-                    <label style="font-size: 0.8em;">Data Fim:</label>
-                    <input type="date" name="data_fim" required style="width: 100%;">
+                    <label class="form-label">Data Fim:</label>
+                    <input type="date" name="data_fim" required class="form-control">
                 </div>
                 <div>
-                    <label style="font-size: 0.8em;">Hora Fim (Opcional):</label>
-                    <input type="time" name="hora_fim" style="width: 100%;">
+                    <label class="form-label">Hora Fim (Opcional):</label>
+                    <input type="time" name="hora_fim" class="form-control">
                 </div>
                 <button type="submit" class="btn btn-admin">Cadastrar Ausência</button>
             </form>
         {% endif %}
 
         <form action="/horarios#secao-ausencias" method="GET" class="form-grid">
-            <label>Início do período <input type="date" name="ausencia_inicio" value="{{ ausencia_inicio }}"></label>
-            <label>Fim do período <input type="date" name="ausencia_fim" value="{{ ausencia_fim }}"></label>
-            <label>Motivo <select name="ausencia_motivo">
+            <label class="form-label">Início do período <input type="date" name="ausencia_inicio" value="{{ ausencia_inicio }}" class="form-control"></label>
+            <label class="form-label">Fim do período <input type="date" name="ausencia_fim" value="{{ ausencia_fim }}" class="form-control"></label>
+            <label class="form-label">Motivo <select name="ausencia_motivo" class="form-select">
                 <option value="">Todos os motivos</option>
                 {% for motivo in motivos_ausencias %}<option value="{{ motivo }}" {% if motivo == ausencia_motivo %}selected{% endif %}>{{ motivo }}</option>{% endfor %}
             </select></label>
             <button class="btn btn-bancos" type="submit">Filtrar ausências</button>
-            <a href="/horarios#secao-ausencias">Limpar filtros</a>
+            <a href="/horarios#secao-ausencias" class="btn btn-secondary">Limpar filtros</a>
         </form>
         <div class="lista-rolagem" tabindex="0" role="region" aria-label="Lista com rolagem"><table>
             <thead>
@@ -745,8 +777,8 @@ HTML_INTERFACE = """
                     {% if pode_editar_horarios() %}
                     <td class="col-acoes">
                         <div class="acoes-container">
-                            <a href="/horarios/editar_ausencia/{{ a[0] }}" class="btn btn-edit" style="padding: 3px 8px; font-size: 0.8em;">✏️ Editar</a>
-                            <form action="/horarios/excluir_ausencia/{{ a[0] }}" method="POST" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit"  onclick="return confirm('Excluir ausência?')" style="color:red; text-decoration:none;">❌</button></form>
+                            <a href="/horarios/editar_ausencia/{{ a[0] }}" class="btn btn-edit btn-sm">✏️ Editar</a>
+                            <form action="/horarios/excluir_ausencia/{{ a[0] }}" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn btn-delete btn-sm" onclick="return confirm('Excluir ausência?')" aria-label="Excluir ausência">❌</button></form>
                         </div>
                     </td>
                     {% endif %}
@@ -762,7 +794,9 @@ HTML_INTERFACE = """
 
     <!-- 4. EQUIPE E JORNADAS CADASTRADAS -->
     <div class="card" id="secao-equipe">
-        <h3>👥 Equipe e Jornadas Cadastradas</h3>
+        <div class="section-header">
+            <h3>👥 Equipe e Jornadas Cadastradas</h3>
+        </div>
         <div class="lista-rolagem" tabindex="0" role="region" aria-label="Lista com rolagem"><table id="tabela-equipe">
             <thead>
                 <tr>
@@ -811,8 +845,8 @@ HTML_INTERFACE = """
                     {% if pode_editar_horarios() %}
                     <td class="col-acoes">
                         <div class="acoes-container">
-                            <a href="/horarios/editar_funcionario/{{ f[0] }}" class="btn btn-edit" style="padding: 3px 8px; font-size: 0.8em;">✏️ Editar</a>
-                            <form action="/horarios/excluir_funcionario/{{ f[0] }}" method="POST" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit"  onclick="return confirm('Excluir permanentemente?')" style="color: red; text-decoration: none;">❌</button></form>
+                            <a href="/horarios/editar_funcionario/{{ f[0] }}" class="btn btn-edit btn-sm">✏️ Editar</a>
+                            <form action="/horarios/excluir_funcionario/{{ f[0] }}" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn btn-delete btn-sm" onclick="return confirm('Excluir permanentemente?')" aria-label="Excluir funcionário">❌</button></form>
                         </div>
                     </td>
                     {% endif %}
@@ -825,17 +859,19 @@ HTML_INTERFACE = """
             <h4 style="margin-top: 20px;">➕ Cadastrar Novo Funcionário</h4>
             <form action="/horarios/salvar_funcionario" method="POST" enctype="multipart/form-data" class="form-grid form-funcionario">
                 {% include 'campos_funcionario.html' %}
-                <button type="submit" class="btn btn-admin">Cadastrar</button>
+                <button type="submit" class="btn btn-admin btn-full">Cadastrar</button>
             </form>
         {% endif %}
     </div>
 
     <!-- 5. TROCAS E CONSULTA DE DIAS TRABALHADOS -->
     <div class="card" id="secao-trocas">
-        <h3>🔄 Registros de Trocas e Consulta de Dias Trabalhados</h3>
-        <form action="/horarios#secao-trocas" method="GET" style="margin-bottom: 15px; display: flex; gap: 10px;">
-            <label>Data das trocas <input type="date" name="data_trocas" value="{{ data_trocas }}"></label>
-            <select name="busca_funcionario">
+        <div class="section-header">
+            <h3>🔄 Registros de Trocas e Consulta de Dias Trabalhados</h3>
+        </div>
+        <form action="/horarios#secao-trocas" method="GET" class="d-flex gap-2 flex-wrap" style="margin-bottom: 15px;">
+            <label class="form-label">Data das trocas <input type="date" name="data_trocas" value="{{ data_trocas }}" class="form-control"></label>
+            <select name="busca_funcionario" class="form-select" style="width: auto;">
                 <option value="">Filtrar Histórico por Funcionário...</option>
                 {% for f in funcionarios %}
                     <option value="{{ f[0] }}" {% if busca_func_id == f[0]|string %}selected{% endif %}>{{ f[1] }}</option>
@@ -848,20 +884,20 @@ HTML_INTERFACE = """
         {% if pode_editar_horarios() %}
             <h4>➕ Trocar horários em uma data</h4>
             <form action="/horarios/registrar_troca" method="POST" class="form-grid">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <input type="date" name="data_sabado" value="{{ data_cobertura }}" aria-label="Data da troca" required>
-                <select name="substituido_id" required>
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="date" name="data_sabado" value="{{ data_cobertura }}" aria-label="Data da troca" required class="form-control">
+                <select name="substituido_id" required class="form-select">
                     <option value="">Primeiro funcionário...</option>
                     {% for f in funcionarios if f[11] == 1 %}<option value="{{ f[0] }}">{{ f[1] }}</option>{% endfor %}
                 </select>
-                <select name="substituto_id" required>
+                <select name="substituto_id" required class="form-select">
                     <option value="">Trocar com...</option>
                     {% for f in funcionarios if f[11] == 1 %}<option value="{{ f[0] }}">{{ f[1] }}</option>{% endfor %}
                 </select>
-                <input type="text" name="motivo" placeholder="Motivo da troca">
+                <input type="text" name="motivo" placeholder="Motivo da troca" class="form-control">
                 <button type="submit" class="btn btn-admin">Salvar Troca</button>
             </form>
-            <p style="color:#64748b;font-size:.85em;">A troca vale apenas para essa data. Aos sábados, se o segundo funcionário estiver de folga, ele assume o turno do primeiro; se ambos estiverem escalados, os turnos são trocados. A cobertura usa os horários resultantes e mantém as ausências registradas.</p>
+            <p class="text-muted" style="font-size: 0.85em;">A troca vale apenas para essa data. Aos sábados, se o segundo funcionário estiver de folga, ele assume o turno do primeiro; se ambos estiverem escalados, os turnos são trocados. A cobertura usa os horários resultantes e mantém as ausências registradas.</p>
         {% endif %}
 
         <h4>Substituição de atribuições por período (segunda a sexta)</h4>
@@ -869,19 +905,19 @@ HTML_INTERFACE = """
         {% if pode_editar_horarios() %}
         <form action="/horarios/substituicao_periodo" method="POST" class="form-grid">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <label>Titular <select name="titular_id" required><option value="">Selecione...</option>{% for f in funcionarios if f[11] == 1 %}<option value="{{ f[0] }}">{{ f[1] }}</option>{% endfor %}</select></label>
-            <label>Substituto <select name="substituto_id" required><option value="">Selecione...</option>{% for f in funcionarios if f[11] == 1 %}<option value="{{ f[0] }}">{{ f[1] }}</option>{% endfor %}</select></label>
-            <label>Início <input type="date" name="data_inicio" required></label>
-            <label>Fim (inclusive) <input type="date" name="data_fim" required></label>
-            <input name="motivo" placeholder="Motivo da substituição" maxlength="500" required>
+            <label class="form-label">Titular <select name="titular_id" required class="form-select"><option value="">Selecione...</option>{% for f in funcionarios if f[11] == 1 %}<option value="{{ f[0] }}">{{ f[1] }}</option>{% endfor %}</select></label>
+            <label class="form-label">Substituto <select name="substituto_id" required class="form-select"><option value="">Selecione...</option>{% for f in funcionarios if f[11] == 1 %}<option value="{{ f[0] }}">{{ f[1] }}</option>{% endfor %}</select></label>
+            <label class="form-label">Início <input type="date" name="data_inicio" required class="form-control"></label>
+            <label class="form-label">Fim (inclusive) <input type="date" name="data_fim" required class="form-control"></label>
+            <input name="motivo" placeholder="Motivo da substituição" maxlength="500" required class="form-control">
             <button class="btn btn-admin" type="submit">Cadastrar substituição</button>
         </form>
         {% endif %}
         <div class="lista-rolagem" tabindex="0" role="region" aria-label="Substituições por período">
         <table><thead><tr><th>Titular</th><th>Substituto</th><th>Início</th><th>Fim</th><th>Motivo</th>{% if pode_editar_horarios() %}<th>Ações</th>{% endif %}</tr></thead><tbody>
         {% for s in substituicoes %}<tr><td>{{ s[1] }}</td><td>{{ s[2] }}</td><td>{{ s[3][8:10] }}/{{ s[3][5:7] }}/{{ s[3][:4] }}</td><td>{{ s[4][8:10] }}/{{ s[4][5:7] }}/{{ s[4][:4] }}</td><td>{{ s[5] }}</td>
-        {% if pode_editar_horarios() %}<td><form action="/horarios/excluir_substituicao/{{ s[0] }}" method="POST"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" onclick="return confirm('Excluir esta substituição?')">Excluir</button></form></td>{% endif %}</tr>
-        {% else %}<tr><td colspan="6">Nenhuma substituição cadastrada.</td></tr>{% endfor %}
+        {% if pode_editar_horarios() %}<td><form action="/horarios/excluir_substituicao/{{ s[0] }}" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn btn-delete btn-sm" onclick="return confirm('Excluir esta substituição?')" aria-label="Excluir substituição">Excluir</button></form></td>{% endif %}</tr>
+        {% else %}<tr><td colspan="6" class="text-muted">Nenhuma substituição cadastrada.</td></tr>{% endfor %}
         </tbody></table></div>
 
         <h4 style="margin-top: 15px;">Histórico de Trocas Cadastradas</h4>
@@ -910,7 +946,9 @@ HTML_INTERFACE = """
     <!-- 6. GERENCIAMENTO DE CARGOS E JORNADAS -->
     {% if pode_editar_horarios() %}
     <div class="card" id="secao-cargos-jornadas">
-        <h3>⚙️ Gerenciamento de Cargos e Tabela de Horários (CRUD)</h3>
+        <div class="section-header">
+            <h3>⚙️ Gerenciamento de Cargos e Tabela de Horários (CRUD)</h3>
+        </div>
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
             
             <div>
@@ -924,15 +962,15 @@ HTML_INTERFACE = """
                         <tr>
                             <td>{{ c[1] }}</td>
                             <td class="col-acoes">
-                                <form action="/horarios/excluir_cargo/{{ c[0] }}" method="POST" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit"  onclick="return confirm('Excluir cargo?')" style="color:red; text-decoration:none;">❌ Excluir</button></form>
+                                <form action="/horarios/excluir_cargo/{{ c[0] }}" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn btn-delete btn-sm" onclick="return confirm('Excluir cargo?')" aria-label="Excluir cargo">Excluir</button></form>
                             </td>
                         </tr>
                         {% endfor %}
                     </tbody>
                 </table>
-                <form action="/horarios/novo_cargo" method="POST" style="display:flex; gap: 5px; margin-top: 10px;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    <input type="text" name="nome_cargo" placeholder="Novo Cargo" required style="padding:6px; flex:1;">
+                <form action="/horarios/novo_cargo" method="POST" class="d-flex gap-2" style="margin-top: 10px;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="text" name="nome_cargo" placeholder="Novo Cargo" required class="form-control" style="flex: 1;">
                     <button type="submit" class="btn btn-admin">Adicionar</button>
                 </form>
             </div>
@@ -949,21 +987,21 @@ HTML_INTERFACE = """
                             <td>{{ j[1] }}</td>
                             <td><strong>{{ j[2] }}</strong></td>
                             <td class="col-acoes">
-                                <form action="/horarios/excluir_jornada/{{ j[0] }}" method="POST" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit"  onclick="return confirm('Excluir jornada?')" style="color:red; text-decoration:none;">❌ Excluir</button></form>
+                                <form action="/horarios/excluir_jornada/{{ j[0] }}" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn btn-delete btn-sm" onclick="return confirm('Excluir jornada?')" aria-label="Excluir jornada">Excluir</button></form>
                             </td>
                         </tr>
                         {% endfor %}
                     </tbody>
                 </table>
                 <form action="/horarios/nova_jornada" method="POST" class="form-grid" style="grid-template-columns: 1fr 1fr;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    <input type="text" name="descricao" placeholder="Ex: 08:00 às 12:00 (Sábado)" required>
-                    <select name="tipo">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="text" name="descricao" placeholder="Ex: 08:00 às 12:00 (Sábado)" required class="form-control">
+                    <select name="tipo" class="form-select">
                         <option value="Semana">Semana</option>
                         <option value="Sabado">Sábado</option>
                     </select>
-                    <input type="text" name="m_in" placeholder="Início Manhã (08:00)" required>
-                    <input type="text" name="m_out" placeholder="Fim Manhã (12:00)" required>
+                    <input type="text" name="m_in" placeholder="Início Manhã (08:00)" required class="form-control">
+                    <input type="text" name="m_out" placeholder="Fim Manhã (12:00)" required class="form-control">
                     <button type="submit" class="btn btn-admin" style="grid-column: span 2;">Adicionar Horário</button>
                 </form>
             </div>
@@ -1107,6 +1145,7 @@ HTML_INTERFACE = """
             });
         }
     </script>
+</div>
 </body>
 </html>
 """
@@ -1315,10 +1354,23 @@ def salvar_funcionario():
             conn.execute('''UPDATE funcionarios SET nome=?, prioridade=?, cargo_id=?, jornada_id=?,
                 equipe_sabado=?, eh_apoiador_sabado=?, eh_sobreaviso=?, nao_trabalha_sabado=?, ativo=?,
                 data_nascimento=?, foto_url=COALESCE(?, foto_url) WHERE id=?''', (*valores, foto_url, func_id))
+            acao = 'atualizar_funcionario'
         else:
             conn.execute('''INSERT INTO funcionarios (nome, prioridade, cargo_id, jornada_id,
                 equipe_sabado, eh_apoiador_sabado, eh_sobreaviso, nao_trabalha_sabado, ativo, data_nascimento, foto_url)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (*valores, foto_url or ''))
+            acao = 'criar_funcionario'
+    
+    # Auditoria: criação/atualização de funcionário (Opção 3)
+    registrar_acao_admin(acao, {
+        'funcionario_id': func_id,
+        'nome': nome,
+        'prioridade': prioridade,
+        'equipe_sabado': equipe,
+        'tipo_sabado': tipo,
+        'ativo': ativo,
+    })
+    
     return redirect(url_for('horarios.ver_horarios') + '#secao-equipe')
 
 
@@ -1537,8 +1589,8 @@ def editar_item_escala(id):
                 <label style="font-size: 0.85em;">Observação:</label>
                 <input type="text" name="observacao" value="{escape(obs or '')}" style="width: 100%; padding: 8px;">
             </div>
-            <button type="submit" style="padding: 10px; background: #2563eb; color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer;">Salvar Alteração</button>
-            <a href="/horarios?data_filtro_sabado={d_sabado}#secao-escala-sabado" style="text-align: center; color: #555; text-decoration: none;">Cancelar</a>
+            <button type="submit" class="btn btn-primary">Salvar Alteração</button>
+            <a href="/horarios?data_filtro_sabado={d_sabado}#secao-escala-sabado" class="btn btn-secondary" style="text-align: center;">Cancelar</a>
         </form>
     </div>
     """
@@ -1647,8 +1699,8 @@ def editar_ausencia(id):
                 </div>
             </div>
 
-            <button type="submit" style="padding: 10px; background: #2563eb; color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer;">Salvar Ausência</button>
-            <a href="/horarios#secao-ausencias" style="text-align: center; color: #555; text-decoration: none;">Cancelar</a>
+            <button type="submit" class="btn btn-success">Salvar Ausência</button>
+            <a href="/horarios#secao-ausencias" class="btn btn-secondary" style="text-align: center;">Cancelar</a>
         </form>
     </div>
     """
@@ -1657,18 +1709,40 @@ def editar_ausencia(id):
 @login_required
 def excluir_ausencia(id):
     with closing(sqlite3.connect(DB_NAME)) as conn, conn:
+        # Busca info da ausência para auditoria
+        ausencia = conn.execute("SELECT funcionario_id, motivo, data_inicio, data_fim FROM ausencias WHERE id = ?", (id,)).fetchone()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM ausencias WHERE id = ?", (id,))
         conn.commit()
+    
+    # Auditoria: exclusão de ausência (Opção 3)
+    if ausencia:
+        registrar_acao_admin('excluir_ausencia', {
+            'ausencia_id': id,
+            'funcionario_id': ausencia['funcionario_id'],
+            'motivo': ausencia['motivo'],
+            'data_inicio': ausencia['data_inicio'],
+            'data_fim': ausencia['data_fim'],
+        })
+    
     return redirect('/horarios#secao-ausencias')
 
 @horarios_bp.route('/horarios/excluir_dia_inteiro/<data_sabado>', methods=['POST'])
 @login_required
 def excluir_dia_inteiro(data_sabado):
     with closing(sqlite3.connect(DB_NAME)) as conn, conn:
+        # Conta quantas escalas serão excluídas para auditoria
+        count = conn.execute("SELECT COUNT(*) FROM escala_sabado WHERE data_sabado = ?", (data_sabado,)).fetchone()[0]
         cursor = conn.cursor()
         cursor.execute("DELETE FROM escala_sabado WHERE data_sabado = ?", (data_sabado,))
         conn.commit()
+    
+    # Auditoria: exclusão de dia inteiro de escala (Opção 3)
+    registrar_acao_admin('excluir_dia_inteiro_escala', {
+        'data_sabado': data_sabado,
+        'escalas_excluidas': count,
+    })
+    
     return redirect('/horarios#secao-escala-sabado')
 
 @horarios_bp.route('/horarios/novo_cargo', methods=['POST'])
@@ -1687,9 +1761,19 @@ def novo_cargo():
 @login_required
 def excluir_cargo(id):
     with closing(sqlite3.connect(DB_NAME)) as conn, conn:
+        # Busca info do cargo para auditoria
+        cargo = conn.execute("SELECT nome FROM cargos WHERE id = ?", (id,)).fetchone()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM cargos WHERE id = ?", (id,))
         conn.commit()
+    
+    # Auditoria: exclusão de cargo (Opção 3)
+    if cargo:
+        registrar_acao_admin('excluir_cargo', {
+            'cargo_id': id,
+            'nome': cargo['nome'],
+        })
+    
     return redirect('/horarios#secao-cargos-jornadas')
 
 @horarios_bp.route('/horarios/nova_jornada', methods=['POST'])
@@ -1708,9 +1792,20 @@ def nova_jornada():
 @login_required
 def excluir_jornada(id):
     with closing(sqlite3.connect(DB_NAME)) as conn, conn:
+        # Busca info da jornada para auditoria
+        jornada = conn.execute("SELECT descricao, tipo FROM jornadas WHERE id = ?", (id,)).fetchone()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM jornadas WHERE id = ?", (id,))
         conn.commit()
+    
+    # Auditoria: exclusão de jornada (Opção 3)
+    if jornada:
+        registrar_acao_admin('excluir_jornada', {
+            'jornada_id': id,
+            'descricao': jornada['descricao'],
+            'tipo': jornada['tipo'],
+        })
+    
     return redirect('/horarios#secao-cargos-jornadas')
 
 @horarios_bp.route('/horarios/registrar_troca', methods=['POST'])
@@ -1728,6 +1823,15 @@ def registrar_troca():
             aplicar_troca(conn, data, titular, substituto, motivo, session['user_id'])
     except ValueError as erro:
         return jsonify(erro=str(erro)), 400
+    
+    # Auditoria: registro de troca (Opção 3)
+    registrar_acao_admin('registrar_troca', {
+        'data_sabado': data,
+        'titular_id': titular,
+        'substituto_id': substituto,
+        'motivo': motivo,
+    })
+    
     return redirect(url_for('horarios.ver_horarios', data_cobertura=data, data_trocas=data,
                             data_filtro_sabado=data if validar_data(data).weekday() == 5 else '') + '#secao-trocas')
 
@@ -1735,18 +1839,47 @@ def registrar_troca():
 @login_required
 def excluir_funcionario(id):
     with closing(sqlite3.connect(DB_NAME)) as conn, conn:
+        # Habilita constraints de chave estrangeira
+        conn.execute("PRAGMA foreign_keys = ON")
+        
+        # Busca info do funcionário para auditoria
+        funcionario = conn.execute("SELECT nome FROM funcionarios WHERE id = ?", (id,)).fetchone()
+        
+        # Remove registros relacionados antes de excluir o funcionário
         cursor = conn.cursor()
+        cursor.execute("DELETE FROM escala_sabado WHERE funcionario_id = ?", (id,))
+        cursor.execute("DELETE FROM ausencias WHERE funcionario_id = ?", (id,))
         cursor.execute("DELETE FROM funcionarios WHERE id = ?", (id,))
         conn.commit()
+    
+    # Auditoria: exclusão de funcionário (Opção 3)
+    if funcionario:
+        registrar_acao_admin('excluir_funcionario', {
+            'funcionario_id': id,
+            'nome': funcionario[0],
+        })
+    
     return redirect('/horarios#secao-equipe')
 
 @horarios_bp.route('/horarios/excluir_escala_sabado/<int:id>', methods=['POST'])
 @login_required
 def excluir_escala_sabado(id):
     with closing(sqlite3.connect(DB_NAME)) as conn, conn:
+        # Busca info da escala para auditoria
+        escala = conn.execute("SELECT data_sabado, funcionario_id, horario FROM escala_sabado WHERE id = ?", (id,)).fetchone()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM escala_sabado WHERE id = ?", (id,))
         conn.commit()
+    
+    # Auditoria: exclusão de escala de sábado (Opção 3)
+    if escala:
+        registrar_acao_admin('excluir_escala_sabado', {
+            'escala_id': id,
+            'data_sabado': escala['data_sabado'],
+            'funcionario_id': escala['funcionario_id'],
+            'horario': escala['horario'],
+        })
+    
     return redirect('/horarios#secao-escala-sabado')
 
 @horarios_bp.route('/horarios/login', methods=['GET', 'POST'])
@@ -1756,7 +1889,12 @@ def login():
 
 @horarios_bp.route('/horarios/logout', methods=['POST'])
 def logout():
+    user_id = session.get('user_id')
+    user_nome = session.get('user_nome')
     session.clear()
+    if user_id and user_nome:
+        from seguranca import registrar_logout
+        registrar_logout(user_id, user_nome)
     return redirect(url_for('horarios.ver_horarios'))
 
 
@@ -1775,6 +1913,16 @@ def salvar_substituicao_periodo():
                 request.form.get('motivo', '').strip(), session['user_id'])
     except ValueError as erro:
         return str(erro), 400
+    
+    # Auditoria: substituição de período (Opção 3)
+    registrar_acao_admin('salvar_substituicao_periodo', {
+        'titular_id': titular,
+        'substituto_id': substituto,
+        'data_inicio': request.form.get('data_inicio', ''),
+        'data_fim': request.form.get('data_fim', ''),
+        'motivo': request.form.get('motivo', '').strip(),
+    })
+    
     return redirect('/horarios#secao-trocas')
 
 
@@ -1782,5 +1930,19 @@ def salvar_substituicao_periodo():
 @login_required
 def excluir_substituicao_periodo(id):
     with closing(get_db()) as conn, conn:
+        # Busca info da substituição para auditoria
+        substituicao = conn.execute("SELECT titular_id, substituto_id, data_inicio, data_fim, motivo FROM substituicoes_periodo WHERE id = ?", (id,)).fetchone()
         conn.execute('DELETE FROM substituicoes_periodo WHERE id = ?', (id,))
+    
+    # Auditoria: exclusão de substituição de período (Opção 3)
+    if substituicao:
+        registrar_acao_admin('excluir_substituicao_periodo', {
+            'substituicao_id': id,
+            'titular_id': substituicao['titular_id'],
+            'substituto_id': substituicao['substituto_id'],
+            'data_inicio': substituicao['data_inicio'],
+            'data_fim': substituicao['data_fim'],
+            'motivo': substituicao['motivo'],
+        })
+    
     return redirect('/horarios#secao-trocas')

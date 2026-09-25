@@ -33,6 +33,8 @@ from seguranca import (
     senha_atende_politica, login_bloqueado, registrar_falha_login, limpar_falhas_login,
     token_expira_em, token_ainda_valido, destino_redirect_seguro,
     conectar_ssh, validar_caminho_banco,
+    regenerar_session_id, registrar_login_sucesso, registrar_login_falha,
+    registrar_logout, registrar_acao_admin,
 )
 
 # Configuração do Blueprint e Banco
@@ -630,6 +632,14 @@ def upload_banco_avulso():
         sftp.close()
         ssh.close()
         limpar_cache_global()
+        
+        # Auditoria: upload de banco (Opção 3)
+        registrar_acao_admin('upload_banco', {
+            'servidor': servidor,
+            'alias': alias,
+            'arquivo': arquivo.filename,
+        })
+        
         return redirect(url_for('bancos.admin_painel', servidor=servidor, sucesso=f'Banco enviado com sucesso para o alias "{alias}".'))
     except Exception as e:
         return redirect(url_for('bancos.admin_painel', servidor=servidor, erro=f"Erro no envio: {str(e)}"))
@@ -776,9 +786,9 @@ def calcular_status_inatividade(timestamp_mod):
 
     if dias_sem_uso >= 90:
         meses = dias_sem_uso // 30
-        return {'status': 'critico', 'dias': dias_sem_uso, 'texto_dias': f"({meses} meses sem uso)"}
+        return {'status': 'critico', 'dias': dias_sem_uso, 'texto_dias': f"({meses} meses)"}
     elif dias_sem_uso >= 30:
-        return {'status': 'atencao', 'dias': dias_sem_uso, 'texto_dias': f"({dias_sem_uso} dias sem uso)"}
+        return {'status': 'atencao', 'dias': dias_sem_uso, 'texto_dias': f"({dias_sem_uso} dias)"}
     else:
         return {'status': 'normal', 'dias': dias_sem_uso, 'texto_dias': 'Ativo'}
 
@@ -1436,10 +1446,15 @@ HTML_LAYOUT = """
     </style>
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <script src="{{ url_for('static', filename='csrf.js') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
-<script src="{{ url_for('static', filename='ui.js') }}" defer></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='public-20260925-4') }}">
+<script src="{{ url_for('static', filename='ui.js', v='public-20260925-4') }}" defer></script>
 </head>
 <body>
+    <!-- Skip link para acessibilidade -->
+    <a href="#conteudo-principal" class="skip-link">Pular para o conteúdo principal</a>
+
+    <!-- Overlay para focus trap em modais -->
+    <div class="focus-trap-overlay" aria-hidden="true"></div>
 
     <div class="topo-fixo" id="painelTopo">
         <div class="linha-cabecalho">
@@ -1474,22 +1489,38 @@ HTML_LAYOUT = """
                     <a href="/todos?filtro=sem_lojas">Clientes sem lojas cadastradas</a>
                 </div>
             </details>
-            {% if tem_permissao('perm_gestao_bancos') or tem_permissao('perm_servidores') %}
+            {% if session.get('logged_in') %}
             <details class="menu-acoes">
                 <summary class="btn">Gerenciar</summary>
                 <div class="menu-painel">
-                    {% if tem_permissao('perm_gestao_bancos') %}<a href="/admin?servidor={{ servidor_atual|urlencode }}">Gestão de bancos</a>{% endif %}
-                    {% if tem_permissao('perm_servidores') %}<a href="/admin/importar-lojas">Importar lojas</a>{% endif %}
+                    {% if tem_permissao('perm_gestao_bancos') %}
+                        <a href="/admin?servidor={{ servidor_atual|urlencode }}">Gestão de bancos</a>
+                    {% else %}
+                        <button type="button" onclick="return avisarSemPermissao('Gestão de Bancos')">Gestão de bancos</button>
+                    {% endif %}
+                    {% if tem_permissao('perm_servidores') %}
+                        <a href="/admin/importar-lojas">Importar lojas</a>
+                    {% else %}
+                        <button type="button" onclick="return avisarSemPermissao('Importação de Lojas')">Importar lojas</button>
+                    {% endif %}
                 </div>
             </details>
             {% endif %}
             <a href="?atualizar=1{% if busca_termo %}&busca={{ busca_termo|urlencode }}{% endif %}{% if ordem_atual %}&ordem={{ ordem_atual|urlencode }}{% endif %}{% if filtro_status %}&filtro={{ filtro_status|urlencode }}{% endif %}" class="btn" title="Atualizar dados do servidor">↻ Atualizar</a>
             <a href="/horarios" class="btn">🗓️ Horários</a>
+            <button id="theme-toggle" class="theme-toggle" aria-label="Alternar tema" title="Alternar tema claro/escuro">
+                <svg class="moon-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+                <svg class="sun-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+            </button>
             {% if session.get('logged_in') %}
             <details class="menu-acoes menu-conta">
                 <summary class="btn"><span class="nome-conta">{{ session.get('user_nome', '') }}</span>{% if session.get('eh_master') %}<span class="selo-master">Master</span>{% endif %}</summary>
                 <div class="menu-painel">
-                    {% if tem_permissao('perm_gestao_bancos') %}<a href="/admin">Meu perfil</a>{% endif %}
+                    {% if tem_permissao('perm_gestao_bancos') %}
+                        <a href="/admin">Meu perfil</a>
+                    {% else %}
+                        <button type="button" onclick="return avisarSemPermissao('Gestão de Bancos')">Meu perfil</button>
+                    {% endif %}
                     <hr>
                     <form action="/admin/logout" method="POST">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -1498,7 +1529,7 @@ HTML_LAYOUT = """
                 </div>
             </details>
             {% else %}
-            <a href="/admin/login" class="btn">Entrar</a>
+            <a href="/admin/login" class="btn menu-conta">Entrar</a>
             {% endif %}
         </nav>
 
@@ -1506,15 +1537,15 @@ HTML_LAYOUT = """
             {% if modo_historico %}
                 <h3>📈 Histórico Diário de Consumo de Disco (Gravado Diariamente às 04:00 AM)</h3>
             {% elif modo_orfaos %}
-                <h3>⚠️ Arquivos no diretório <span style="color: #e74c3c;">../infobrasil/*</span> Não Listados no databases.conf</h3>
+                <h3>⚠️ Arquivos no diretório <span class="text-danger">../infobrasil/*</span> Não Listados no databases.conf</h3>
             {% elif busca_termo %}
-                <h3>🔍 Busca por: <span style="color: #27ae60;">"{{ busca_termo }}"</span> em todos os servidores</h3>
+                <h3>🔍 Busca por: <span class="text-success">"{{ busca_termo }}"</span> em todos os servidores</h3>
             {% elif modo_inativos %}
-                <h3>🚫 Alias Inativados com <span style="color: #e67e22;">#</span> no databases.conf</h3>
+                <h3>🚫 Alias Inativados com <span class="text-warning">#</span> no databases.conf</h3>
             {% elif modo_todos %}
-                <h3>Databases em: <span style="color: #3498db;">TODOS OS SERVIDORES</span></h3>
+                <h3>Databases em: <span class="text-primary">TODOS OS SERVIDORES</span></h3>
             {% else %}
-                <h3>Databases em: <span style="color: #27ae60;">{{ servidor_atual }}</span></h3>
+                <h3>Databases em: <span class="text-success">{{ servidor_atual }}</span></h3>
             {% endif %}
 
             <div class="resumo-boxes">
@@ -1529,7 +1560,7 @@ HTML_LAYOUT = """
                 {% endif %}
                 <div class="total-box">💾 Espaço Ocupado: {{ total_tamanho }}</div>
                 {% if status_backups and not status_backups.erro %}
-                    <a href="/backups-ftp" class="alert-btn {% if status_backups.total_erro > 0 %}alert-btn-critico{% elif status_backups.total_atrasado > 0 %}alert-btn-atencao{% else %}alert-btn-atencao{% endif %}" style="{% if status_backups.total_erro == 0 and status_backups.total_atrasado == 0 %}background-color:#f0fdf4;border-color:#bbf7d0;color:#166534;{% endif %}" title="Clique para ver o detalhamento por cliente">
+                    <a href="/backups-ftp" class="alert-btn {% if status_backups.total_erro > 0 %}alert-btn-critico{% elif status_backups.total_atrasado > 0 %}alert-btn-atencao{% else %}alert-btn-success{% endif %}" title="Clique para ver o detalhamento por cliente">
                         💽 Backups FTP: {{ status_backups.total_ok }} OK
                         {% if status_backups.total_atrasado %}, {{ status_backups.total_atrasado }} atrasado(s){% endif %}
                         {% if status_backups.total_erro %}, {{ status_backups.total_erro }} com erro{% endif %}
@@ -1541,7 +1572,7 @@ HTML_LAYOUT = """
         </div>
     </div>
 
-    <div class="container">
+    <div class="container" id="conteudo-principal" role="main">
 
         <!-- TOP 5 MAIORES BANCOS GLOBAL -->
         {% if top5_global and not modo_orfaos and not modo_historico %}
@@ -1552,8 +1583,8 @@ HTML_LAYOUT = """
                 <div class="top5-item clicavel-cname" title="{{ b.cname_string }}" data-cname="{{ b.cname_string }}" onclick="copiarCnameCliente(this)">
                     <span class="top5-rank">{{ loop.index }}</span>
                     <strong>{{ b.alias }}</strong>
-                    <span style="color: #7f8c8d;">({{ b.servidor }})</span>
-                    <span style="color: #27ae60; font-weight: bold;">{{ b.tamanho_str }}</span>
+                    <span class="text-muted">({{ b.servidor }})</span>
+                    <span class="text-success font-bold">{{ b.tamanho_str }}</span>
                 </div>
                 {% endfor %}
             </div>
@@ -1562,15 +1593,15 @@ HTML_LAYOUT = """
 
         <!-- ÚLTIMOS 3 CLIENTES HOSPEDADOS -->
         {% if ultimos_hospedados_global and not modo_orfaos and not modo_historico %}
-        <div class="top5-container" style="border-left: 4px solid #8e44ad;">
-            <div class="top5-title">🆕 Últimos Clientes Hospedados:</div>
+        <div class="top5-container" style="border-left: 4px solid var(--cor-roxo);">
+            <div class="top5-title">🆕 Novos Hospedados:</div>
             <div class="top5-items">
                 {% for b in ultimos_hospedados_global %}
                 <div class="top5-item clicavel-cname" title="{{ b.cname_string }}" data-cname="{{ b.cname_string }}" onclick="copiarCnameCliente(this)">
-                    <span class="top5-rank" style="background:#8e44ad;">{{ loop.index }}</span>
+                    <span class="top5-rank" style="background:var(--cor-roxo);">{{ loop.index }}</span>
                     <strong>{{ b.alias }}</strong>
-                    <span style="color: #7f8c8d;">({{ b.servidor }})</span>
-                    <span style="color: #8e44ad; font-weight: bold;">{{ b.data_criacao }}</span>
+                    <span class="text-muted">({{ b.servidor }})</span>
+                    <span class="text-purple font-bold">{{ b.data_criacao }}</span>
                 </div>
                 {% endfor %}
             </div>
@@ -1581,13 +1612,13 @@ HTML_LAYOUT = """
         <div class="card">
             {% if modo_historico %}
                 <!-- FORMULÁRIO DE FILTROS -->
-                <div style="margin-bottom: 20px; background: #f8f9fa; padding: 15px; border-radius: 8px; border: 1px solid #e0e0e0;">
-                    <form method="GET" action="/historico" style="display: flex; flex-wrap: wrap; gap: 15px; align-items: flex-end;">
+                <div class="card" style="margin-bottom: 20px; background: var(--cor-fundo); padding: 15px; border-radius: 8px; border: 1px solid var(--cor-borda);">
+                    <form method="GET" action="/historico" class="d-flex flex-wrap gap-3 items-end">
                         <div>
-                            <label style="font-weight: bold; font-size: 0.85em; display: block; margin-bottom: 5px;">Servidores:</label>
-                            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                            <label class="form-label fw-bold text-sm">Servidores:</label>
+                            <div class="d-flex gap-2 flex-wrap">
                                 {% for nome in servidores.keys() %}
-                                    <label style="font-size: 0.9em; cursor: pointer;">
+                                    <label class="cursor-pointer" style="font-size: 0.9em;">
                                         <input type="checkbox" name="servidores" value="{{ nome }}" {% if nome in servidores_selecionados %}checked{% endif %}>
                                         {{ nome }}
                                     </label>
@@ -1596,16 +1627,16 @@ HTML_LAYOUT = """
                         </div>
 
                         <div>
-                            <label style="font-weight: bold; font-size: 0.85em; display: block; margin-bottom: 5px;">Período Inicial:</label>
-                            <input type="date" name="data_inicio" value="{{ data_inicio }}" style="padding: 6px; border-radius: 4px; border: 1px solid #ccc;">
+                            <label class="form-label fw-bold text-sm">Período Inicial:</label>
+                            <input type="date" name="data_inicio" value="{{ data_inicio }}" class="form-control" style="padding: 6px; border-radius: 4px; border: 1px solid var(--cor-borda);">
                         </div>
 
                         <div>
-                            <label style="font-weight: bold; font-size: 0.85em; display: block; margin-bottom: 5px;">Período Final:</label>
-                            <input type="date" name="data_fim" value="{{ data_fim }}" style="padding: 6px; border-radius: 4px; border: 1px solid #ccc;">
+                            <label class="form-label fw-bold text-sm">Período Final:</label>
+                            <input type="date" name="data_fim" value="{{ data_fim }}" class="form-control" style="padding: 6px; border-radius: 4px; border: 1px solid var(--cor-borda);">
                         </div>
 
-                        <div style="display: flex; gap: 8px;">
+                        <div class="d-flex gap-2">
                             <button type="submit" class="btn-search">Filtrar</button>
                             <a href="/historico" class="btn-clear">Limpar Filtros</a>
                         </div>
@@ -1615,20 +1646,20 @@ HTML_LAYOUT = """
                 <!-- CARDS DE CRESCIMENTO -->
                 {% if resumo_crescimento %}
                     <p class="text-muted small mb-2">📦 Os valores abaixo incluem bancos ativos, bancos inativados (ainda ocupando disco) e arquivos órfãos — ou seja, o espaço real ocupado no servidor, não só os alias ativos.</p>
-                    <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px;">
+                    <div class="d-flex gap-2 flex-wrap mb-4">
                         {% for item in resumo_crescimento %}
-                            <div style="background: white; border-left: 4px solid {% if item.is_positivo %}#e74c3c{% else %}#27ae60{% endif %}; padding: 10px 15px; border-radius: 6px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); min-width: 200px;">
-                                <div style="font-size: 0.8em; color: #7f8c8d;">Crescimento <strong>{{ item.servidor }}</strong></div>
-                                <div style="font-size: 1.1em; font-weight: bold; color: {% if item.is_positivo %}#c0392b{% else %}#27ae60{% endif %}; margin-top: 2px;">
+                            <div class="card" style="border-left: 4px solid {% if item.is_positivo %}var(--cor-perigo){% else %}var(--cor-sucesso){% endif %}; padding: 10px 15px; border-radius: 6px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); min-width: 200px;">
+                                <div class="text-muted text-xs">Crescimento <strong>{{ item.servidor }}</strong></div>
+                                <div class="font-bold" style="font-size: 1.1em; color: {% if item.is_positivo %}var(--cor-perigo){% else %}var(--cor-sucesso){% endif %}; margin-top: 2px;">
                                     {% if item.is_positivo %}+{% else %}-{% endif %}{{ item.crescimento_str }}
                                 </div>
-                                <div style="font-size: 0.72em; color: #95a5a6; margin-top: 3px;">{{ item.data_inicial }} até {{ item.data_final }}</div>
+                                <div class="text-muted" style="font-size: 0.72em; margin-top: 3px;">{{ item.data_inicial }} até {{ item.data_final }}</div>
                                 {% if item.runway %}
-                                <div style="font-size: 0.78em; margin-top: 6px; padding-top: 6px; border-top: 1px dashed #eee;">
-                                    <span style="color: #7f8c8d;">Projeção (90% disco):</span>
-                                    <strong style="color: {% if 'CRÍTICO' in item.runway.dias_restantes %}#c0392b{% else %}#e67e22{% endif %};">{{ item.runway.dias_restantes }}</strong>
+                                <div style="font-size: 0.78em; margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--cor-borda);">
+                                    <span class="text-muted">Projeção (90% disco):</span>
+                                    <strong style="color: {% if 'CRÍTICO' in item.runway.dias_restantes %}var(--cor-perigo){% else %}var(--cor-aviso){% endif %};">{{ item.runway.dias_restantes }}</strong>
                                     {% if item.runway.data_estimada %}
-                                        <div style="color: #95a5a6;">≈ {{ item.runway.data_estimada }}</div>
+                                        <div class="text-muted" style="font-size: 0.72em;">≈ {{ item.runway.data_estimada }}</div>
                                     {% endif %}
                                 </div>
                                 {% endif %}
@@ -1646,14 +1677,14 @@ HTML_LAYOUT = """
                         Use o período para visualizar maior detalhe.
                     </p>
                     {% endif %}
-                    <div style="background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); margin-bottom: 20px; border: 1px solid #e2e8f0;">
-                        <h4 style="margin-top: 0; color: #2c3e50;">📈 EVOLUÇÃO DE CONSUMO DE DISCO (GB)</h4>
+                    <div class="card" style="padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); margin-bottom: 20px; border: 1px solid var(--cor-borda);">
+                        <h4 style="margin-top: 0; color: var(--cor-texto);">📈 EVOLUÇÃO DE CONSUMO DE DISCO (GB)</h4>
                         <div style="height: 250px; width: 100%;">
                             <canvas id="chart-historico-linha" role="img" aria-label="Evolução do consumo de disco em gigabytes por servidor">Seu navegador não suporta gráficos em canvas.</canvas>
                         </div>
                     </div>
-                    <div style="background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); margin-bottom: 20px; border: 1px solid #e2e8f0;">
-                        <h4 style="margin-top: 0; color: #2c3e50;">📊 COMPOSIÇÃO DO ESPAÇO POR SERVIDOR (GB)</h4>
+                    <div class="card" style="padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); margin-bottom: 20px; border: 1px solid var(--cor-borda);">
+                        <h4 style="margin-top: 0; color: var(--cor-texto);">📊 COMPOSIÇÃO DO ESPAÇO POR SERVIDOR (GB)</h4>
                         <div style="height: 250px; width: 100%;">
                             <canvas id="chart-historico-area" role="img" aria-label="Composição empilhada do espaço ocupado em gigabytes por servidor">Seu navegador não suporta gráficos em canvas.</canvas>
                         </div>
@@ -1670,7 +1701,7 @@ HTML_LAYOUT = """
                     </p>
                 {% endif %}
                 {% if dados_historico|length == 0 %}
-                    <div style="text-align: center; padding: 30px; color: #7f8c8d;">
+                    <div class="text-center text-muted" style="padding: 30px;">
                         Nenhum registro encontrado para os filtros selecionados.
                     </div>
                 {% else %}
@@ -1737,7 +1768,7 @@ HTML_LAYOUT = """
                             <tr>
                                 <td>{{ loop.index }}</td>
                                 <td><span class="badge-servidor">{{ arq.servidor }}</span></td>
-                                <td style="font-family: monospace;">{{ arq.caminho_exibicao }}</td>
+                                <td class="font-monospace">{{ arq.caminho_exibicao }}</td>
                                 <td class="badge-tamanho">{{ arq.tamanho_str }}</td>
                                 <td>{{ arq.data_str }}</td>
                             </tr>
@@ -1748,9 +1779,9 @@ HTML_LAYOUT = """
 
             {% else %}
                 {% if bancos and 'erro' in bancos[0] %}
-                    <div style="color: #c0392b; padding: 15px;"><strong>Erro:</strong> {{ bancos[0].erro }}</div>
+                    <div class="alert alert-danger" style="padding: 15px;"><strong>Erro:</strong> {{ bancos[0].erro }}</div>
                 {% elif bancos|length == 0 %}
-                    <div style="text-align: center; padding: 30px; color: #7f8c8d;">Nenhum registro encontrado.</div>
+                    <div class="text-center text-muted" style="padding: 30px;">Nenhum registro encontrado.</div>
                 {% else %}
                     <table>
                         <thead>
@@ -1768,13 +1799,13 @@ HTML_LAYOUT = """
                                     <a href="?ordem=data_criacao{% if busca_termo %}&busca={{ busca_termo }}{% endif %}{% if filtro_status %}&filtro={{ filtro_status }}{% endif %}">Data Criação ⇳</a>
                                 </th>
                                 <th>
-                                    <a href="?ordem=tamanho{% if busca_termo %}&busca={{ busca_termo }}{% endif %}{% if filtro_status %}&filtro={{ filtro_status }}{% endif %}">Tamanho do banco ⇳</a>
+                                    <a href="?ordem=tamanho{% if busca_termo %}&busca={{ busca_termo }}{% endif %}{% if filtro_status %}&filtro={{ filtro_status }}{% endif %}">Tamanho ⇳</a>
                                 </th>
                                 <th>
                                     <a href="?ordem=data{% if busca_termo %}&busca={{ busca_termo }}{% endif %}{% if filtro_status %}&filtro={{ filtro_status }}{% endif %}">Última Modificação ⇳</a>
                                 </th>
                                 <th>
-                                    <a href="?ordem=cname{% if busca_termo %}&busca={{ busca_termo }}{% endif %}{% if filtro_status %}&filtro={{ filtro_status }}{% endif %}">String Conexão (CNAME) ⇳</a>
+                                    <a href="?ordem=cname{% if busca_termo %}&busca={{ busca_termo }}{% endif %}{% if filtro_status %}&filtro={{ filtro_status }}{% endif %}">Conexão (CNAME) ⇳</a>
                                 </th>
                             </tr>
                         </thead>
@@ -1787,9 +1818,9 @@ HTML_LAYOUT = """
                                 {% endif %}
                                 <td>
                                     {% if banco.eh_inativo %}<span class="badge-inativo-tag">INATIVO</span>{% endif %}
-                                    <strong class="alias-clicavel" onclick="toggleDetalhes(this)" title="Clique para ver os detalhes do cliente">
+                                    <button type="button" class="alias-clicavel" onclick="toggleDetalhes(this)" aria-expanded="false" title="Clique para ver os detalhes do cliente">
                                         {{ banco.alias }} <span class="seta-detalhes">▸</span>
-                                    </strong>
+                                    </button>
                                     {% if not banco.lojas and not banco.eh_inativo %}
                                         <span class="badge bg-warning text-dark" style="font-size:0.7em;" title="Nenhuma loja cadastrada para este alias">📭 sem loja</span>
                                     {% endif %}
@@ -1800,9 +1831,9 @@ HTML_LAYOUT = """
                                     {% elif banco.origem_data == 'conf' %}
                                         <i class="fa-solid fa-file-code icon-origem icon-config" title="Data obtida da Tag no databases.conf"></i>
                                     {% else %}
-                                        <i class="fa-solid fa-file-lines icon-origem" style="color:#bdc3c7;" title="Origem não identificada"></i>
+                                        <i class="fa-solid fa-file-lines icon-origem icon-unknown" title="Origem não identificada"></i>
                                     {% endif %}
-                                    <span style="font-weight: 500; color: #34495e;">{{ banco.data_criacao }}</span>
+                                    <span class="fw-semibold" style="color: #34495e;">{{ banco.data_criacao }}</span>
                                 </td>
                                 <td class="badge-tamanho">{{ banco.tamanho_str }}</td>
                                 <td>
@@ -1816,15 +1847,15 @@ HTML_LAYOUT = """
                                 </td>
                                 <td>
                                     {% if banco.arquivo_existe and not banco.eh_inativo %}
-                                        <div class="cname-cell" data-assinatura="{{ assinatura_cname(banco.cname_string) }}" data-alias="{{ banco.alias }}">
-                                            <span class="cname-status" title="Testando conectividade...">⏳</span>
+                                        <div class="cname-cell" data-host="{{ banco.cname_string }}" data-assinatura="{{ assinatura_cname(banco.cname_string) }}" data-alias="{{ banco.alias }}">
+                                            <span class="cname-status testando" role="status" aria-label="Testando status do CNAME" title="Testando conectividade...">⏳</span>
                                             <span class="cname-texto">{{ banco.cname_string }}</span>
                                             <button class="btn-copy" data-cname="{{ banco.cname_string }}" onclick="copiarCnameCliente(this)" title="{{ banco.cname_string }}{% if banco.cname_custom %} (editado manualmente){% endif %} — clique para copiar">
                                                 📋 Copiar
                                             </button>
                                             {% if tem_permissao('perm_servidores') %}
-                                                <button class="btn-copy" style="color:#b45309;" onclick="editarCname(this)" title="Editar string de conexão">
-                                                    ✏️
+                                                <button class="btn-icon btn-icon-warning" onclick="editarCname(this)" title="Editar string de conexão" aria-label="Editar string de conexão">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
                                                 </button>
                                             {% endif %}
                                         </div>
@@ -1833,7 +1864,7 @@ HTML_LAYOUT = """
                                     {% endif %}
                                 </td>
                             </tr>
-                            <tr class="linha-detalhes" style="display:none;">
+                            <tr class="linha-detalhes d-none">
                                 <td colspan="{{ 7 if (busca_termo or modo_todos or modo_inativos) else 6 }}">
                                     <div class="painel-lojas" data-alias="{{ banco.alias }}">
                                         {% if banco.lojas %}
@@ -1855,8 +1886,8 @@ HTML_LAYOUT = """
                                                     <td class="valor-loja" data-campo="cli_situacao">{{ loja.cli_situacao or '-' }}</td>
                                                     {% if tem_permissao('perm_servidores') %}
                                                     <td class="acoes-loja">
-                                                        <button class="btn-copy" style="background:#fef5e7;color:#b9770e;" onclick="editarLoja(this)">✏️</button>
-                                                        <button class="btn-copy" style="background:#fdedec;color:#c0392b;" onclick="excluirLoja(this)">🗑️</button>
+                                                        <button class="btn-icon btn-icon-warning" onclick="editarLoja(this)" aria-label="Editar loja"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></button>
+                                                        <button class="btn-icon btn-icon-danger" onclick="excluirLoja(this)" aria-label="Excluir loja"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg></button>
                                                     </td>
                                                     {% endif %}
                                                 </tr>
@@ -1867,7 +1898,7 @@ HTML_LAYOUT = """
                                             <p class="sem-lojas">Nenhuma loja cadastrada para este alias ainda.</p>
                                         {% endif %}
                                         {% if tem_permissao('perm_servidores') %}
-                                            <button class="btn-copy" style="background:#e8f8f0;color:#1e8449;margin-top:8px;" onclick="adicionarLoja(this, this.closest('.painel-lojas').dataset.alias)">
+                                            <button class="btn btn-success btn-sm mt-2" onclick="adicionarLoja(this, this.closest('.painel-lojas').dataset.alias)">
                                                 ➕ Adicionar Loja
                                             </button>
                                         {% endif %}
@@ -1888,8 +1919,9 @@ HTML_LAYOUT = """
             const linha = elemento.closest('tr').nextElementSibling;
             const seta = elemento.querySelector('.seta-detalhes');
             if (!linha) return;
-            const abrindo = linha.style.display === 'none';
-            linha.style.display = abrindo ? '' : 'none';
+            const abrindo = linha.classList.contains('d-none');
+            linha.classList.toggle('d-none', !abrindo);
+            elemento.setAttribute('aria-expanded', abrindo ? 'true' : 'false');
             if (seta) seta.textContent = abrindo ? '▾' : '▸';
         }
 
@@ -2060,33 +2092,126 @@ HTML_LAYOUT = """
             input.focus();
         }
 
-        // --- Teste de conectividade do CNAME (roda ao carregar a página / clicar em Atualizar Dados) ---
-        function testarCnames() {
-            document.querySelectorAll('.cname-cell').forEach(celula => {
-                const span = celula.querySelector('.cname-texto');
+        // --- Teste de conectividade de todos os CNAMEs em lotes controlados ---
+        async function testarCnames() {
+            const cells = Array.from(document.querySelectorAll('.cname-cell'));
+            if (cells.length === 0) return;
+
+            const MAX_CONCURRENT = 100;
+            const REQUEST_TIMEOUT = 12000;
+
+            function atualizarStatus(statusEl, estado, titulo) {
+                statusEl.classList.remove('ativo', 'inativo', 'testando', 'indefinido');
+                statusEl.classList.add(estado);
+
+                if (estado === 'ativo') {
+                    statusEl.textContent = '🟢';
+                    statusEl.setAttribute('aria-label', 'CNAME ativo');
+                } else if (estado === 'inativo') {
+                    statusEl.textContent = '🔴';
+                    statusEl.setAttribute('aria-label', 'CNAME inativo');
+                } else {
+                    statusEl.textContent = '⚪';
+                    statusEl.setAttribute('aria-label', 'Não foi possível testar o CNAME');
+                }
+                statusEl.title = titulo;
+            }
+
+            async function testarUm(celula, tentativa = 0) {
                 const statusEl = celula.querySelector('.cname-status');
-                if (!span || !statusEl) return;
-                const host = span.textContent;
+                const host = (celula.dataset.host || celula.querySelector('.cname-texto')?.textContent || '').trim();
+                const assinatura = celula.dataset.assinatura || '';
+                if (!statusEl) return;
 
-                csrfFetch('/api/cname/testar?' + new URLSearchParams({host: host.trim(), assinatura: celula.dataset.assinatura}))
-                    .then(r => r.json())
-                    .then(data => {
-                        if (data.ativo) {
-                            statusEl.textContent = '🟢';
-                            statusEl.title = 'CNAME ativo (DNS resolve corretamente)';
-                        } else {
-                            statusEl.textContent = '🔴';
-                            statusEl.title = 'CNAME inativo (não foi possível resolver)';
-                        }
-                    })
-                    .catch(() => {
-                        statusEl.textContent = '⚪';
-                        statusEl.title = 'Não foi possível testar agora';
+                if (!host || !assinatura) {
+                    atualizarStatus(statusEl, 'indefinido', 'Dados incompletos para testar o CNAME');
+                    return;
+                }
+
+                statusEl.classList.remove('ativo', 'inativo', 'indefinido');
+                statusEl.classList.add('testando');
+                statusEl.textContent = '⏳';
+                statusEl.setAttribute('aria-label', 'Testando status do CNAME');
+                statusEl.title = 'Testando conectividade...';
+
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+                try {
+                    const params = new URLSearchParams({host, assinatura});
+                    const response = await csrfFetch('/api/cname/testar?' + params, {signal: controller.signal});
+                    const data = await response.json().catch(() => ({}));
+
+                    if (response.status === 429) {
+                        const esperaInformada = Number(data.retry_after || data.cooldown || 2);
+                        const espera = Math.min(60, Math.max(1, Number.isFinite(esperaInformada) ? esperaInformada : 2));
+                        clearTimeout(timeout);
+                        statusEl.classList.remove('ativo', 'inativo', 'indefinido');
+                        statusEl.classList.add('testando');
+                        statusEl.textContent = '⏳';
+                        statusEl.setAttribute('aria-label', 'CNAME aguardando nova tentativa');
+                        statusEl.title = `Limite temporário. Nova tentativa em ${espera}s.`;
+                        const dispersao = Math.min(tentativa * 250, 2000) + Math.floor(Math.random() * 300);
+                        await new Promise(resolve => setTimeout(resolve, espera * 1000 + dispersao));
+                        return testarUm(celula, tentativa + 1);
+                    }
+
+                    if (!response.ok) {
+                        atualizarStatus(statusEl, 'indefinido', data.erro || `Falha ao testar (HTTP ${response.status})`);
+                        return;
+                    }
+
+                    if (data.ativo) {
+                        atualizarStatus(statusEl, 'ativo', data.cached ? 'CNAME ativo (cache)' : 'CNAME ativo: DNS resolvido corretamente');
+                    } else {
+                        atualizarStatus(statusEl, 'inativo', data.erro || 'CNAME inativo: não foi possível resolver o DNS');
+                    }
+                } catch (erro) {
+                    const mensagem = erro.name === 'AbortError'
+                        ? 'O teste do CNAME excedeu 12 segundos'
+                        : `Erro ao testar o CNAME: ${erro.message}`;
+                    atualizarStatus(statusEl, 'indefinido', mensagem);
+                } finally {
+                    clearTimeout(timeout);
+                }
+            }
+
+            const fila = [];
+            let emAndamento = 0;
+
+            function processarFila() {
+                while (emAndamento < MAX_CONCURRENT && fila.length > 0) {
+                    const celula = fila.shift();
+                    emAndamento += 1;
+                    testarUm(celula).finally(() => {
+                        celula.dataset.cnameTeste = 'concluido';
+                        emAndamento -= 1;
+                        processarFila();
                     });
-            });
-        }
-        document.addEventListener('DOMContentLoaded', testarCnames);
+                }
+            }
 
+            function agendarTeste(celula) {
+                if (celula.dataset.cnameTeste) return;
+                celula.dataset.cnameTeste = 'agendado';
+                fila.push(celula);
+                processarFila();
+            }
+
+            if ('IntersectionObserver' in window) {
+                const observador = new IntersectionObserver(entries => {
+                    entries.forEach(entry => {
+                        if (!entry.isIntersecting) return;
+                        observador.unobserve(entry.target);
+                        agendarTeste(entry.target);
+                    });
+                }, {root: null, rootMargin: '240px 0px', threshold: 0.01});
+                cells.forEach(celula => observador.observe(celula));
+            } else {
+                cells.forEach(agendarTeste);
+            }
+        }
+
+        // --- Copiar CNAME para clipboard ---
         function copiarCnameCliente(elemento) {
             const texto = elemento.getAttribute('data-cname') || '';
             if (!texto) return;
@@ -2148,6 +2273,7 @@ HTML_LAYOUT = """
         }
 
         document.addEventListener("DOMContentLoaded", function() {
+            testarCnames();
             {% if modo_historico and dados_grafico and dados_grafico.labels %}
                 const dadosHistorico = {{ dados_grafico|tojson }};
                 var ctxHistorico = document.getElementById('chart-historico-linha').getContext('2d');
@@ -2223,6 +2349,7 @@ HTML_ADMIN = r"""
 <html lang="pt-br">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Painel de Gestão Admin - Databases.conf</title>
     <!-- Bootstrap 5 CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
@@ -2302,33 +2429,44 @@ HTML_ADMIN = r"""
         .icon-config { color: var(--cor-primaria); }
 
         /* Botões de ação neutralizados para acompanhar a mesma paleta do resto do site */
-        .btn-primary { background-color: var(--cor-primaria) !important; border-color: var(--cor-primaria) !important; }
+        .btn-primary { background-color: var(--cor-primaria) !important; border-color: var(--cor-primaria) !important; color: var(--cor-texto-invertido) !important; }
         .btn-outline-primary { color: var(--cor-primaria) !important; border-color: var(--cor-primaria) !important; }
         .btn-outline-primary:hover { background-color: var(--cor-primaria) !important; color: white !important; }
     </style>
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <script src="{{ url_for('static', filename='csrf.js') }}"></script>
 <script src="{{ url_for('static', filename='admin-destino.js') }}" defer></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
-<script src="{{ url_for('static', filename='ui.js') }}" defer></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='admin-20260925-2') }}">
+<script src="{{ url_for('static', filename='ui.js', v='admin-20260925-2') }}" defer></script>
 </head>
-<body>
+<body class="admin-page">
+    <!-- Skip link para acessibilidade -->
+    <a href="#conteudo-principal" class="skip-link">Pular para o conteúdo principal</a>
+
+    <!-- Overlay para focus trap em modais -->
+    <div class="focus-trap-overlay" aria-hidden="true"></div>
 
     <!-- CÓDIGO CORRIGIDO COM O BOTÃO DE PERFIL -->
-    <div class="header">
+    <div class="header admin-header">
         <h2><i class="fa-solid fa-database me-2"></i>Gestão Administrativa de Databases - {{ servidor_atual }}</h2>
-        <div class="d-flex align-items-center gap-2">
+        <div class="admin-header-actions">
             <!-- Nome do usuário logado -->
-            <span style="color: var(--cor-texto-suave);" class="me-1"><i class="fa-solid fa-circle-user me-1"></i>{{ usuario_nome }}{% if session.get('eh_master') %} <span class="badge" style="background:var(--cor-perigo);">Master</span>{% endif %}</span>
+            <span class="text-muted me-1"><i class="fa-solid fa-circle-user me-1"></i>{{ usuario_nome }}{% if session.get('eh_master') %} <span class="badge badge-danger">Master</span>{% endif %}</span>
             <!-- Botão de Gestão de Perfil / Alterar Senha -->
-            <button type="button" onclick="abrirModalPerfil()" class="btn-voltar" style="border:1px solid var(--cor-borda); cursor:pointer;">
+            <button type="button" onclick="abrirModalPerfil()" class="btn btn-warning">
                 <i class="fa-solid fa-user-gear me-1"></i> Perfil
             </button>
-            <a href="/servidor/DB01" class="btn-voltar">Servidores</a>
-            <a href="/horarios" class="btn-voltar">Horários</a>
-            <form action="/admin/logout" method="POST" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit"  class="btn-logout">Sair</button></form>
+            <a href="/servidor/DB01" class="btn btn-primary">Servidores</a>
+            <a href="/horarios" class="btn btn-primary">Horários</a>
+            <button id="theme-toggle" class="theme-toggle" aria-label="Alternar tema" title="Alternar tema claro/escuro">
+                <svg class="moon-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+                <svg class="sun-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+            </button>
+            <form action="/admin/logout" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn btn-danger">Sair</button></form>
         </div>
     </div>
+
+    <div id="conteudo-principal" role="main">
 
     {% if msg_sucesso %}<div class="msg-sucesso">✅ {{ msg_sucesso }}</div>{% endif %}
     {% if msg_erro %}<div class="msg-erro">❌ {{ msg_erro }}</div>{% endif %}
@@ -2374,7 +2512,7 @@ HTML_ADMIN = r"""
             <div class="col-12" id="pastasExistentes" hidden>
                 <label for="pasta_destino" class="form-label fw-bold">Pastas do servidor:</label>
                 <div class="d-flex gap-2 flex-wrap">
-                    <select id="pasta_destino" name="pasta_destino" class="form-select" style="flex:1;min-width:220px" disabled>
+                    <select id="pasta_destino" name="pasta_destino" class="form-select flex-1" style="min-width:220px" disabled>
                         <option value="">Selecione uma pasta</option>
                     </select>
                     <button type="button" id="abrirPasta" class="btn btn-outline-secondary" disabled>Ver subpastas</button>
@@ -2426,11 +2564,12 @@ HTML_ADMIN = r"""
     
     <!-- TABELA DE GESTÃO DE USUÁRIOS (EXIBIDA APENAS PARA O USUÁRIO MASTER) -->
     {% if session.get('eh_master') %}
-    <div class="card shadow-sm mb-4 border-warning">
-        <div class="card-header bg-warning text-dark fw-bold">
+    <div class="card admin-users-card shadow-sm mb-4">
+        <div class="admin-section-header">
             <i class="fa-solid fa-users-gear me-2"></i>Gestão de Usuários e Permissões do Sistema (Master)
         </div>
-        <div class="card-body">
+        <div class="admin-card-body">
+            <div class="table-responsive">
             <table class="table table-hover align-middle">
                 <thead>
                     <tr>
@@ -2486,20 +2625,22 @@ HTML_ADMIN = r"""
                         </td>
                         <td>
                             {% if not u.eh_master %}
+                                <div class="acoes-container admin-user-actions">
                                 <!-- Botão Toggle Ativo/Inativo -->
-                                <form action="/admin/usuarios/toggle/{{ u.id }}" method="POST" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit"  class="btn btn-sm {% if u.ativo %}btn-outline-warning{% else %}btn-outline-success{% endif %}">
+                                <form action="/admin/usuarios/toggle/{{ u.id }}" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit"  class="btn btn-sm {% if u.ativo %}btn-outline-warning{% else %}btn-outline-success{% endif %}">
                                     {% if u.ativo %}Inativar{% else %}Ativar{% endif %}
                                 </button></form>
 
                                 <!-- Botão Reset Senha -->
-                                <form action="/admin/usuarios/reset-senha/{{ u.id }}" method="POST" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit"  class="btn btn-sm btn-outline-primary" onclick="return confirm('Enviar link de redefinição de senha para este e-mail?')">
+                                <form action="/admin/usuarios/reset-senha/{{ u.id }}" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit"  class="btn btn-sm btn-outline-primary" onclick="return confirm('Enviar link de redefinição de senha para este e-mail?')">
                                     <i class="fa-solid fa-key"></i> Reset Senha
                                 </button></form>
 
                                 <!-- Botão Excluir (Abre Modal) -->
-                                <button class="btn btn-sm btn-outline-danger" data-bs-toggle="modal" data-bs-target="#modalExcluir{{ u.id }}">
+                                <button type="button" class="btn btn-sm btn-outline-danger" onclick="openModal('modalExcluir{{ u.id }}')" aria-haspopup="dialog">
                                     <i class="fa-solid fa-trash"></i> Excluir
                                 </button>
+                                </div>
                             {% else %}
                                 <span class="text-muted">Protegido</span>
                             {% endif %}
@@ -2508,32 +2649,31 @@ HTML_ADMIN = r"""
                     {% endfor %}
                 </tbody>
             </table>
+            </div>
 
             <!-- MODAIS DE EXCLUSÃO (POSICIONADOS FORA DA TABELA PARA EVITAR QUEBRAS DE RENDERIZAÇÃO) -->
             {% for u in usuarios_lista %}
                 {% if not u.eh_master %}
-                <div class="modal fade" id="modalExcluir{{ u.id }}" tabindex="-1" aria-hidden="true">
-                    <div class="modal-dialog">
-                        <form action="/admin/usuarios/excluir" method="POST" class="modal-content">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                            <div class="modal-header bg-danger text-white">
-                                <h5 class="modal-title">Excluir Usuário: {{ u.nome|nome_pessoa }}</h5>
-                                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Fechar"></button>
+                <div class="app-modal" id="modalExcluir{{ u.id }}" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="tituloExcluir{{ u.id }}">
+                    <form action="/admin/usuarios/excluir" method="POST" class="modal-content admin-delete-modal">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <div class="modal-header admin-danger-header">
+                            <h5 class="modal-title" id="tituloExcluir{{ u.id }}">Excluir usuário: {{ u.nome|nome_pessoa }}</h5>
+                            <button type="button" class="modal-close" onclick="closeModal('modalExcluir{{ u.id }}')" aria-label="Fechar">&times;</button>
+                        </div>
+                        <div class="modal-body">
+                            <input type="hidden" name="user_id" value="{{ u.id }}">
+                            <p class="text-danger fw-bold mb-3">Esta ação não poderá ser desfeita.</p>
+                            <div class="mb-3">
+                                <label class="form-label">Digite sua senha de master para confirmar:</label>
+                                <input type="password" name="senha_master" class="form-control" required autocomplete="current-password">
                             </div>
-                            <div class="modal-body">
-                                <input type="hidden" name="user_id" value="{{ u.id }}">
-                                <p class="text-danger fw-bold mb-3">Esta ação não poderá ser desfeita!</p>
-                                <div class="mb-3">
-                                    <label class="form-label">Digite sua senha de MASTER para confirmar:</label>
-                                    <input type="password" name="senha_master" class="form-control" required autocomplete="off">
-                                </div>
-                            </div>
-                            <div class="modal-footer">
-                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
-                                <button type="submit" class="btn btn-danger">Confirmar Exclusão</button>
-                            </div>
-                        </form>
-                    </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" onclick="closeModal('modalExcluir{{ u.id }}')">Cancelar</button>
+                            <button type="submit" class="btn btn-solid-danger">Confirmar exclusão</button>
+                        </div>
+                    </form>
                 </div>
                 {% endif %}
             {% endfor %}
@@ -2547,11 +2687,11 @@ HTML_ADMIN = r"""
         <h3 class="mb-3"><i class="fa-solid fa-list me-2"></i>Registros de Databases ({{ servidor_atual }})</h3>
         <div class="tabela-registros-scroll">
         <table class="table table-hover table-striped border align-middle" id="tabelaBancos">
-            <thead class="table-dark" style="position: sticky; top: 0; z-index: 1;">
+            <thead class="table-dark sticky-top" style="z-index: 1;">
                 <tr>
-                    <th style="width: 180px; cursor:pointer;" onclick="ordenarTabelaRegistros(0, 'data')" title="Clique para ordenar">Data Tag / Tipo ⇳</th>
-                    <th style="cursor:pointer;" onclick="ordenarTabelaRegistros(1, 'texto')" title="Clique para ordenar">Alias ⇳</th>
-                    <th style="cursor:pointer;" onclick="ordenarTabelaRegistros(2, 'texto')" title="Clique para ordenar">Caminho ⇳</th>
+                    <th class="cursor-pointer" style="width: 180px;" onclick="ordenarTabelaRegistros(0, 'data')" title="Clique para ordenar">Data Tag / Tipo ⇳</th>
+                    <th class="cursor-pointer" onclick="ordenarTabelaRegistros(1, 'texto')" title="Clique para ordenar">Alias ⇳</th>
+                    <th class="cursor-pointer" onclick="ordenarTabelaRegistros(2, 'texto')" title="Clique para ordenar">Caminho ⇳</th>
                     <th style="width: 220px;">Ação</th>
                 </tr>
             </thead>
@@ -2564,7 +2704,7 @@ HTML_ADMIN = r"""
                         {% elif b.origem_data == 'conf' %}
                             <i class="fa-solid fa-file-code icon-type icon-config" title="Origem: .CONF"></i>
                         {% else %}
-                            <i class="fa-solid fa-file-lines icon-type" style="color:#bdc3c7;" title="Origem não identificada"></i>
+                            <i class="fa-solid fa-file-lines icon-type icon-unknown" title="Origem não identificada"></i>
                         {% endif %}
                         <span class="val-data">{{ b.data_criacao }}</span>
                     </td>
@@ -2580,7 +2720,7 @@ HTML_ADMIN = r"""
                         {% if not b.eh_inativo %}
                             <div class="btn-group-acoes" id="acoes-{{ loop.index }}">
                                 <!-- Botão Editar -->
-                                <button class="btn btn-sm btn-outline-primary me-1" onclick="editarLinha({{ loop.index }})">
+                                <button class="btn btn-sm btn-outline-primary" onclick="editarLinha({{ loop.index }})">
                                     <i class="fa-solid fa-pen-to-square"></i> Editar
                                 </button>
                                 <!-- Botão Inativar -->
@@ -2631,7 +2771,7 @@ HTML_ADMIN = r"""
         </div>
 
         <!-- EDITOR RAW PARA SALVAMENTO DIRETO -->
-        <div class="card-body p-0" id="editorConf" style="display: none;">
+        <div class="card-body p-0 d-none" id="editorConf">
             <form action="/admin/salvar_raw" method="POST" onsubmit="return pedirSenhaEConfirmar(this)">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="servidor" value="{{ servidor_atual }}">
@@ -2649,19 +2789,19 @@ HTML_ADMIN = r"""
     </div>
 
     <!-- Confirmação protegida para ações administrativas sensíveis. -->
-    <div id="modalConfirmacaoSenha" class="modal" role="dialog" aria-modal="true"
-         aria-labelledby="tituloConfirmacaoSenha" style="display:none; background:rgba(15, 23, 42, .55);">
-        <div class="modal-content" style="max-width:420px; margin:10vh auto; padding:24px; border-radius:10px; background:#fff;">
+    <div id="modalConfirmacaoSenha" class="app-modal" role="dialog" aria-modal="true" aria-hidden="true"
+         aria-labelledby="tituloConfirmacaoSenha">
+        <div class="modal-content" style="max-width:420px; margin:10vh auto; padding:24px; border-radius:10px; background:var(--cor-superficie);">
             <form id="formConfirmacaoSenha" onsubmit="confirmarSenhaAcao(event)">
-                <h3 id="tituloConfirmacaoSenha" style="margin-top:0; color:#1e293b;">
+                <h3 id="tituloConfirmacaoSenha" style="margin-top:0; color:var(--cor-texto);">
                     <i class="fa-solid fa-lock me-2"></i>Confirmar ação
                 </h3>
-                <p style="color:#64748b;">Digite sua senha para continuar com esta ação.</p>
+                <p class="text-muted">Digite sua senha para continuar com esta ação.</p>
                 <label for="senhaConfirmacaoAcao" class="form-label fw-bold">Senha:</label>
                 <input type="password" id="senhaConfirmacaoAcao" class="form-control" required
                        autocomplete="current-password">
                 <div id="erroConfirmacaoSenha" class="text-danger small mt-2" role="alert" aria-live="polite"></div>
-                <div class="d-flex justify-content-end gap-2 mt-4">
+                <div class="d-flex justify-end gap-2 mt-4">
                     <button type="button" class="btn btn-secondary" onclick="fecharConfirmacaoSenha()">Cancelar</button>
                     <button type="submit" class="btn btn-success fw-bold">Confirmar</button>
                 </div>
@@ -2680,13 +2820,13 @@ HTML_ADMIN = r"""
         const campoSenha = document.getElementById('senhaConfirmacaoAcao');
         campoSenha.value = '';
         document.getElementById('erroConfirmacaoSenha').textContent = '';
-        modal.style.display = 'block';
+        openModal('modalConfirmacaoSenha');
         requestAnimationFrame(() => campoSenha.focus());
         return false;
     }
 
     function fecharConfirmacaoSenha() {
-        document.getElementById('modalConfirmacaoSenha').style.display = 'none';
+        closeModal('modalConfirmacaoSenha');
         document.getElementById('senhaConfirmacaoAcao').value = '';
         document.getElementById('erroConfirmacaoSenha').textContent = '';
         formularioAguardandoSenha = null;
@@ -2706,7 +2846,7 @@ HTML_ADMIN = r"""
             return;
         }
         campo.value = senha;
-        document.getElementById('modalConfirmacaoSenha').style.display = 'none';
+        closeModal('modalConfirmacaoSenha');
         document.getElementById('senhaConfirmacaoAcao').value = '';
         formularioAguardandoSenha = null;
         HTMLFormElement.prototype.submit.call(form);
@@ -2934,6 +3074,7 @@ HTML_ADMIN = r"""
         alert(`Alias atualizado para "${novoAlias}". Clique em "Salvar Alterações no Arquivo Remoto" abaixo para confirmar a gravação.`);
         
         document.getElementById('visualizadorConf').style.display = 'none';
+        document.getElementById('editorConf').classList.remove('d-none');
         document.getElementById('editorConf').style.display = 'block';
         document.getElementById('btnModo').innerHTML = '<i class="fa-solid fa-eye"></i> Visualizar com Cores';
     }
@@ -2975,14 +3116,17 @@ HTML_ADMIN = r"""
         const visualizador = document.getElementById('visualizadorConf');
         const editor = document.getElementById('editorConf');
         const btn = document.getElementById('btnModo');
+        const editorOculto = editor.classList.contains('d-none') || window.getComputedStyle(editor).display === 'none';
 
-        if (editor.style.display === 'none') {
+        if (editorOculto) {
             visualizador.style.display = 'none';
+            editor.classList.remove('d-none');
             editor.style.display = 'block';
             btn.innerHTML = '<i class="fa-solid fa-eye"></i> Visualizar com Cores';
         } else {
             renderizarVisualizador();
             editor.style.display = 'none';
+            editor.classList.add('d-none');
             visualizador.style.display = 'block';
             btn.innerHTML = '<i class="fa-solid fa-pen"></i> Abrir Modo Edição Direta';
         }
@@ -3011,45 +3155,44 @@ HTML_ADMIN = r"""
     </script>
 
     <!-- Modal Perfil Completo -->
-    <div id="modalPerfil" class="modal" style="display:none;">
-        <div class="modal-content" style="max-width: 450px; margin: 5% auto; padding: 25px; border-radius: 8px; background: #fff;">
-            <h3 style="margin-top:0; color: #333;"><i class="fa-solid fa-id-card me-2"></i>Meu Perfil</h3>
+    <div id="modalPerfil" class="app-modal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="tituloModalPerfil">
+        <div class="modal-content" style="max-width: 450px; margin: 5% auto; padding: 25px; border-radius: 8px; background: var(--cor-superficie);">
+            <h3 id="tituloModalPerfil" style="margin-top:0; color: var(--cor-texto);"><i class="fa-solid fa-id-card me-2"></i>Meu Perfil</h3>
             
             <form id="formPerfil" onsubmit="salvarPerfil(event)">
-                <div style="margin-bottom: 12px;">
-                    <label style="font-weight:bold; display:block; margin-bottom:4px;">Nome:</label>
+                <div class="form-group" style="margin-bottom: 12px;">
+                    <label class="form-label fw-bold">Nome:</label>
                     <input type="text" id="perfilNome" class="form-control" value="{{ usuario_nome }}" required>
                 </div>
                 
-                <div style="margin-bottom: 15px;">
-                    <label style="font-weight:bold; display:block; margin-bottom:4px;">E-mail:</label>
-                    <!-- Adicionado readonly e disabled -->
-                    <input type="email" id="perfilEmail" class="form-control" value="{{ usuario_email }}" readonly disabled style="background-color: #e9ecef;">
+                <div class="form-group" style="margin-bottom: 15px;">
+                    <label class="form-label fw-bold">E-mail:</label>
+                    <input type="email" id="perfilEmail" class="form-control" value="{{ usuario_email }}" readonly disabled style="background-color: var(--cor-fundo);">
                 </div>
 
-                <hr style="margin: 15px 0; border: 0; border-top: 1px solid #ccc;">
+                <hr class="divider" style="margin: 15px 0;">
                 {% if veio_de_reset %}
-                    <p style="font-size: 13px; color: #198754; margin-bottom: 10px;">✅ Você acessou por um link de redefinição de senha — pode definir a nova senha sem informar a atual.</p>
+                    <p class="text-success" style="font-size: 13px; margin-bottom: 10px;">✅ Você acessou por um link de redefinição de senha — pode definir a nova senha sem informar a atual.</p>
                 {% else %}
-                    <p style="font-size: 13px; color: #666; margin-bottom: 10px;">Preencha os campos abaixo apenas se desejar alterar a senha:</p>
+                    <p class="text-muted" style="font-size: 13px; margin-bottom: 10px;">Preencha os campos abaixo apenas se desejar alterar a senha:</p>
                 {% endif %}
 
-                <div id="grupoSenhaAtual" style="margin-bottom: 12px; {% if veio_de_reset %}display:none;{% endif %}">
-                    <label style="font-weight:bold; display:block; margin-bottom:4px;">Senha Atual:</label>
+                <div id="grupoSenhaAtual" class="form-group" style="margin-bottom: 12px; {% if veio_de_reset %}display:none;{% endif %}">
+                    <label class="form-label fw-bold">Senha Atual:</label>
                     <input type="password" id="perfilSenhaAtual" class="form-control" placeholder="Informe para autorizar mudanças">
                 </div>
 
-                <div style="margin-bottom: 12px;">
-                    <label style="font-weight:bold; display:block; margin-bottom:4px;">Nova Senha:</label>
+                <div class="form-group" style="margin-bottom: 12px;">
+                    <label class="form-label fw-bold">Nova Senha:</label>
                     <input type="password" id="perfilNovaSenha" class="form-control">
                 </div>
 
-                <div style="margin-bottom: 20px;">
-                    <label style="font-weight:bold; display:block; margin-bottom:4px;">Confirmar Nova Senha:</label>
+                <div class="form-group" style="margin-bottom: 20px;">
+                    <label class="form-label fw-bold">Confirmar Nova Senha:</label>
                     <input type="password" id="perfilConfirmaSenha" class="form-control">
                 </div>
 
-                <div style="text-align: right; gap: 8px; display: flex; justify-content: flex-end;">
+                <div class="d-flex justify-end gap-2">
                     <button type="button" class="btn btn-secondary" onclick="fecharModalPerfil()">Cancelar</button>
                     <button type="submit" class="btn btn-success fw-bold">Salvar Alterações</button>
                 </div>
@@ -3059,10 +3202,10 @@ HTML_ADMIN = r"""
 
     <script>
     function abrirModalPerfil() {
-        document.getElementById('modalPerfil').style.display = 'block';
+        openModal('modalPerfil');
     }
     function fecharModalPerfil() {
-        document.getElementById('modalPerfil').style.display = 'none';
+        closeModal('modalPerfil');
     }
 
     // --- Salva as permissões (checkboxes) de um usuário, sem recarregar a página ---
@@ -3156,40 +3299,45 @@ HTML_REDEFINIR = r"""
 <head>
     <meta charset="UTF-8">
     <title>Redefinir Senha</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
-<meta name="csrf-token" content="{{ csrf_token() }}">
-<script src="{{ url_for('static', filename='csrf.js') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
-<script src="{{ url_for('static', filename='ui.js') }}" defer></script>
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <script src="{{ url_for('static', filename='csrf.js') }}"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
+    <script src="{{ url_for('static', filename='ui.js') }}" defer></script>
 </head>
-<body class="bg-light d-flex align-items-center justify-content-center" style="height: 100vh;">
-    <div class="card p-4 shadow-sm" style="width: 100%; max-width: 400px;">
-        <h4 class="mb-3 text-center">Redefinir Senha</h4>
-        <form id="formRedefinir" onsubmit="executarRedefinicao(event)">
-            <!-- Captura o token da URL -->
-            <input type="hidden" id="tokenUrl">
+<body>
+    <!-- Skip link para acessibilidade -->
+    <a href="#conteudo-principal" class="skip-link">Pular para o conteúdo principal</a>
 
-            <div class="mb-3">
-                <label class="form-label font-weight-bold">Token de Validação:</label>
-                <input type="text" id="tokenExibicao" class="form-control" readonly disabled>
-            </div>
+    <!-- Overlay para focus trap em modais -->
+    <div class="focus-trap-overlay" aria-hidden="true"></div>
 
-            <div class="mb-3">
-                <label class="form-label">Nova Senha:</label>
-                <input type="password" id="resetNovaSenha" class="form-control" required>
-            </div>
+    <main id="conteudo-principal" class="d-flex justify-center items-center" style="min-height: 100vh; padding: var(--space-4);">
+        <div class="card" style="width: 100%; max-width: 400px; padding: var(--space-6);">
+            <h4 class="text-center" style="margin: 0 0 var(--space-5);">Redefinir Senha</h4>
+            <form id="formRedefinir" onsubmit="executarRedefinicao(event)">
+                <input type="hidden" id="tokenUrl">
 
-            <div class="mb-3">
-                <label class="form-label">Confirmar Nova Senha:</label>
-                <input type="password" id="resetConfirmaSenha" class="form-control" required>
-            </div>
+                <div class="form-group" style="margin-bottom: var(--space-4);">
+                    <label class="form-label font-weight-bold">Token de Validação:</label>
+                    <input type="text" id="tokenExibicao" class="form-control" readonly disabled>
+                </div>
 
-            <button type="submit" class="btn btn-primary w-100 fw-bold">Alterar Senha</button>
-        </form>
-    </div>
+                <div class="form-group" style="margin-bottom: var(--space-4);">
+                    <label class="form-label">Nova Senha:</label>
+                    <input type="password" id="resetNovaSenha" class="form-control" required>
+                </div>
+
+                <div class="form-group" style="margin-bottom: var(--space-4);">
+                    <label class="form-label">Confirmar Nova Senha:</label>
+                    <input type="password" id="resetConfirmaSenha" class="form-control" required>
+                </div>
+
+                <button type="submit" class="btn btn-solid btn-full">Alterar Senha</button>
+            </form>
+        </div>
+    </main>
 
     <script>
-        // Extrai o token dos parâmetros da URL ao carregar a página
         const params = new URLSearchParams(window.location.search);
         const token = params.get('token') || '';
         
@@ -3239,60 +3387,52 @@ HTML_LOGIN = r"""
 <head>
     <meta charset="UTF-8">
     <title>Acesso Admin</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        :root {
-            --cor-primaria: #2563eb; --cor-primaria-escura: #1d4ed8;
-            --cor-texto: #1e293b; --cor-texto-suave: #64748b;
-            --cor-fundo: #f8fafc; --cor-superficie: #ffffff; --cor-borda: #e2e8f0;
-            --cor-sucesso: #16a34a; --cor-aviso: #d97706; --cor-perigo: #dc2626; --raio: 8px;
-        }
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--cor-fundo); display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-        .card-login { background: var(--cor-superficie); border: 1px solid var(--cor-borda); padding: 35px 30px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.06); width: 380px; }
-        .btn-success { background-color: var(--cor-primaria) !important; border-color: var(--cor-primaria) !important; }
-        .btn-success:hover { background-color: var(--cor-primaria-escura) !important; border-color: var(--cor-primaria-escura) !important; }
-        .btn-outline-secondary { color: var(--cor-texto-suave) !important; border-color: var(--cor-borda) !important; }
-        .btn-outline-secondary:hover { background-color: #f1f5f9 !important; color: var(--cor-texto) !important; }
-    </style>
-<meta name="csrf-token" content="{{ csrf_token() }}">
-<script src="{{ url_for('static', filename='csrf.js') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
-<script src="{{ url_for('static', filename='ui.js') }}" defer></script>
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <script src="{{ url_for('static', filename='csrf.js') }}"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
+    <script src="{{ url_for('static', filename='ui.js') }}" defer></script>
 </head>
 <body>
-    <div class="card-login">
-        <h3 class="text-center mb-1">🔐 Acesso Admin</h3>
-        <p class="text-center text-muted small mb-4">Gestão dos arquivos databases.conf</p>
-        
-        {% if erro %}
-            <div class="alert alert-danger p-2 small mb-3 text-center">{{ erro }}</div>
-        {% endif %}
-        {% if sucesso %}
-            <div class="alert alert-success p-2 small mb-3 text-center">{{ sucesso }}</div>
-        {% endif %}
+    <!-- Skip link para acessibilidade -->
+    <a href="#conteudo-principal" class="skip-link">Pular para o conteúdo principal</a>
 
-        <form method="POST" action="/admin/login">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="next" value="{{ next or '' }}">
-            <div class="mb-3">
-                <label class="form-label fw-bold">E-mail:</label>
-                <input type="email" name="email" class="form-control" required>
-            </div>
-            <div class="mb-3">
-                <label class="form-label">Senha:</label>
-                <input type="password" name="senha" class="form-control" required>
-                <!-- Link "Esqueci a senha" inserido abaixo da senha -->
-                <div class="text-end mt-1">
-                    <a href="/admin/esqueci-senha" style="font-size: 13px; color: var(--cor-primaria); text-decoration: none;">Esqueci a senha</a>
-                </div>
-            </div>
+    <!-- Overlay para focus trap em modais -->
+    <div class="focus-trap-overlay" aria-hidden="true"></div>
 
-            <button type="submit" class="btn btn-success w-100 fw-bold mt-2">Entrar</button>
-            {% if allow_register %}
-            <a href="/admin/register" class="btn btn-outline-secondary w-100 mt-2">Criar Nova Conta</a>
+    <main id="conteudo-principal" class="d-flex justify-center items-center" style="min-height: 100vh; padding: var(--space-4);">
+        <div class="card" style="width: 100%; max-width: 380px; padding: var(--space-6);">
+            <h3 class="text-center" style="margin: 0 0 var(--space-1);">🔐 Acesso Admin</h3>
+            <p class="text-center text-muted" style="font-size: var(--font-size-sm); margin: 0 0 var(--space-5);">Gestão dos arquivos databases.conf</p>
+            
+            {% if erro %}
+                <div class="alert alert-danger text-center" style="margin-bottom: var(--space-4);">{{ erro }}</div>
             {% endif %}
-        </form>
-    </div>
+            {% if sucesso %}
+                <div class="alert alert-success text-center" style="margin-bottom: var(--space-4);">{{ sucesso }}</div>
+            {% endif %}
+
+            <form method="POST" action="/admin/login">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="next" value="{{ next or '' }}">
+                <div class="form-group" style="margin-bottom: var(--space-4);">
+                    <label class="form-label fw-bold">E-mail:</label>
+                    <input type="email" name="email" class="form-control" required>
+                </div>
+                <div class="form-group" style="margin-bottom: var(--space-4);">
+                    <label class="form-label">Senha:</label>
+                    <input type="password" name="senha" class="form-control" required>
+                    <div class="text-right" style="margin-top: var(--space-1);">
+                        <a href="/admin/esqueci-senha" class="text-primary" style="font-size: var(--font-size-xs); text-decoration: none;">Esqueci a senha</a>
+                    </div>
+                </div>
+
+                <button type="submit" class="btn btn-solid btn-full" style="margin-top: var(--space-2);">Entrar</button>
+                {% if allow_register %}
+                <a href="/admin/register" class="btn btn-primary btn-full" style="margin-top: var(--space-2);">Criar Nova Conta</a>
+                {% endif %}
+            </form>
+        </div>
+    </main>
 </body>
 </html>
 """
@@ -3304,42 +3444,37 @@ HTML_ESQUECI_SENHA = r"""
 <head>
     <meta charset="UTF-8">
     <title>Recuperar Senha</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        :root {
-            --cor-primaria: #2563eb; --cor-primaria-escura: #1d4ed8;
-            --cor-texto: #1e293b; --cor-texto-suave: #64748b;
-            --cor-fundo: #f8fafc; --cor-superficie: #ffffff; --cor-borda: #e2e8f0;
-            --cor-sucesso: #16a34a; --cor-aviso: #d97706; --cor-perigo: #dc2626; --raio: 8px;
-        }
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--cor-fundo); display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-        .card-login { background: var(--cor-superficie); border: 1px solid var(--cor-borda); padding: 35px 30px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.06); width: 380px; }
-        .btn-success { background-color: var(--cor-primaria) !important; border-color: var(--cor-primaria) !important; }
-        .btn-success:hover { background-color: var(--cor-primaria-escura) !important; border-color: var(--cor-primaria-escura) !important; }
-    </style>
-<meta name="csrf-token" content="{{ csrf_token() }}">
-<script src="{{ url_for('static', filename='csrf.js') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
-<script src="{{ url_for('static', filename='ui.js') }}" defer></script>
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <script src="{{ url_for('static', filename='csrf.js') }}"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
+    <script src="{{ url_for('static', filename='ui.js') }}" defer></script>
 </head>
 <body>
-    <div class="card-login">
-        <h3 class="text-center mb-1">🔑 Recuperar Senha</h3>
-        <p class="text-center text-muted small mb-4">Informe seu e-mail cadastrado para receber o link de redefinição.</p>
+    <!-- Skip link para acessibilidade -->
+    <a href="#conteudo-principal" class="skip-link">Pular para o conteúdo principal</a>
 
-        {% if erro %}<div class="alert alert-danger p-2 small mb-3 text-center">{{ erro }}</div>{% endif %}
-        {% if sucesso %}<div class="alert alert-success p-2 small mb-3 text-center">{{ sucesso }}</div>{% endif %}
+    <!-- Overlay para focus trap em modais -->
+    <div class="focus-trap-overlay" aria-hidden="true"></div>
 
-        <form method="POST" action="/admin/esqueci-senha">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <div class="mb-3">
-                <label class="form-label fw-bold">E-mail:</label>
-                <input type="email" name="email" class="form-control" required>
-            </div>
-            <button type="submit" class="btn btn-success w-100 fw-bold mt-2">Enviar link de redefinição</button>
-            <a href="/admin/login" class="btn btn-link w-100 text-center mt-2 text-decoration-none text-muted">⬅ Voltar ao Login</a>
-        </form>
-    </div>
+    <main id="conteudo-principal" class="d-flex justify-center items-center" style="min-height: 100vh; padding: var(--space-4);">
+        <div class="card" style="width: 100%; max-width: 380px; padding: var(--space-6);">
+            <h3 class="text-center" style="margin: 0 0 var(--space-1);">🔑 Recuperar Senha</h3>
+            <p class="text-center text-muted" style="font-size: var(--font-size-sm); margin: 0 0 var(--space-5);">Informe seu e-mail cadastrado para receber o link de redefinição.</p>
+
+            {% if erro %}<div class="alert alert-danger text-center" style="margin-bottom: var(--space-4);">{{ erro }}</div>{% endif %}
+            {% if sucesso %}<div class="alert alert-success text-center" style="margin-bottom: var(--space-4);">{{ sucesso }}</div>{% endif %}
+
+            <form method="POST" action="/admin/esqueci-senha">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group" style="margin-bottom: var(--space-4);">
+                    <label class="form-label fw-bold">E-mail:</label>
+                    <input type="email" name="email" class="form-control" required>
+                </div>
+                <button type="submit" class="btn btn-solid btn-full" style="margin-top: var(--space-2);">Enviar link de redefinição</button>
+                <a href="/admin/login" class="btn btn-primary btn-full" style="margin-top: var(--space-2);">⬅ Voltar ao Login</a>
+            </form>
+        </div>
+    </main>
 </body>
 </html>
 """
@@ -3360,7 +3495,7 @@ HTML_REGISTER = r"""
         }
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--cor-fundo); display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
         .card-register { background: var(--cor-superficie); border: 1px solid var(--cor-borda); padding: 35px 30px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.06); width: 380px; }
-        .btn-success { background-color: var(--cor-primaria) !important; border-color: var(--cor-primaria) !important; }
+        .btn-success { background-color: var(--cor-primaria) !important; border-color: var(--cor-primaria) !important; color: var(--cor-texto-invertido) !important; }
         .btn-success:hover { background-color: var(--cor-primaria-escura) !important; border-color: var(--cor-primaria-escura) !important; }
         .btn-outline-secondary { color: var(--cor-texto-suave) !important; border-color: var(--cor-borda) !important; }
         .btn-outline-secondary:hover { background-color: #f1f5f9 !important; color: var(--cor-texto) !important; }
@@ -3371,40 +3506,48 @@ HTML_REGISTER = r"""
 <script src="{{ url_for('static', filename='ui.js') }}" defer></script>
 </head>
 <body>
-    <div class="card-register">
-        {% if pendente %}
-            <h3 class="text-center mb-3">⏳ Cadastro Recebido</h3>
-            <div class="alert alert-warning p-3 small text-center">
-                Sua conta foi criada com sucesso, mas está <strong>aguardando aprovação</strong> do administrador.<br>
-                Você receberá acesso assim que sua conta for ativada.
-            </div>
-            <a href="/admin/login" class="btn btn-outline-secondary w-100 mt-2">⬅ Voltar ao Login</a>
-        {% else %}
-            <h3 class="text-center mb-3">📝 Cadastro de Usuário</h3>
-            {% if erro %}<div class="alert alert-danger p-2 small mb-3">{{ erro }}</div>{% endif %}
-            <form method="POST" action="/admin/register">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <div class="mb-3">
-                    <label class="form-label fw-bold">Nome:</label>
-                    <input type="text" name="nome" class="form-control" required>
+    <!-- Skip link para acessibilidade -->
+    <a href="#conteudo-principal" class="skip-link">Pular para o conteúdo principal</a>
+
+    <!-- Overlay para focus trap em modais -->
+    <div class="focus-trap-overlay" aria-hidden="true"></div>
+
+    <main id="conteudo-principal" class="d-flex justify-center items-center" style="min-height: 100vh; padding: var(--space-4);">
+        <div class="card" style="width: 100%; max-width: 380px; padding: var(--space-6);">
+            {% if pendente %}
+                <h3 class="text-center" style="margin: 0 0 var(--space-3);">⏳ Cadastro Recebido</h3>
+                <div class="alert alert-warning text-center" style="margin-bottom: var(--space-4);">
+                    Sua conta foi criada com sucesso, mas está <strong>aguardando aprovação</strong> do administrador.<br>
+                    Você receberá acesso assim que sua conta for ativada.
                 </div>
-                <div class="mb-3">
-                    <label class="form-label fw-bold">E-mail:</label>
-                    <input type="email" name="email" class="form-control" required>
-                </div>
-                <div class="mb-3">
-                    <label class="form-label fw-bold">Senha:</label>
-                    <input type="password" name="senha" class="form-control" required>
-                </div>
-                <div class="mb-3">
-                    <label class="form-label fw-bold">Confirmar Senha:</label>
-                    <input type="password" name="confirmar_senha" class="form-control" required>
-                </div>
-                <button type="submit" class="btn btn-success w-100 fw-bold">Salvar Cadastro</button>
-                <a href="/admin/login" class="btn btn-link w-100 text-center mt-2 text-decoration-none text-muted">⬅ Voltar ao Login</a>
-            </form>
-        {% endif %}
-    </div>
+                <a href="/admin/login" class="btn btn-primary btn-full">⬅ Voltar ao Login</a>
+            {% else %}
+                <h3 class="text-center" style="margin: 0 0 var(--space-3);">📝 Cadastro de Usuário</h3>
+                {% if erro %}<div class="alert alert-danger" style="margin-bottom: var(--space-3);">{{ erro }}</div>{% endif %}
+                <form method="POST" action="/admin/register">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <div class="form-group" style="margin-bottom: var(--space-4);">
+                        <label class="form-label fw-bold">Nome:</label>
+                        <input type="text" name="nome" class="form-control" required>
+                    </div>
+                    <div class="form-group" style="margin-bottom: var(--space-4);">
+                        <label class="form-label fw-bold">E-mail:</label>
+                        <input type="email" name="email" class="form-control" required>
+                    </div>
+                    <div class="form-group" style="margin-bottom: var(--space-4);">
+                        <label class="form-label fw-bold">Senha:</label>
+                        <input type="password" name="senha" class="form-control" required>
+                    </div>
+                    <div class="form-group" style="margin-bottom: var(--space-4);">
+                        <label class="form-label fw-bold">Confirmar Senha:</label>
+                        <input type="password" name="confirmar_senha" class="form-control" required>
+                    </div>
+                    <button type="submit" class="btn btn-solid btn-full">Salvar Cadastro</button>
+                    <a href="/admin/login" class="btn btn-primary btn-full" style="margin-top: var(--space-2);">⬅ Voltar ao Login</a>
+                </form>
+            {% endif %}
+        </div>
+    </main>
 </body>
 </html>
 """
@@ -3418,6 +3561,7 @@ HTML_REGISTER = r"""
 def admin_login():
     if request.method == 'POST':
         if login_bloqueado():
+            registrar_login_falha(request.form.get('email', ''), 'rate_limit')
             return render_template_string(HTML_LOGIN, erro="Muitas tentativas. Aguarde alguns minutos e tente de novo.")
 
         email = request.form.get('email', '').strip().lower()
@@ -3435,6 +3579,7 @@ def admin_login():
 
         if not user:
             registrar_falha_login()
+            registrar_login_falha(email, 'usuario_inexistente')
             return render_template_string(HTML_LOGIN, erro="Credenciais inválidas.")
 
         user_id, nome, senha_hash, ativo, eh_master = user
@@ -3442,9 +3587,11 @@ def admin_login():
 
         if not senha_valida:
             registrar_falha_login()
+            registrar_login_falha(email, 'senha_invalida')
             return render_template_string(HTML_LOGIN, erro="Credenciais inválidas.")
 
         if not ativo and not eh_master:
+            registrar_login_falha(email, 'conta_inativa')
             return render_template_string(HTML_LOGIN, erro="Sua conta ainda não foi ativada.")
 
         limpar_falhas_login()
@@ -3454,6 +3601,12 @@ def admin_login():
         session['user_nome'] = nome_para_assinatura(nome)
         session['eh_master'] = eh_master
         session['logged_in'] = True
+        
+        # Regenera ID da sessão para prevenir session fixation (Opção 3)
+        regenerar_session_id()
+        
+        # Registra login bem-sucedido na auditoria (Opção 3)
+        registrar_login_sucesso(user_id, nome, eh_master)
 
         destino = destino_redirect_seguro(request.args.get('next') or request.form.get('next'))
         return redirect(destino)
@@ -3618,7 +3771,11 @@ def admin_register():
 
 @bancos_bp.route('/admin/logout', methods=['POST'])
 def admin_logout():
+    user_id = session.get('user_id')
+    user_nome = session.get('user_nome')
     session.clear()
+    if user_id and user_nome:
+        registrar_logout(user_id, user_nome)
     return redirect('/')
 
 
@@ -3884,6 +4041,15 @@ def admin_adicionar():
     conteudo_final = conteudo_atual.rstrip() + comentario + f"\n{alias} = {caminho}\n"
     if not salvar_databases_conf_remoto(srv, conteudo_final, leitura.get('hash')):
         return voltar(erro='O destino foi preparado, mas o alias não pôde ser salvo. Se enviou um banco, ele permanece no destino; tente cadastrar o alias novamente sem reenviar o arquivo.')
+    
+    # Auditoria: adição de alias (Opção 3)
+    registrar_acao_admin('adicionar_alias', {
+        'servidor': srv,
+        'alias': alias,
+        'envolvidos': envolvidos,
+        'tem_arquivo': tem_arquivo,
+    })
+    
     return voltar(sucesso=f'Alias "{alias}" cadastrado com sucesso!')
 
 @bancos_bp.route('/admin/usuarios/reset-senha/<int:user_id>', methods=['POST'])
@@ -3961,6 +4127,7 @@ def redefinir_senha_token(token):
 
     if not usuario or not token_ainda_valido(usuario['token_expira'] if 'token_expira' in usuario.keys() else None):
         conn.close()
+        registrar_login_falha('', 'token_invalido_expirado')
         return render_template_string(HTML_LOGIN, erro="Link de redefinição inválido ou expirado!")
 
     # Força o login do usuário na sessão ativa
@@ -3971,6 +4138,12 @@ def redefinir_senha_token(token):
     # Libera a próxima alteração de senha no modal de perfil sem exigir a senha atual
     # (o próprio link de e-mail, de uso único, já comprova a identidade do usuário)
     session['reset_senha_pendente'] = True
+    
+    # Regenera ID da sessão para prevenir session fixation (Opção 3)
+    regenerar_session_id()
+    
+    # Registra login via token de redefinição na auditoria (Opção 3)
+    registrar_login_sucesso(usuario['id'], usuario['nome'], usuario['eh_master'])
 
     # Consome/Invalida o token de uso único por segurança
     conn.execute("UPDATE usuarios SET token_ativacao = NULL, token_expira = NULL WHERE id = ?", (usuario['id'],))
@@ -4078,6 +4251,12 @@ def admin_inativar():
             'bancos.admin_painel', servidor=srv,
             erro='Não foi possível salvar databases.conf. Nenhuma confirmação de sucesso foi emitida.'
         ))
+    
+    # Auditoria: inativação de alias (Opção 3)
+    registrar_acao_admin('inativar_alias', {
+        'servidor': srv,
+        'alias': alias_target,
+    })
 
     return redirect(url_for(
         'bancos.admin_painel', servidor=srv,
@@ -4100,9 +4279,20 @@ def excluir_usuario():
         conn.close()
         return redirect('/admin?erro=Senha do Master incorreta! Exclusão cancelada.')
 
+    # Busca info do usuário a ser excluído para auditoria
+    usuario_excluir = conn.execute("SELECT nome, email FROM usuarios WHERE id = ?", (user_id,)).fetchone()
+    
     conn.execute("DELETE FROM usuarios WHERE id = ? AND eh_master = 0", (user_id,))
     conn.commit()
     conn.close()
+    
+    # Auditoria: exclusão de usuário (Opção 3)
+    if usuario_excluir:
+        registrar_acao_admin('excluir_usuario', {
+            'usuario_excluido_id': user_id,
+            'usuario_excluido_nome': usuario_excluir['nome'],
+            'usuario_excluido_email': usuario_excluir['email'],
+        })
 
     return redirect('/admin?sucesso=Usuário excluído com sucesso!')
 
@@ -4144,6 +4334,11 @@ def admin_salvar_raw():
             'bancos.admin_painel', servidor=srv,
             erro='Conflito ou falha ao salvar databases.conf. O arquivo anterior foi preservado; recarregue a página e tente novamente.'
         ))
+    
+    # Auditoria: edição direta de databases.conf (Opção 3)
+    registrar_acao_admin('salvar_raw_databases_conf', {
+        'servidor': srv,
+    })
 
     return redirect(url_for(
         'bancos.admin_painel', servidor=srv,
@@ -4199,9 +4394,22 @@ def excluir_cliente_loja():
         return jsonify({"sucesso": False, "mensagem": "ID não informado."}), 400
 
     conn = get_db_connection()
+    # Busca info da loja para auditoria
+    loja = conn.execute("SELECT alias, loj_codigo, loj_fantasia FROM clientes_lojas WHERE id = ?", (loja_id,)).fetchone()
+    
     conn.execute("DELETE FROM clientes_lojas WHERE id = ?", (loja_id,))
     conn.commit()
     conn.close()
+    
+    # Auditoria: exclusão de cliente/loja (Opção 3)
+    if loja:
+        registrar_acao_admin('excluir_cliente_loja', {
+            'loja_id': loja_id,
+            'alias': loja['alias'],
+            'loj_codigo': loja['loj_codigo'],
+            'loj_fantasia': loja['loj_fantasia'],
+        })
+
     return jsonify({"sucesso": True})
 
 
@@ -4226,10 +4434,10 @@ HTML_IMPORTAR_LOJAS = r"""
         table.tabela-resumo { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 0.9em; }
         table.tabela-resumo th, table.tabela-resumo td { border: 1px solid var(--cor-borda); padding: 6px 10px; text-align: left; }
         table.tabela-resumo th { background: #f8fafc; }
-        .btn-success { background-color: var(--cor-primaria) !important; border-color: var(--cor-primaria) !important; }
+        .btn-success { background-color: var(--cor-primaria) !important; border-color: var(--cor-primaria) !important; color: var(--cor-texto-invertido) !important; }
         .btn-success:hover { background-color: var(--cor-primaria-escura) !important; border-color: var(--cor-primaria-escura) !important; }
         .btn-outline-secondary { color: var(--cor-texto-suave) !important; border-color: var(--cor-borda) !important; }
-        .btn-warning { background-color: var(--cor-aviso) !important; border-color: var(--cor-aviso) !important; color: white !important; }
+        .btn-warning { background-color: var(--cor-aviso) !important; border-color: var(--cor-aviso) !important; color: var(--cor-texto-invertido) !important; }
     </style>
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <script src="{{ url_for('static', filename='csrf.js') }}"></script>
@@ -4556,6 +4764,35 @@ def assinatura_cname(host):
 
 bancos_bp.add_app_template_global(assinatura_cname, name='assinatura_cname')
 
+# Cache para resultados de CNAME (evita sobrecarga DNS)
+_cname_cache = {}
+_cname_cache_lock = threading.Lock()
+CNAME_CACHE_TTL = 300  # 5 minutos
+CNAME_RATE_LIMIT_POR_SEGUNDO = 100
+CNAME_RATE_LIMIT_COOLDOWN = 10
+_cname_rate_lock = threading.Lock()
+_cname_rate_limit = {}
+_cname_cooldown = {}
+
+
+def _get_cached_cname(host):
+    """Obtém resultado do cache se válido."""
+    agora = time.time()
+    with _cname_cache_lock:
+        if host in _cname_cache:
+            resultado, timestamp = _cname_cache[host]
+            if agora - timestamp < CNAME_CACHE_TTL:
+                return resultado
+            else:
+                del _cname_cache[host]
+    return None
+
+
+def _set_cached_cname(host, resultado):
+    """Armazena resultado no cache."""
+    with _cname_cache_lock:
+        _cname_cache[host] = (resultado, time.time())
+
 
 @bancos_bp.route('/api/cname/testar')
 def api_testar_cname():
@@ -4563,13 +4800,52 @@ def api_testar_cname():
     assinatura = request.args.get('assinatura', '')
     if not host or len(host) > 1024 or not hmac.compare_digest(assinatura_cname(host).encode(), assinatura.encode()):
         return jsonify(ativo=False, erro='CNAME inválido.'), 400
+    
     host_limpo = host.split('/')[0].split(':')[0]
+    
+    # Verifica cache primeiro
+    cached = _get_cached_cname(host_limpo)
+    if cached is not None:
+        return jsonify(ativo=cached, cached=True)
+    
+    # Limite alto para suportar telas grandes; o navegador só consulta linhas visíveis.
+    ip = request.remote_addr or 'unknown'
+    agora = time.time()
+    with _cname_rate_lock:
+        cooldown_ate = _cname_cooldown.get(ip, 0)
+        if agora < cooldown_ate:
+            tempo_restante = max(1, int(cooldown_ate - agora))
+            return jsonify(
+                ativo=False,
+                erro=f'Limite de consultas atingido. Aguarde {tempo_restante}s.',
+                cooldown=tempo_restante,
+                retry_after=tempo_restante
+            ), 429
+
+        recentes = [t for t in _cname_rate_limit.get(ip, []) if agora - t < 1.0]
+        if len(recentes) >= CNAME_RATE_LIMIT_POR_SEGUNDO:
+            _cname_cooldown[ip] = agora + CNAME_RATE_LIMIT_COOLDOWN
+            _cname_rate_limit[ip] = recentes
+            return jsonify(
+                ativo=False,
+                erro=f'Limite de {CNAME_RATE_LIMIT_POR_SEGUNDO} consultas por segundo atingido.',
+                cooldown=CNAME_RATE_LIMIT_COOLDOWN,
+                retry_after=CNAME_RATE_LIMIT_COOLDOWN
+            ), 429
+
+        recentes.append(agora)
+        _cname_rate_limit[ip] = recentes
+    
     try:
         socket.gethostbyname(host_limpo)
         ativo = True
     except (OSError, UnicodeError):
         ativo = False
-    return jsonify(ativo=ativo)
+    
+    # Armazena no cache
+    _set_cached_cname(host_limpo, ativo)
+    
+    return jsonify(ativo=ativo, cached=False)
 
 
 @bancos_bp.route('/admin/cname/salvar', methods=['POST'])

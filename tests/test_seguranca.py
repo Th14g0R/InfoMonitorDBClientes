@@ -167,6 +167,43 @@ class SegurancaTest(unittest.TestCase):
         self.assertIn('autocomplete="current-password"', html)
         self.assertNotIn("prompt('Confirme sua senha", html)
 
+    def test_menus_usam_rotulos_e_aviso_de_permissao(self):
+        html_horarios = self.horarios.HTML_INTERFACE
+        html_servidores = self.bancos.HTML_LAYOUT
+        self.assertNotIn('Servidores Firebird', html_horarios)
+        self.assertNotIn('Área de Gestão', html_horarios)
+        self.assertIn('🖥️ Servidores', html_horarios)
+        self.assertIn('🗄️ Gestão de Bancos', html_horarios)
+        self.assertIn('🔑 Login', html_horarios)
+        self.assertIn("avisarSemPermissao('Gestão de Bancos')", html_horarios)
+        self.assertIn('class="btn menu-conta">Entrar</a>', html_servidores)
+        self.assertIn("avisarSemPermissao('Importação de Lojas')", html_servidores)
+
+    def test_menu_horarios_mantem_usuario_sem_permissao_na_pagina(self):
+        with closing(self.horarios.get_db()) as conn, conn:
+            usuario_id = conn.execute(
+                'INSERT INTO usuarios (nome, email, senha_hash, eh_master, ativo, perm_gestao_bancos, perm_horarios) '
+                'VALUES (?, ?, ?, 0, 1, 0, 0)',
+                ('Sem permissão', 'sem-permissao@example.invalid', generate_password_hash(self.password)),
+            ).lastrowid
+        try:
+            with self.client.session_transaction() as session:
+                session.update(logged_in=True, user_id=usuario_id, eh_master=False)
+            resposta = self.client.get('/horarios')
+            self.assertEqual(resposta.status_code, 200)
+            self.assertIn("avisarSemPermissao('Gestão de Bancos')", resposta.text)
+            self.assertIn("avisarSemPermissao('Gestão de Horários')", resposta.text)
+        finally:
+            with closing(self.horarios.get_db()) as conn, conn:
+                conn.execute('DELETE FROM usuarios WHERE id = ?', (usuario_id,))
+
+    def test_modais_de_exclusao_admin_nao_dependem_do_bootstrap(self):
+        html = self.bancos.HTML_ADMIN
+        self.assertNotIn('class="modal fade"', html)
+        self.assertNotIn('data-bs-toggle="modal"', html)
+        self.assertIn('class="app-modal" id="modalExcluir', html)
+        self.assertIn("onclick=\"openModal('modalExcluir", html)
+
     def test_historico_cria_indice_composto(self):
         caminho = str(Path(self.temp.name) / 'historico-indice.db')
         with patch.object(self.bancos, 'DB_HISTORICO', caminho):
@@ -453,6 +490,13 @@ class SegurancaTest(unittest.TestCase):
         self.assertNotIn('${originalCaminho}', html_admin)
         self.assertIn('textContent = originalAlias', html_admin)
         self.assertIn('textContent = originalCaminho', html_admin)
+
+    def test_lista_de_servidores_inicia_teste_de_todos_os_cnames(self):
+        html = self.bancos.HTML_LAYOUT
+        self.assertIn('data-host="{{ banco.cname_string }}"', html)
+        self.assertIn('testarCnames();', html)
+        self.assertIn('Novos Hospedados:', html)
+        self.assertNotIn('Últimos Clientes Hospedados:', html)
 
     def test_admin_sem_servidores_responde_controladamente(self):
         with patch.dict(self.bancos.SERVIDORES, {}, clear=True), \
@@ -1094,14 +1138,18 @@ class SegurancaTest(unittest.TestCase):
         with self.app.app_context():
             assinatura = self.bancos.assinatura_cname(host)
         with patch.object(self.bancos.socket, 'gethostbyname', return_value='192.0.2.1') as dns, \
-                patch.object(self.bancos.socket, 'create_connection') as tcp:
+                patch.object(self.bancos.socket, 'create_connection') as tcp, \
+                patch.object(self.security, 'RATE_LIMIT_API_POR_MINUTO', 0):
             for invalida in ('', 'inválida', assinatura + 'x'):
                 self.assertEqual(client.get('/api/cname/testar', query_string=dict(host=host, assinatura=invalida)).status_code, 400)
             dns.assert_not_called()
             response = client.get('/api/cname/testar', query_string=dict(host=host, assinatura=assinatura))
             self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json, {'ativo': True})
+            self.assertEqual(response.json.get('ativo'), True)
+            self.assertIn('cached', response.json)
             tcp.assert_not_called()
+        self.assertIn('if (response.status === 429)', self.bancos.HTML_LAYOUT)
+        self.assertIn('Nova tentativa em ${espera}s', self.bancos.HTML_LAYOUT)
 
 
 if __name__ == '__main__':
