@@ -26,8 +26,10 @@ def extensao_permitida(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in EXTENSOES_PERMITIDAS
 
 def get_db():
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_NAME, timeout=10.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 PERMISSOES_MENU = {'perm_servidores', 'perm_gestao_bancos', 'perm_horarios'}
@@ -64,7 +66,8 @@ def opcoes_funcionario():
 
 def init_db():
     preservar_banco_antes_migracao(DB_NAME)
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
+    with closing(get_db()) as conn, conn:
+        conn.execute("PRAGMA journal_mode = WAL")
         cursor = conn.cursor()
         
         cursor.execute('''
@@ -217,7 +220,7 @@ def obter_proximo_sabado():
 
 def calcular_cobertura_diaria(data_referencia=None):
     data_referencia = data_referencia or date.today().isoformat()
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
+    with closing(get_db()) as conn, conn:
         cursor = conn.cursor()
         
         ausencias_lista = []
@@ -712,7 +715,7 @@ HTML_INTERFACE = """
     <div class="card" id="secao-ausencias">
         <div class="section-header">
             <h3>🏖️ Ausências, Férias e Licenças</h3>
-            <span class="text-muted" style="font-size: 0.85em; font-weight: bold;">{{ 'Resultados do filtro' if filtro_ausencias else 'Ausências vigentes hoje' }}</span>
+            <span class="text-muted" style="font-size: 0.85em; font-weight: bold;">{{ 'Resultados do filtro' if filtro_ausencias else 'Ausências vigentes e futuras' }}</span>
         </div>
 
         {% if pode_editar_horarios() %}
@@ -778,7 +781,7 @@ HTML_INTERFACE = """
                     <td class="col-acoes">
                         <div class="acoes-container">
                             <a href="/horarios/editar_ausencia/{{ a[0] }}" class="btn btn-edit btn-sm">✏️ Editar</a>
-                            <form action="/horarios/excluir_ausencia/{{ a[0] }}" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn btn-delete btn-sm" onclick="return confirm('Excluir ausência?')" aria-label="Excluir ausência">❌</button></form>
+                            <form action="/horarios/excluir_ausencia/{{ a[0] }}" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn btn-delete btn-sm" onclick="return confirm('Deseja excluir a ausência de {{ a[1] }} ({{ a[2] }})?')" title="Excluir ausência" aria-label="Excluir ausência">❌</button></form>
                         </div>
                     </td>
                     {% endif %}
@@ -1198,10 +1201,7 @@ def ver_horarios():
             raise ValueError()
     except ValueError:
         return 'Informe um período válido.', 400
-    limite_inicio = ausencia_inicio or ('0001-01-01' if filtro_ausencias else date.today().isoformat())
-    limite_fim = ausencia_fim or ('9999-12-31' if filtro_ausencias else date.today().isoformat())
-
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
+    with closing(get_db()) as conn, conn:
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -1214,16 +1214,31 @@ def ver_horarios():
         """)
         funcionarios = cursor.fetchall()
 
-        cursor.execute("""
-            SELECT a.id, f.nome, a.motivo, 
-                   strftime('%d/%m/%Y', a.data_inicio), 
-                   strftime('%d/%m/%Y', a.data_fim),
-                   a.hora_inicio, a.hora_fim
-            FROM ausencias a
-            JOIN funcionarios f ON f.id = a.funcionario_id
-            WHERE a.data_fim >= ? AND a.data_inicio <= ? AND (? = '' OR a.motivo = ?)
-            ORDER BY a.data_inicio DESC
-        """, (limite_inicio, limite_fim, ausencia_motivo, ausencia_motivo))
+        if filtro_ausencias:
+            limite_inicio = ausencia_inicio or '0001-01-01'
+            limite_fim = ausencia_fim or '9999-12-31'
+            cursor.execute("""
+                SELECT a.id, f.nome, a.motivo, 
+                       strftime('%d/%m/%Y', a.data_inicio), 
+                       strftime('%d/%m/%Y', a.data_fim),
+                       a.hora_inicio, a.hora_fim
+                FROM ausencias a
+                JOIN funcionarios f ON f.id = a.funcionario_id
+                WHERE a.data_fim >= ? AND a.data_inicio <= ? AND (? = '' OR a.motivo = ?)
+                ORDER BY a.data_inicio DESC
+            """, (limite_inicio, limite_fim, ausencia_motivo, ausencia_motivo))
+        else:
+            hoje_iso = date.today().isoformat()
+            cursor.execute("""
+                SELECT a.id, f.nome, a.motivo, 
+                       strftime('%d/%m/%Y', a.data_inicio), 
+                       strftime('%d/%m/%Y', a.data_fim),
+                       a.hora_inicio, a.hora_fim
+                FROM ausencias a
+                JOIN funcionarios f ON f.id = a.funcionario_id
+                WHERE a.data_fim >= ?
+                ORDER BY a.data_inicio ASC, a.data_fim ASC
+            """, (hoje_iso,))
         ausencias = cursor.fetchall()
         motivos_ausencias = [r[0] for r in conn.execute('SELECT DISTINCT motivo FROM ausencias ORDER BY motivo')]
         substituicoes = conn.execute('''SELECT s.id, t.nome, f.nome, s.data_inicio, s.data_fim, s.motivo
@@ -1401,7 +1416,7 @@ def gerar_sugestao_sabado():
         flash("Data inválida informada!")
         return redirect('/horarios#secao-escala-sabado')
 
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
+    with closing(get_db()) as conn, conn:
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -1523,7 +1538,7 @@ def adicionar_item_escala():
         else:
             observacao = 'Atendimento Rodízio'
 
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
+    with closing(get_db()) as conn, conn:
         cursor = conn.cursor()
         cursor.execute("SELECT cor_equipe FROM escala_sabado WHERE data_sabado = ? LIMIT 1", (data_sabado,))
         row = cursor.fetchone()
@@ -1540,7 +1555,7 @@ def adicionar_item_escala():
 @horarios_bp.route('/horarios/editar_item_escala/<int:id>', methods=['GET', 'POST'])
 @login_required
 def editar_item_escala(id):
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
+    with closing(get_db()) as conn, conn:
         cursor = conn.cursor()
         if request.method == 'POST':
             try:
@@ -1613,42 +1628,79 @@ def atualizar_horario_escala():
 @login_required
 def salvar_ausencia():
     ausencia_id = request.form.get('id')
-    funcionario_id = request.form['funcionario_id']
-    motivo = request.form['motivo']
-    data_inicio = request.form['data_inicio']
-    data_fim = request.form['data_fim']
-    hora_inicio = request.form.get('hora_inicio', '')
-    hora_fim = request.form.get('hora_fim', '')
+    funcionario_id = request.form.get('funcionario_id')
+    motivo = request.form.get('motivo', '').strip()
+    data_inicio = request.form.get('data_inicio', '').strip()
+    data_fim = request.form.get('data_fim', '').strip()
+    hora_inicio = request.form.get('hora_inicio', '').strip()
+    hora_fim = request.form.get('hora_fim', '').strip()
 
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
-        cursor = conn.cursor()
-        if ausencia_id:
-            cursor.execute("""
-                UPDATE ausencias 
-                SET funcionario_id=?, motivo=?, data_inicio=?, data_fim=?, hora_inicio=?, hora_fim=?
-                WHERE id=?
-            """, (funcionario_id, motivo, data_inicio, data_fim, hora_inicio, hora_fim, ausencia_id))
-        else:
-            cursor.execute("""
-                INSERT INTO ausencias (funcionario_id, motivo, data_inicio, data_fim, hora_inicio, hora_fim)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (funcionario_id, motivo, data_inicio, data_fim, hora_inicio, hora_fim))
-        conn.commit()
+    if not funcionario_id or not motivo or not data_inicio or not data_fim:
+        flash("Preencha todos os campos obrigatórios (Técnico, Motivo, Data Início e Data Fim).", "danger")
+        return redirect(request.referrer or (url_for('horarios.ver_horarios') + '#secao-ausencias'))
 
-    return redirect('/horarios#secao-ausencias')
+    try:
+        f_id = int(funcionario_id)
+        d_in = validar_data(data_inicio)
+        d_fim = validar_data(data_fim)
+        if d_in > d_fim:
+            flash("A data de início não pode ser posterior à data de término.", "danger")
+            return redirect(request.referrer or (url_for('horarios.ver_horarios') + '#secao-ausencias'))
+        if hora_inicio and hora_fim and d_in == d_fim and hora_inicio >= hora_fim:
+            flash("A hora de início deve ser anterior à hora de término.", "danger")
+            return redirect(request.referrer or (url_for('horarios.ver_horarios') + '#secao-ausencias'))
+    except ValueError as ve:
+        flash(f"Dados inválidos: {str(ve)}", "danger")
+        return redirect(request.referrer or (url_for('horarios.ver_horarios') + '#secao-ausencias'))
+
+    try:
+        with closing(get_db()) as conn, conn:
+            func = conn.execute("SELECT nome FROM funcionarios WHERE id = ?", (f_id,)).fetchone()
+            if not func:
+                flash("Funcionário selecionado não existe.", "danger")
+                return redirect(request.referrer or (url_for('horarios.ver_horarios') + '#secao-ausencias'))
+
+            if ausencia_id:
+                conn.execute("""
+                    UPDATE ausencias 
+                    SET funcionario_id=?, motivo=?, data_inicio=?, data_fim=?, hora_inicio=?, hora_fim=?
+                    WHERE id=?
+                """, (f_id, motivo, data_inicio, data_fim, hora_inicio, hora_fim, ausencia_id))
+                acao = 'atualizar_ausencia'
+                msg = f"Ausência de {func['nome']} atualizada com sucesso!"
+            else:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO ausencias (funcionario_id, motivo, data_inicio, data_fim, hora_inicio, hora_fim)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (f_id, motivo, data_inicio, data_fim, hora_inicio, hora_fim))
+                ausencia_id = cursor.lastrowid
+                acao = 'criar_ausencia'
+                msg = f"Ausência de {func['nome']} ({motivo}) cadastrada com sucesso!"
+            conn.commit()
+
+        registrar_acao_admin(acao, {
+            'ausencia_id': ausencia_id,
+            'funcionario_id': f_id,
+            'motivo': motivo,
+            'data_inicio': data_inicio,
+            'data_fim': data_fim,
+        })
+        flash(msg, "success")
+    except Exception as e:
+        flash(f"Erro ao salvar ausência: {str(e)}", "danger")
+
+    return redirect(url_for('horarios.ver_horarios') + '#secao-ausencias')
 
 @horarios_bp.route('/horarios/editar_ausencia/<int:id>')
 @login_required
 def editar_ausencia(id):
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
-        cursor = conn.cursor()
-        cursor.execute("""
+    with closing(get_db()) as conn:
+        aus = conn.execute("""
             SELECT id, funcionario_id, motivo, data_inicio, data_fim, hora_inicio, hora_fim 
             FROM ausencias WHERE id = ?
-        """, (id,))
-        aus = cursor.fetchone()
-        cursor.execute("SELECT id, nome FROM funcionarios WHERE ativo = 1 ORDER BY nome")
-        funcs = cursor.fetchall()
+        """, (id,)).fetchone()
+        funcs = conn.execute("SELECT id, nome FROM funcionarios WHERE ativo = 1 ORDER BY nome").fetchall()
 
     if not aus:
         return redirect('/horarios#secao-ausencias')
@@ -1708,15 +1760,17 @@ def editar_ausencia(id):
 @horarios_bp.route('/horarios/excluir_ausencia/<int:id>', methods=['POST'])
 @login_required
 def excluir_ausencia(id):
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
-        # Busca info da ausência para auditoria
-        ausencia = conn.execute("SELECT funcionario_id, motivo, data_inicio, data_fim FROM ausencias WHERE id = ?", (id,)).fetchone()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM ausencias WHERE id = ?", (id,))
-        conn.commit()
-    
-    # Auditoria: exclusão de ausência (Opção 3)
-    if ausencia:
+    destino = request.referrer or (url_for('horarios.ver_horarios') + '#secao-ausencias')
+    try:
+        with closing(get_db()) as conn, conn:
+            ausencia = conn.execute("SELECT funcionario_id, motivo, data_inicio, data_fim FROM ausencias WHERE id = ?", (id,)).fetchone()
+            if not ausencia:
+                flash("Ausência não encontrada ou já excluída.", "warning")
+                return redirect(destino)
+
+            conn.execute("DELETE FROM ausencias WHERE id = ?", (id,))
+            conn.commit()
+
         registrar_acao_admin('excluir_ausencia', {
             'ausencia_id': id,
             'funcionario_id': ausencia['funcionario_id'],
@@ -1724,88 +1778,134 @@ def excluir_ausencia(id):
             'data_inicio': ausencia['data_inicio'],
             'data_fim': ausencia['data_fim'],
         })
-    
-    return redirect('/horarios#secao-ausencias')
+        flash(f"Ausência ({ausencia['motivo']}) excluída com sucesso!", "success")
+    except Exception as e:
+        flash(f"Erro ao excluir ausência: {str(e)}", "danger")
+
+    return redirect(destino)
 
 @horarios_bp.route('/horarios/excluir_dia_inteiro/<data_sabado>', methods=['POST'])
 @login_required
 def excluir_dia_inteiro(data_sabado):
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
-        # Conta quantas escalas serão excluídas para auditoria
-        count = conn.execute("SELECT COUNT(*) FROM escala_sabado WHERE data_sabado = ?", (data_sabado,)).fetchone()[0]
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM escala_sabado WHERE data_sabado = ?", (data_sabado,))
-        conn.commit()
-    
-    # Auditoria: exclusão de dia inteiro de escala (Opção 3)
-    registrar_acao_admin('excluir_dia_inteiro_escala', {
-        'data_sabado': data_sabado,
-        'escalas_excluidas': count,
-    })
-    
-    return redirect('/horarios#secao-escala-sabado')
+    try:
+        with closing(get_db()) as conn, conn:
+            count = conn.execute("SELECT COUNT(*) FROM escala_sabado WHERE data_sabado = ?", (data_sabado,)).fetchone()[0]
+            conn.execute("DELETE FROM escala_sabado WHERE data_sabado = ?", (data_sabado,))
+            conn.commit()
+
+        registrar_acao_admin('excluir_dia_inteiro_escala', {
+            'data_sabado': data_sabado,
+            'escalas_excluidas': count,
+        })
+        flash(f"Escala do dia {data_sabado} excluída ({count} registros removidos).", "success")
+    except Exception as e:
+        flash(f"Erro ao excluir dia da escala: {str(e)}", "danger")
+
+    return redirect(url_for('horarios.ver_horarios', data_filtro_sabado=data_sabado) + '#secao-escala-sabado')
 
 @horarios_bp.route('/horarios/novo_cargo', methods=['POST'])
 @login_required
 def novo_cargo():
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("INSERT INTO cargos (nome) VALUES (?)", (request.form['nome_cargo'],))
-            conn.commit()
-        except sqlite3.IntegrityError:
-            pass
+    nome = request.form.get('nome_cargo', '').strip()
+    if not nome:
+        flash("Informe o nome do cargo.", "warning")
+        return redirect('/horarios#secao-cargos-jornadas')
+    try:
+        with closing(get_db()) as conn, conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute("INSERT INTO cargos (nome) VALUES (?)", (nome,))
+                conn.commit()
+                flash(f"Cargo '{nome}' cadastrado com sucesso!", "success")
+            except sqlite3.IntegrityError:
+                flash(f"O cargo '{nome}' já existe.", "warning")
+    except Exception as e:
+        flash(f"Erro ao cadastrar cargo: {str(e)}", "danger")
     return redirect('/horarios#secao-cargos-jornadas')
 
 @horarios_bp.route('/horarios/excluir_cargo/<int:id>', methods=['POST'])
 @login_required
 def excluir_cargo(id):
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
-        # Busca info do cargo para auditoria
-        cargo = conn.execute("SELECT nome FROM cargos WHERE id = ?", (id,)).fetchone()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM cargos WHERE id = ?", (id,))
-        conn.commit()
-    
-    # Auditoria: exclusão de cargo (Opção 3)
-    if cargo:
+    try:
+        with closing(get_db()) as conn, conn:
+            em_uso = conn.execute("SELECT COUNT(*) FROM funcionarios WHERE cargo_id = ?", (id,)).fetchone()[0]
+            if em_uso > 0:
+                flash(f"Não é possível excluir este cargo: há {em_uso} funcionário(s) vinculado(s) a ele.", "danger")
+                return redirect('/horarios#secao-cargos-jornadas')
+
+            cargo = conn.execute("SELECT nome FROM cargos WHERE id = ?", (id,)).fetchone()
+            if not cargo:
+                flash("Cargo não encontrado.", "warning")
+                return redirect('/horarios#secao-cargos-jornadas')
+
+            conn.execute("DELETE FROM cargos WHERE id = ?", (id,))
+            conn.commit()
+
         registrar_acao_admin('excluir_cargo', {
             'cargo_id': id,
             'nome': cargo['nome'],
         })
-    
+        flash(f"Cargo '{cargo['nome']}' excluído com sucesso!", "success")
+    except Exception as e:
+        flash(f"Erro ao excluir cargo: {str(e)}", "danger")
+
     return redirect('/horarios#secao-cargos-jornadas')
 
 @horarios_bp.route('/horarios/nova_jornada', methods=['POST'])
 @login_required
 def nova_jornada():
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO jornadas (descricao, tipo, manha_inicio, manha_fim)
-            VALUES (?, ?, ?, ?)
-        """, (request.form['descricao'], request.form['tipo'], request.form['m_in'], request.form['m_out']))
-        conn.commit()
+    descricao = request.form.get('descricao', '').strip()
+    tipo = request.form.get('tipo', 'Semana').strip()
+    m_in = request.form.get('m_in', '').strip()
+    m_out = request.form.get('m_out', '').strip()
+    almoco_in = request.form.get('almoco_in', '').strip()
+    almoco_out = request.form.get('almoco_out', '').strip()
+    tarde_in = request.form.get('tarde_in', '').strip()
+    tarde_out = request.form.get('tarde_out', '').strip()
+
+    if not descricao or not m_in or not m_out:
+        flash("Preencha descrição, início e fim da manhã.", "warning")
+        return redirect('/horarios#secao-cargos-jornadas')
+
+    try:
+        with closing(get_db()) as conn, conn:
+            conn.execute("""
+                INSERT INTO jornadas (descricao, tipo, manha_inicio, manha_fim, almoco_inicio, almoco_fim, tarde_inicio, tarde_fim)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (descricao, tipo, m_in, m_out, almoco_in, almoco_out, tarde_in, tarde_out))
+            conn.commit()
+        flash(f"Jornada '{descricao}' cadastrada com sucesso!", "success")
+    except Exception as e:
+        flash(f"Erro ao cadastrar jornada: {str(e)}", "danger")
     return redirect('/horarios#secao-cargos-jornadas')
 
 @horarios_bp.route('/horarios/excluir_jornada/<int:id>', methods=['POST'])
 @login_required
 def excluir_jornada(id):
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
-        # Busca info da jornada para auditoria
-        jornada = conn.execute("SELECT descricao, tipo FROM jornadas WHERE id = ?", (id,)).fetchone()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM jornadas WHERE id = ?", (id,))
-        conn.commit()
-    
-    # Auditoria: exclusão de jornada (Opção 3)
-    if jornada:
+    try:
+        with closing(get_db()) as conn, conn:
+            em_uso = conn.execute("SELECT COUNT(*) FROM funcionarios WHERE jornada_id = ?", (id,)).fetchone()[0]
+            if em_uso > 0:
+                flash(f"Não é possível excluir esta jornada: há {em_uso} funcionário(s) vinculado(s) a ela.", "danger")
+                return redirect('/horarios#secao-cargos-jornadas')
+
+            jornada = conn.execute("SELECT descricao, tipo FROM jornadas WHERE id = ?", (id,)).fetchone()
+            if not jornada:
+                flash("Jornada não encontrada.", "warning")
+                return redirect('/horarios#secao-cargos-jornadas')
+
+            conn.execute("DELETE FROM jornadas WHERE id = ?", (id,))
+            conn.commit()
+
         registrar_acao_admin('excluir_jornada', {
             'jornada_id': id,
             'descricao': jornada['descricao'],
             'tipo': jornada['tipo'],
         })
-    
+        flash(f"Jornada '{jornada['descricao']}' excluída com sucesso!", "success")
+    except Exception as e:
+        flash(f"Erro ao excluir jornada: {str(e)}", "danger")
+
     return redirect('/horarios#secao-cargos-jornadas')
 
 @horarios_bp.route('/horarios/registrar_troca', methods=['POST'])
@@ -1838,49 +1938,57 @@ def registrar_troca():
 @horarios_bp.route('/horarios/excluir_funcionario/<int:id>', methods=['POST'])
 @login_required
 def excluir_funcionario(id):
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
-        # Habilita constraints de chave estrangeira
-        conn.execute("PRAGMA foreign_keys = ON")
-        
-        # Busca info do funcionário para auditoria
-        funcionario = conn.execute("SELECT nome FROM funcionarios WHERE id = ?", (id,)).fetchone()
-        
-        # Remove registros relacionados antes de excluir o funcionário
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM escala_sabado WHERE funcionario_id = ?", (id,))
-        cursor.execute("DELETE FROM ausencias WHERE funcionario_id = ?", (id,))
-        cursor.execute("DELETE FROM funcionarios WHERE id = ?", (id,))
-        conn.commit()
-    
-    # Auditoria: exclusão de funcionário (Opção 3)
-    if funcionario:
+    try:
+        with closing(get_db()) as conn, conn:
+            funcionario = conn.execute("SELECT nome FROM funcionarios WHERE id = ?", (id,)).fetchone()
+            if not funcionario:
+                flash("Funcionário não encontrado.", "warning")
+                return redirect('/horarios#secao-equipe')
+
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM escala_sabado WHERE funcionario_id = ?", (id,))
+            cursor.execute("DELETE FROM ausencias WHERE funcionario_id = ?", (id,))
+            cursor.execute("DELETE FROM substituicoes_periodo WHERE titular_id = ? OR substituto_id = ?", (id, id))
+            cursor.execute("DELETE FROM trocas_sabado WHERE funcionario_substituido_id = ? OR funcionario_substituto_id = ?", (id, id))
+            cursor.execute("DELETE FROM jornadas_dia WHERE funcionario_id = ?", (id,))
+            cursor.execute("DELETE FROM funcionarios WHERE id = ?", (id,))
+            conn.commit()
+
         registrar_acao_admin('excluir_funcionario', {
             'funcionario_id': id,
-            'nome': funcionario[0],
+            'nome': funcionario['nome'],
         })
-    
+        flash(f"Funcionário '{funcionario['nome']}' excluído com sucesso!", "success")
+    except Exception as e:
+        flash(f"Erro ao excluir funcionário: {str(e)}", "danger")
+
     return redirect('/horarios#secao-equipe')
 
 @horarios_bp.route('/horarios/excluir_escala_sabado/<int:id>', methods=['POST'])
 @login_required
 def excluir_escala_sabado(id):
-    with closing(sqlite3.connect(DB_NAME)) as conn, conn:
-        # Busca info da escala para auditoria
-        escala = conn.execute("SELECT data_sabado, funcionario_id, horario FROM escala_sabado WHERE id = ?", (id,)).fetchone()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM escala_sabado WHERE id = ?", (id,))
-        conn.commit()
-    
-    # Auditoria: exclusão de escala de sábado (Opção 3)
-    if escala:
+    destino = request.referrer or (url_for('horarios.ver_horarios') + '#secao-escala-sabado')
+    try:
+        with closing(get_db()) as conn, conn:
+            escala = conn.execute("SELECT data_sabado, funcionario_id, horario FROM escala_sabado WHERE id = ?", (id,)).fetchone()
+            if not escala:
+                flash("Item da escala não encontrado.", "warning")
+                return redirect(destino)
+
+            conn.execute("DELETE FROM escala_sabado WHERE id = ?", (id,))
+            conn.commit()
+
         registrar_acao_admin('excluir_escala_sabado', {
             'escala_id': id,
             'data_sabado': escala['data_sabado'],
             'funcionario_id': escala['funcionario_id'],
             'horario': escala['horario'],
         })
-    
-    return redirect('/horarios#secao-escala-sabado')
+        flash("Item da escala de sábado excluído com sucesso!", "success")
+    except Exception as e:
+        flash(f"Erro ao excluir item da escala: {str(e)}", "danger")
+
+    return redirect(destino)
 
 @horarios_bp.route('/horarios/login', methods=['GET', 'POST'])
 def login():

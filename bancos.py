@@ -125,8 +125,10 @@ def verificar_senha_confirmacao(senha_informada):
 
 def get_db_connection():
     """Retorna uma conexão ativa com o banco de dados sistema.db com acesso por nome de coluna."""
-    conn = sqlite3.connect(DB_SISTEMA)
+    conn = sqlite3.connect(DB_SISTEMA, timeout=10.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 # --- AUTENTICAÇÃO DO PAINEL ADMIN ---
@@ -158,8 +160,8 @@ URL_STATUS_BACKUPS_FTP = os.getenv('URL_STATUS_BACKUPS_FTP', 'http://192.168.254
 # --- BANCO DE DADOS LOCAL: USUÁRIOS, CNAME E HISTÓRICO ---
 def init_db_sistema():
     """Inicializa as tabelas de suporte do sistema (Histórico, Usuários e CNAMEs customizados)."""
-    conn = sqlite3.connect(DB_SISTEMA)
-    conn.row_factory = sqlite3.Row  # FIX: sem isso, fetchone()['coluna'] quebra (retorna tupla, não dict) e o app nem inicia
+    conn = get_db_connection()
+    conn.execute("PRAGMA journal_mode = WAL")
     cursor = conn.cursor()
     
     # Tabela de Histórico
@@ -429,11 +431,9 @@ def toggle_status_usuario():
     user_id = request.form.get('id')
     novo_status = request.form.get('ativo') # 1 para Ativar, 0 para Inativar
     
-    conn = sqlite3.connect(DB_SISTEMA)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE usuarios SET ativo = ? WHERE id = ? AND eh_master = 0", (novo_status, user_id))
-    conn.commit()
-    conn.close()
+    with closing(get_db_connection()) as conn, conn:
+        conn.execute("UPDATE usuarios SET ativo = ? WHERE id = ? AND eh_master = 0", (novo_status, user_id))
+        conn.commit()
     
     return jsonify({'sucesso': True, 'mensagem': 'Status do usuário atualizado com sucesso!'})
     
@@ -540,7 +540,9 @@ def _obter_status_backups_ftp(forcar_atualizacao=False):
 
 # --- BANCO DE DADOS LOCAL PARA HISTÓRICO ---
 def init_db_historico():
-    conn = sqlite3.connect(DB_HISTORICO)
+    conn = sqlite3.connect(DB_HISTORICO, timeout=10.0)
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS historico_servidores (
@@ -3753,25 +3755,22 @@ def admin_register():
     if not ok_senha:
         return render_template_string(HTML_REGISTER, erro=msg_senha)
 
-    conn = sqlite3.connect(DB_SISTEMA)
-    cursor = conn.cursor()
+    with closing(get_db_connection()) as conn, conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM usuarios WHERE email = ?", (email,))
+        if cursor.fetchone():
+            return render_template_string(HTML_REGISTER, erro="E-mail já cadastrado!")
 
-    cursor.execute("SELECT id FROM usuarios WHERE email = ?", (email,))
-    if cursor.fetchone():
-        conn.close()
-        return render_template_string(HTML_REGISTER, erro="E-mail já cadastrado!")
+        senha_hash = generate_password_hash(senha)
+        token = secrets.token_urlsafe(32)
+        eh_master = 0
+        ativo = 0
 
-    senha_hash = generate_password_hash(senha)
-    token = secrets.token_urlsafe(32)
-    eh_master = 0
-    ativo = 0
-
-    cursor.execute('''
-        INSERT INTO usuarios (nome, email, senha_hash, token_ativacao, ativo, eh_master)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (nome, email, senha_hash, token, ativo, eh_master))
-    conn.commit()
-    conn.close()
+        cursor.execute('''
+            INSERT INTO usuarios (nome, email, senha_hash, token_ativacao, ativo, eh_master)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (nome, email, senha_hash, token, ativo, eh_master))
+        conn.commit()
 
     if eh_master:
         return render_template_string(HTML_LOGIN, sucesso="Cadastro realizado! Faça login para continuar.")

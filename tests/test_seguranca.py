@@ -1157,6 +1157,99 @@ class SegurancaTest(unittest.TestCase):
         self.assertIn('if (response.status === 429)', self.bancos.HTML_LAYOUT)
         self.assertIn('Nova tentativa em ${espera}s', self.bancos.HTML_LAYOUT)
 
+    def test_exclusao_ausencia_e_auditoria(self):
+        with closing(self.horarios.get_db()) as conn, conn:
+            funcionario_id = conn.execute("INSERT INTO funcionarios (nome, ativo) VALUES ('Funcionario Ausencia Teste', 1)").lastrowid
+            ausencia_id = conn.execute(
+                "INSERT INTO ausencias (funcionario_id, motivo, data_inicio, data_fim) VALUES (?, 'Férias Teste', '2026-10-01', '2026-10-30')",
+                (funcionario_id,)
+            ).lastrowid
+
+        # Excluir a ausência deve retornar 302 (sucesso) e NUNCA 500 (TypeError de tupla)
+        response = self.client.post(f'/horarios/excluir_ausencia/{ausencia_id}', data={'csrf_token': self.token})
+        self.assertEqual(response.status_code, 302)
+
+        with closing(self.horarios.get_db()) as conn:
+            removido = conn.execute("SELECT 1 FROM ausencias WHERE id = ?", (ausencia_id,)).fetchone()
+            self.assertIsNone(removido)
+
+        with closing(self.horarios.get_db()) as conn, conn:
+            conn.execute("DELETE FROM funcionarios WHERE id = ?", (funcionario_id,))
+
+    def test_salvar_ausencia_validacoes(self):
+        with closing(self.horarios.get_db()) as conn, conn:
+            funcionario_id = conn.execute("INSERT INTO funcionarios (nome, ativo) VALUES ('Funcionario Valida Teste', 1)").lastrowid
+
+        # Data início > Data fim deve falhar validação e não inserir
+        resp = self.client.post('/horarios/salvar_ausencia', data={
+            'csrf_token': self.token,
+            'funcionario_id': funcionario_id,
+            'motivo': 'Férias Inválidas',
+            'data_inicio': '2026-10-30',
+            'data_fim': '2026-10-01',
+        }, follow_redirects=True)
+        self.assertIn('A data de início não pode ser posterior à data de término.', resp.text)
+
+        # Cadastro válido deve funcionar perfeitamente
+        resp_ok = self.client.post('/horarios/salvar_ausencia', data={
+            'csrf_token': self.token,
+            'funcionario_id': funcionario_id,
+            'motivo': 'Férias Corretas',
+            'data_inicio': '2026-10-01',
+            'data_fim': '2026-10-30',
+        })
+        self.assertEqual(resp_ok.status_code, 302)
+
+        with closing(self.horarios.get_db()) as conn, conn:
+            cadastrado = conn.execute("SELECT id FROM ausencias WHERE funcionario_id = ? AND motivo = 'Férias Corretas'", (funcionario_id,)).fetchone()
+            self.assertIsNotNone(cadastrado)
+            conn.execute("DELETE FROM ausencias WHERE funcionario_id = ?", (funcionario_id,))
+            conn.execute("DELETE FROM funcionarios WHERE id = ?", (funcionario_id,))
+
+    def test_exclusao_cargo_e_jornada_com_vinculo(self):
+        with closing(self.horarios.get_db()) as conn, conn:
+            cargo_id = conn.execute("INSERT INTO cargos (nome) VALUES ('Cargo Vinculado Teste')").lastrowid
+            jornada_id = conn.execute(
+                "INSERT INTO jornadas (descricao, tipo, manha_inicio, manha_fim) VALUES ('Jornada Vinculada Teste', 'Semana', '08:00', '12:00')"
+            ).lastrowid
+            func_id = conn.execute(
+                "INSERT INTO funcionarios (nome, cargo_id, jornada_id, ativo) VALUES ('Func Teste Vinculo', ?, ?, 1)",
+                (cargo_id, jornada_id)
+            ).lastrowid
+
+        # Tentativa de excluir cargo vinculado deve ser recusada
+        resp_cargo = self.client.post(f'/horarios/excluir_cargo/{cargo_id}', data={'csrf_token': self.token}, follow_redirects=True)
+        self.assertIn('Não é possível excluir este cargo', resp_cargo.text)
+
+        # Tentativa de excluir jornada vinculada deve ser recusada
+        resp_jornada = self.client.post(f'/horarios/excluir_jornada/{jornada_id}', data={'csrf_token': self.token}, follow_redirects=True)
+        self.assertIn('Não é possível excluir esta jornada', resp_jornada.text)
+
+        # Desvincula o funcionário
+        with closing(self.horarios.get_db()) as conn, conn:
+            conn.execute("DELETE FROM funcionarios WHERE id = ?", (func_id,))
+
+        # Agora a exclusão do cargo e da jornada deve ter sucesso (302)
+        self.assertEqual(self.client.post(f'/horarios/excluir_cargo/{cargo_id}', data={'csrf_token': self.token}).status_code, 302)
+        self.assertEqual(self.client.post(f'/horarios/excluir_jornada/{jornada_id}', data={'csrf_token': self.token}).status_code, 302)
+
+    def test_exclusao_escala_sabado(self):
+        with closing(self.horarios.get_db()) as conn, conn:
+            func_id = conn.execute("INSERT INTO funcionarios (nome, ativo) VALUES ('Func Escala Teste', 1)").lastrowid
+            escala_id = conn.execute(
+                "INSERT INTO escala_sabado (data_sabado, cor_equipe, funcionario_id, horario) VALUES ('2026-10-10', 'Verde', ?, '08:00 - 12:00')",
+                (func_id,)
+            ).lastrowid
+
+        # Excluir item de escala deve retornar 302 e remover
+        response = self.client.post(f'/horarios/excluir_escala_sabado/{escala_id}', data={'csrf_token': self.token})
+        self.assertEqual(response.status_code, 302)
+
+        with closing(self.horarios.get_db()) as conn, conn:
+            item = conn.execute("SELECT 1 FROM escala_sabado WHERE id = ?", (escala_id,)).fetchone()
+            self.assertIsNone(item)
+            conn.execute("DELETE FROM funcionarios WHERE id = ?", (func_id,))
+
 
 if __name__ == '__main__':
     unittest.main()
