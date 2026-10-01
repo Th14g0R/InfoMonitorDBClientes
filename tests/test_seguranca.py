@@ -72,6 +72,50 @@ class SegurancaTest(unittest.TestCase):
         other = self.app.test_client()
         self.assertEqual(other.post('/admin/logout', data={'csrf_token': self.token}).status_code, 400)
 
+    def test_eventos_com_participantes_cadastrado_e_externo(self):
+        with closing(self.horarios.get_db()) as conn, conn:
+            funcionario_id = conn.execute("INSERT INTO funcionarios (nome, foto_url, ativo) VALUES ('Participante interno', '/static/fotos/interno.jpg', 1)").lastrowid
+            segundo_id = conn.execute("INSERT INTO funcionarios (nome, ativo) VALUES ('Segundo interno', 1)").lastrowid
+        response = self.client.post('/horarios/salvar_evento', data={
+            'csrf_token': self.token, 'data_evento': '2030-05-10',
+            'nome': 'Treinamento', 'observacao': 'Sala principal', 'local': 'Auditório',
+            'hora_inicio': '09:00', 'hora_fim': '11:30'
+        })
+        self.assertEqual(response.status_code, 302)
+        with closing(self.horarios.get_db()) as conn:
+            evento_id = conn.execute("SELECT id FROM eventos WHERE nome='Treinamento'").fetchone()[0]
+        edicao = self.client.get(f'/horarios/editar_evento/{evento_id}')
+        self.assertEqual(edicao.status_code, 200)
+        self.assertIn('Editar evento', edicao.text)
+        response = self.client.post(f'/horarios/editar_evento/{evento_id}', data={
+            'csrf_token': self.token, 'data_evento': '2030-05-11', 'nome': 'Treinamento atualizado',
+            'observacao': 'Sala principal', 'local': 'Auditório 2',
+            'hora_inicio': '10:00', 'hora_fim': '12:00'
+        })
+        self.assertEqual(response.status_code, 302)
+        for participante in ({'funcionario_ids': [funcionario_id, segundo_id]},
+                             {'nome_externo': 'Convidado externo', 'genero': 'feminino'}):
+            response = self.client.post('/horarios/adicionar_participante_evento', data={
+                'csrf_token': self.token, 'evento_id': evento_id, **participante
+            })
+            self.assertEqual(response.status_code, 302)
+        pagina = self.client.get('/horarios')
+        self.assertIn('Treinamento atualizado', pagina.text)
+        self.assertIn('Participante interno', pagina.text)
+        self.assertIn('Segundo interno', pagina.text)
+        self.assertIn('Convidado externo', pagina.text)
+        self.assertIn('3 participantes', pagina.text)
+        self.assertIn('Auditório 2', pagina.text)
+        self.assertIn('10:00–12:00', pagina.text)
+        self.assertIn('/static/fotos/interno.jpg', pagina.text)
+        self.assertIn('/static/avatar-feminino.svg', pagina.text)
+        self.assertEqual(self.client.post('/horarios/adicionar_participante_evento', data={
+            'csrf_token': self.token, 'evento_id': evento_id, 'nome_externo': 'Convidado externo'
+        }).status_code, 409)
+        self.assertEqual(self.client.post(f'/horarios/excluir_evento/{evento_id}', data={'csrf_token': self.token}).status_code, 302)
+        with closing(self.horarios.get_db()) as conn, conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM evento_participantes WHERE evento_id=?', (evento_id,)).fetchone()[0], 0)
+            conn.execute('DELETE FROM funcionarios WHERE id IN (?,?)', (funcionario_id, segundo_id))
     def test_filtro_ausencias_e_aniversario(self):
         with closing(self.horarios.get_db()) as conn, conn:
             pessoa = conn.execute("INSERT INTO funcionarios (nome, data_nascimento) VALUES ('Filtro teste', '1987-12-17')").lastrowid

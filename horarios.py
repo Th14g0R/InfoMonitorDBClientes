@@ -150,6 +150,36 @@ def init_db():
             )
         ''')
 
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS eventos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, data_evento TEXT NOT NULL,
+                nome TEXT NOT NULL CHECK(length(nome) BETWEEN 1 AND 150),
+                observacao TEXT NOT NULL DEFAULT '' CHECK(length(observacao) <= 1000)
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS evento_participantes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, evento_id INTEGER NOT NULL,
+                funcionario_id INTEGER, nome_externo TEXT,
+                FOREIGN KEY (evento_id) REFERENCES eventos(id) ON DELETE CASCADE,
+                FOREIGN KEY (funcionario_id) REFERENCES funcionarios(id) ON DELETE SET NULL,
+                CHECK ((funcionario_id IS NOT NULL AND nome_externo IS NULL) OR
+                    (funcionario_id IS NULL AND length(trim(nome_externo)) BETWEEN 1 AND 150))
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_eventos_data ON eventos(data_evento)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_evento_participantes_evento ON evento_participantes(evento_id)')
+        colunas_eventos = {c[1] for c in cursor.execute('PRAGMA table_info(eventos)')}
+        for coluna, definicao in {
+            'local': "TEXT NOT NULL DEFAULT ''",
+            'hora_inicio': "TEXT NOT NULL DEFAULT ''",
+            'hora_fim': "TEXT NOT NULL DEFAULT ''",
+        }.items():
+            if coluna not in colunas_eventos:
+                cursor.execute(f'ALTER TABLE eventos ADD COLUMN {coluna} {definicao}')
+        colunas_participantes = {c[1] for c in cursor.execute('PRAGMA table_info(evento_participantes)')}
+        if 'genero' not in colunas_participantes:
+            cursor.execute("ALTER TABLE evento_participantes ADD COLUMN genero TEXT NOT NULL DEFAULT 'masculino'")
         cursor.execute("PRAGMA table_info(ausencias)")
         colunas_aus = [c[1] for c in cursor.fetchall()]
         if 'hora_inicio' not in colunas_aus: cursor.execute("ALTER TABLE ausencias ADD COLUMN hora_inicio TEXT DEFAULT ''")
@@ -442,8 +472,8 @@ HTML_INTERFACE = """
     </style>
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <script src="{{ url_for('static', filename='csrf.js') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='horarios-20260925-1') }}">
-<script src="{{ url_for('static', filename='ui.js', v='horarios-20260925-1') }}" defer></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='horarios-20261001-4') }}">
+<script src="{{ url_for('static', filename='ui.js', v='horarios-20261001-4') }}" defer></script>
 </head>
 <body>
     <!-- Skip link para acessibilidade -->
@@ -794,6 +824,8 @@ HTML_INTERFACE = """
             </tbody>
         </table></div>
     </div>
+
+    {% include 'eventos.html' %}
 
     <!-- 4. EQUIPE E JORNADAS CADASTRADAS -->
     <div class="card" id="secao-equipe">
@@ -1250,6 +1282,26 @@ def ver_horarios():
 
         cursor.execute("SELECT id, descricao, tipo FROM jornadas ORDER BY tipo, descricao")
         jornadas = cursor.fetchall()
+        eventos = []
+        participantes = {}
+        for p in conn.execute('''SELECT ep.id, ep.evento_id, COALESCE(f.nome, ep.nome_externo),
+                ep.funcionario_id IS NULL, f.foto_url, ep.genero
+            FROM evento_participantes ep LEFT JOIN funcionarios f ON f.id=ep.funcionario_id
+            ORDER BY COALESCE(f.nome, ep.nome_externo) COLLATE NOCASE'''):
+            avatar = (p[4] or '/static/avatar-padrao.svg') if not p[3] else (
+                '/static/avatar-feminino.svg' if p[5] == 'feminino' else '/static/avatar-masculino.svg'
+            )
+            participantes.setdefault(p[1], []).append({
+                'id': p[0], 'nome': p[2], 'externo': bool(p[3]), 'avatar': avatar
+            })
+        hoje = date.today()
+        for e in conn.execute('''SELECT id, data_evento, nome, observacao, local, hora_inicio, hora_fim
+            FROM eventos ORDER BY CASE WHEN data_evento >= ? THEN 0 ELSE 1 END, data_evento, id''', (hoje.isoformat(),)):
+            data_evento = datetime.strptime(e[1], '%Y-%m-%d').date()
+            estado = 'hoje' if data_evento == hoje else 'vespera' if data_evento == hoje + timedelta(days=1) else 'normal'
+            eventos.append({'id': e[0], 'data_formatada': data_evento.strftime('%d/%m/%Y'),
+                'nome': e[2], 'observacao': e[3], 'local': e[4], 'hora_inicio': e[5],
+                'hora_fim': e[6], 'estado': estado, 'participantes': participantes.get(e[0], [])})
 
         query_escala = """
             SELECT e.id, strftime('%d/%m/%Y', e.data_sabado), e.cor_equipe, f.nome, e.horario, e.observacao, f.equipe_sabado, f.foto_url, f.ativo
@@ -1315,9 +1367,123 @@ def ver_horarios():
         data_filtro_sabado_formatada=data_filtro_sabado_formatada,
         data_cobertura=data_cobertura,
         data_cobertura_formatada=data_cobertura_formatada,
-        modo_todos=modo_todos, data_trocas=data_trocas, funcionario={}
+        modo_todos=modo_todos, data_trocas=data_trocas, funcionario={}, eventos=eventos
     )
 
+def validar_formulario_evento():
+    data_evento, nome = request.form.get('data_evento', '').strip(), request.form.get('nome', '').strip()
+    observacao = request.form.get('observacao', '').strip()
+    local = request.form.get('local', '').strip()
+    hora_inicio, hora_fim = request.form.get('hora_inicio', '').strip(), request.form.get('hora_fim', '').strip()
+    try:
+        validar_data(data_evento)
+        if bool(hora_inicio) != bool(hora_fim):
+            raise ValueError
+        if hora_inicio:
+            inicio = datetime.strptime(hora_inicio, '%H:%M').time()
+            fim = datetime.strptime(hora_fim, '%H:%M').time()
+            if fim <= inicio:
+                raise ValueError
+    except ValueError:
+        raise ValueError('Informe data e horários válidos; o término deve ser posterior ao início.')
+    if not nome or len(nome) > 150 or len(local) > 200 or len(observacao) > 1000:
+        raise ValueError('Revise os dados do evento.')
+    return data_evento, nome, observacao, local, hora_inicio, hora_fim
+
+@horarios_bp.post('/horarios/salvar_evento')
+@login_required
+def salvar_evento():
+    try:
+        dados = validar_formulario_evento()
+    except ValueError as erro:
+        return str(erro), 400
+    with closing(get_db()) as conn, conn:
+        evento_id = conn.execute('''INSERT INTO eventos
+            (data_evento,nome,observacao,local,hora_inicio,hora_fim) VALUES (?,?,?,?,?,?)''',
+            dados).lastrowid
+    registrar_acao_admin('criar_evento', {'evento_id': evento_id, 'data_evento': dados[0], 'nome': dados[1]})
+    return redirect(url_for('horarios.ver_horarios') + '#secao-eventos')
+
+@horarios_bp.route('/horarios/editar_evento/<int:id>', methods=['GET', 'POST'])
+@login_required
+def editar_evento(id):
+    with closing(get_db()) as conn, conn:
+        evento = conn.execute('SELECT * FROM eventos WHERE id=?', (id,)).fetchone()
+        if not evento:
+            return 'Evento não encontrado.', 404
+        if request.method == 'POST':
+            try:
+                dados = validar_formulario_evento()
+            except ValueError as erro:
+                return str(erro), 400
+            conn.execute('''UPDATE eventos SET data_evento=?, nome=?, observacao=?, local=?,
+                hora_inicio=?, hora_fim=? WHERE id=?''', (*dados, id))
+            registrar_acao_admin('editar_evento', {
+                'evento_id': id, 'data_evento': dados[0], 'nome': dados[1]
+            })
+            return redirect(url_for('horarios.ver_horarios') + '#secao-eventos')
+    return render_template('editar_evento.html', evento=dict(evento))
+
+@horarios_bp.post('/horarios/adicionar_participante_evento')
+@login_required
+def adicionar_participante_evento():
+    nome_externo = request.form.get('nome_externo', '').strip()
+    genero = request.form.get('genero', 'masculino')
+    try:
+        evento_id = int(request.form.get('evento_id', ''))
+        ids_brutos = request.form.getlist('funcionario_ids')
+        if request.form.get('funcionario_id'):
+            ids_brutos.append(request.form['funcionario_id'])
+        funcionario_ids = list(dict.fromkeys(int(valor) for valor in ids_brutos))
+    except ValueError:
+        return 'Evento ou participante inválido.', 400
+    if evento_id <= 0 or (not funcionario_ids and not nome_externo) or len(nome_externo) > 150 or genero not in {'masculino', 'feminino'}:
+        return 'Selecione funcionários ou informe um participante não cadastrado.', 400
+    with closing(get_db()) as conn, conn:
+        if not conn.execute('SELECT 1 FROM eventos WHERE id=?', (evento_id,)).fetchone():
+            return 'Evento não encontrado.', 404
+        validos = {r[0] for r in conn.execute(
+            f"SELECT id FROM funcionarios WHERE ativo=1 AND id IN ({','.join('?' * len(funcionario_ids))})",
+            funcionario_ids
+        )} if funcionario_ids else set()
+        if validos != set(funcionario_ids):
+            return 'Funcionário inválido.', 400
+        existentes = {r[0] for r in conn.execute(
+            'SELECT funcionario_id FROM evento_participantes WHERE evento_id=? AND funcionario_id IS NOT NULL',
+            (evento_id,))}
+        novos = [id_ for id_ in funcionario_ids if id_ not in existentes]
+        conn.executemany('INSERT INTO evento_participantes (evento_id,funcionario_id) VALUES (?,?)',
+                         ((evento_id, id_) for id_ in novos))
+        if nome_externo:
+            if conn.execute('''SELECT 1 FROM evento_participantes WHERE evento_id=? AND
+                funcionario_id IS NULL AND nome_externo=? COLLATE NOCASE''', (evento_id, nome_externo)).fetchone():
+                return 'Participante externo já adicionado ao evento.', 409
+            conn.execute('''INSERT INTO evento_participantes
+                (evento_id,nome_externo,genero) VALUES (?,?,?)''', (evento_id, nome_externo, genero))
+    registrar_acao_admin('adicionar_participantes_evento', {
+        'evento_id': evento_id, 'funcionarios_adicionados': novos, 'participante_externo': nome_externo or None
+    })
+    return redirect(url_for('horarios.ver_horarios') + '#secao-eventos')
+
+@horarios_bp.post('/horarios/excluir_participante_evento/<int:id>')
+@login_required
+def excluir_participante_evento(id):
+    with closing(get_db()) as conn, conn:
+        removido = conn.execute('DELETE FROM evento_participantes WHERE id=?', (id,)).rowcount
+    if not removido:
+        return 'Participante não encontrado.', 404
+    registrar_acao_admin('excluir_participante_evento', {'participante_id': id})
+    return redirect(url_for('horarios.ver_horarios') + '#secao-eventos')
+
+@horarios_bp.post('/horarios/excluir_evento/<int:id>')
+@login_required
+def excluir_evento(id):
+    with closing(get_db()) as conn, conn:
+        removido = conn.execute('DELETE FROM eventos WHERE id=?', (id,)).rowcount
+    if not removido:
+        return 'Evento não encontrado.', 404
+    registrar_acao_admin('excluir_evento', {'evento_id': id})
+    return redirect(url_for('horarios.ver_horarios') + '#secao-eventos')
 @horarios_bp.route('/horarios/salvar_funcionario', methods=['POST'])
 @login_required
 def salvar_funcionario():

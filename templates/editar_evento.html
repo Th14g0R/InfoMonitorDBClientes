@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="pt-BR" data-theme="light">
+<head>
+    <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Editar evento</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='horarios-20261001-4') }}">
+    <script src="{{ url_for('static', filename='ui.js', v='horarios-20261001-4') }}" defer></script>
+</head>
+<body><main id="conteudo-principal" class="pagina-edicao-evento">
+    <div class="card edicao-evento-card">
+        <div class="section-header"><h3>✏️ Editar evento</h3></div>
+        <form method="POST" class="form-grid evento-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <label class="form-label evento-campo-data">Data<input type="date" name="data_evento" required value="{{ evento.data_evento }}" class="form-control"></label>
+            <label class="form-label evento-campo-nome">Nome<input type="text" name="nome" required maxlength="150" value="{{ evento.nome }}" class="form-control"></label>
+            <label class="form-label evento-campo-local">Local<input type="text" name="local" maxlength="200" value="{{ evento.local }}" class="form-control"></label>
+            <label class="form-label evento-campo-inicio">Início<input type="time" name="hora_inicio" value="{{ evento.hora_inicio }}" class="form-control"></label>
+            <label class="form-label evento-campo-fim">Fim<input type="time" name="hora_fim" value="{{ evento.hora_fim }}" class="form-control"></label>
+            <label class="form-label evento-observacao">Observação<textarea name="observacao" maxlength="1000" rows="3" class="form-control">{{ evento.observacao }}</textarea></label>
+            <div class="edicao-evento-acoes"><button class="btn btn-success">Salvar alterações</button><a href="/horarios#secao-eventos" class="btn btn-secondary">Cancelar</a></div>
+        </form>
+    </div>
+</main></body></html>

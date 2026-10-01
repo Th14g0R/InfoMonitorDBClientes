@@ -874,6 +874,45 @@ tr:hover { background-color: var(--cor-superficie-hover); }
 
 /* Melhorias para dark mode - contraste de texto */
 [data-theme="dark"] .text-muted { color: #94a3b8; }
+
+/* Eventos */
+.evento-form { display: grid; grid-template-columns: repeat(12,minmax(0,1fr)); gap: var(--space-3); align-items: end; margin-bottom: var(--space-4); }
+.evento-form label { display: flex; min-width: 0; flex-direction: column; gap: var(--space-1); }
+.evento-campo-data { grid-column: span 2; }.evento-campo-nome { grid-column: span 3; }.evento-campo-local { grid-column: span 3; }.evento-campo-inicio,.evento-campo-fim { grid-column: span 2; }
+.evento-observacao { grid-column: span 9; min-width: 0; }.evento-submit { grid-column: span 3; min-height: 42px; }
+.evento-cabecalho { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
+.evento-acoes { display: flex; align-items: center; gap: var(--space-2); flex-shrink: 0; }
+.evento-card { margin-top: var(--space-3); padding: var(--space-4); border: 1px solid #cad5df; border-left: 5px solid #7890a5; border-radius: var(--raio-lg); background: #f7f9fb; }
+.evento-card h4 { margin: 0; }
+.evento-hoje { background: #e7f3ed; border-color: #9abfad; border-left-color: #4f8067; }
+.evento-vespera { background: #f4f0e4; border-color: #c9bb91; border-left-color: #8f7b43; }
+.eventos-vazio { background: #f1f4f7; border-color: #cbd5df; }
+.eventos-mensagem-vazia { margin: var(--space-3) 0 0; color: #5f7080; }
+.evento-status { display: inline-block; margin: var(--space-2) 0; padding: 2px 9px; border-radius: 999px; background: rgba(70,90,105,.12); font-size: .8rem; font-weight: 700; }
+.evento-detalhes { display: flex; flex-wrap: wrap; gap: var(--space-3); margin: var(--space-2) 0; color: var(--cor-texto-suave); }
+.evento-observacao-texto { white-space: pre-wrap; }
+.evento-participantes-titulo { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-3); }
+.evento-total-participantes { padding: 3px 10px; border: 1px solid var(--cor-borda-forte); border-radius: var(--raio-full); background: var(--cor-superficie); color: var(--cor-texto-suave); font-size: var(--font-size-xs); font-weight: 700; }
+.evento-participantes { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-2) 0 var(--space-3); }
+.evento-participante { display: flex; align-items: center; gap: 7px; padding: 5px 8px; border: 1px solid var(--cor-borda); border-radius: 999px; background: var(--cor-superficie); }
+.evento-participante img { width: 32px; height: 32px; object-fit: cover; border-radius: 50%; }
+.evento-participante span { display: flex; flex-direction: column; }
+.evento-participante small { color: var(--cor-texto-suave); font-size: .68rem; }
+.participante-form { display: grid; grid-template-columns: repeat(12,minmax(0,1fr)); gap: var(--space-3); align-items: end; margin-top: var(--space-3); }
+.selecao-funcionarios { grid-column: span 5; min-width: 0; margin: 0; padding: var(--space-3); border: 1px solid var(--cor-borda); border-radius: var(--raio-md); }
+.selecao-funcionarios legend { padding: 0 var(--space-1); font-weight: 600; }
+.selecao-toolbar { display: flex; min-height: 32px; align-items: center; justify-content: space-between; gap: var(--space-2); margin-bottom: var(--space-2); color: var(--cor-texto-suave); }
+.participante-externo { grid-column: span 3; }.participante-genero { grid-column: span 2; }.participante-submit { grid-column: span 2; min-height: 42px; }
+.funcionario-multiplo { width: 100%; min-height: 9rem; }
+.pagina-edicao-evento { max-width: 1180px; margin: 40px auto; padding: 0 var(--space-4); }
+.edicao-evento-card { margin: 0; }.edicao-evento-acoes { grid-column: span 3; display: flex; align-items: center; gap: var(--space-2); }
+[data-theme="dark"] .evento-card { background: #172131; border-color: #34465a; border-left-color: #71889d; }
+[data-theme="dark"] .evento-hoje { background: #142c25; border-color: #355f50; border-left-color: #70a58d; }
+[data-theme="dark"] .evento-vespera { background: #302b1d; border-color: #62583a; border-left-color: #aa9561; }
+[data-theme="dark"] .eventos-vazio { background: #151e2b; border-color: #344255; }
+[data-theme="dark"] .eventos-mensagem-vazia { color: #9babbc; }
+@media (max-width: 1100px) { .evento-campo-data,.evento-campo-inicio,.evento-campo-fim { grid-column: span 4; }.evento-campo-nome,.evento-campo-local { grid-column: span 6; }.evento-observacao { grid-column: span 8; }.evento-submit { grid-column: span 4; }.selecao-funcionarios { grid-column: span 12; }.participante-externo { grid-column: span 5; }.participante-genero { grid-column: span 3; }.participante-submit { grid-column: span 4; } }
+@media (max-width: 640px) { .evento-form > *, .participante-form > *, .edicao-evento-acoes { grid-column: 1 / -1; }.evento-cabecalho { flex-direction: column; }.selecao-toolbar { align-items: flex-start; flex-direction: column; } }
 [data-theme="dark"] .badge-inativo { color: #94a3b8; }
 [data-theme="dark"] .tr-inativo { opacity: 0.5; }
 [data-theme="dark"] .alert-box { background: #3d2a05; border-color: #92400e; color: #fbbf24; }
