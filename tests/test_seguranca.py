@@ -99,7 +99,7 @@ class SegurancaTest(unittest.TestCase):
                 'csrf_token': self.token, 'evento_id': evento_id, **participante
             })
             self.assertEqual(response.status_code, 302)
-        pagina = self.client.get('/horarios')
+        pagina = self.client.get('/horarios?evento_data=2030-05-11')
         self.assertIn('Treinamento atualizado', pagina.text)
         self.assertIn('Participante interno', pagina.text)
         self.assertIn('Segundo interno', pagina.text)
@@ -119,24 +119,28 @@ class SegurancaTest(unittest.TestCase):
             conn.execute('DELETE FROM funcionarios WHERE id IN (?,?)', (funcionario_id, segundo_id))
 
     def test_eventos_filtram_e_paginam_tres_por_vez(self):
+        prefixo = date.today().strftime('%Y-%m-')
         with closing(self.horarios.get_db()) as conn, conn:
             conn.executemany('INSERT INTO eventos (data_evento, nome) VALUES (?, ?)', [
-                ('2040-01-01', 'Evento pagina 1A'), ('2040-01-02', 'Evento pagina 1B'),
-                ('2040-01-03', 'Evento pagina 1C'), ('2040-01-04', 'Evento pagina 2'),
+                (prefixo + '01', 'Evento pagina 1A'), (prefixo + '02', 'Evento pagina 1B'),
+                (prefixo + '03', 'Evento pagina 1C'), (prefixo + '04', 'Evento pagina 2'),
+                ('2040-01-01', 'Evento fora do mes'),
             ])
         primeira = self.client.get('/horarios')
         self.assertEqual(primeira.text.count('class="evento-card '), 3)
         self.assertIn('pagina-equipe-verde', primeira.text)
+        self.assertNotIn('Evento fora do mes', primeira.text)
         segunda = self.client.get('/horarios?pagina_eventos=2')
         self.assertIn('Evento pagina 2', segunda.text)
-        dia = self.client.get('/horarios?evento_data=2040-01-02')
+        dia = self.client.get('/horarios?evento_data=' + prefixo + '02')
         self.assertIn('Evento pagina 1B', dia.text)
         self.assertNotIn('Evento pagina 1A', dia.text)
-        periodo = self.client.get('/horarios?evento_inicio=2040-01-02&evento_fim=2040-01-03')
+        self.assertIn('Evento fora do mes', self.client.get('/horarios?evento_data=2040-01-01').text)
+        periodo = self.client.get('/horarios?evento_inicio=' + prefixo + '02&evento_fim=' + prefixo + '03')
         self.assertEqual(periodo.text.count('class="evento-card '), 2)
         self.assertEqual(self.client.get('/horarios?evento_inicio=2040-01-03&evento_fim=2040-01-02').status_code, 400)
         with closing(self.horarios.get_db()) as conn, conn:
-            conn.execute("DELETE FROM eventos WHERE nome LIKE 'Evento pagina %'")
+            conn.execute("DELETE FROM eventos WHERE nome LIKE 'Evento pagina %' OR nome='Evento fora do mes'")
     def test_filtro_ausencias_e_aniversario(self):
         with closing(self.horarios.get_db()) as conn, conn:
             pessoa = conn.execute("INSERT INTO funcionarios (nome, data_nascimento) VALUES ('Filtro teste', '1987-12-17')").lastrowid

@@ -472,8 +472,8 @@ HTML_INTERFACE = """
     </style>
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <script src="{{ url_for('static', filename='csrf.js') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='horarios-20261001-5') }}">
-<script src="{{ url_for('static', filename='ui.js', v='horarios-20261001-5') }}" defer></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='horarios-20261001-6') }}">
+<script src="{{ url_for('static', filename='ui.js', v='horarios-20261001-6') }}" defer></script>
 </head>
 <body>
     <!-- Skip link para acessibilidade -->
@@ -1303,13 +1303,18 @@ def ver_horarios():
         if evento_data:
             filtros_eventos.append('data_evento = ?')
             params_eventos.append(evento_data)
-        else:
+        elif evento_inicio or evento_fim:
             if evento_inicio:
                 filtros_eventos.append('data_evento >= ?')
                 params_eventos.append(evento_inicio)
             if evento_fim:
                 filtros_eventos.append('data_evento <= ?')
                 params_eventos.append(evento_fim)
+        else:
+            primeiro_dia_mes = hoje.replace(day=1)
+            primeiro_dia_proximo_mes = (primeiro_dia_mes.replace(day=28) + timedelta(days=4)).replace(day=1)
+            filtros_eventos.extend(('data_evento >= ?', 'data_evento < ?'))
+            params_eventos.extend((primeiro_dia_mes.isoformat(), primeiro_dia_proximo_mes.isoformat()))
         where_eventos = (' WHERE ' + ' AND '.join(filtros_eventos)) if filtros_eventos else ''
         total_eventos = conn.execute('SELECT COUNT(*) FROM eventos' + where_eventos, params_eventos).fetchone()[0]
         total_paginas_eventos = max(1, (total_eventos + 2) // 3)

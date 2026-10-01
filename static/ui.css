@@ -894,14 +894,14 @@ tr:hover { background-color: var(--cor-superficie-hover); }
 .evento-status { display: inline-block; margin: var(--space-2) 0; padding: 2px 9px; border-radius: 999px; background: rgba(70,90,105,.12); font-size: .8rem; font-weight: 700; }
 .evento-detalhes { display: flex; flex-wrap: wrap; gap: var(--space-3); margin: var(--space-2) 0; color: var(--cor-texto-suave); }
 .evento-observacao-texto { white-space: pre-wrap; }
-.evento-conteudo { display: grid; grid-template-columns: minmax(260px,.8fr) minmax(420px,1.6fr); gap: var(--space-5); margin-top: var(--space-2); }
+.evento-conteudo { display: grid; grid-template-columns: minmax(240px,.72fr) minmax(380px,1.15fr) minmax(430px,1.3fr); gap: 0; margin-top: var(--space-2); }
 .evento-coluna-dados { min-width: 0; padding-right: var(--space-4); }
-.evento-coluna-participantes { min-width: 0; padding-left: var(--space-5); border-left: 1px solid var(--cor-borda-forte); }
+.evento-coluna-participantes,.evento-coluna-adicao { min-width: 0; padding: 0 var(--space-5); border-left: 1px solid var(--cor-borda-forte); }
 .evento-participantes-titulo { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-3); }
 .evento-total-participantes { padding: 3px 10px; border: 1px solid var(--cor-borda-forte); border-radius: var(--raio-full); background: var(--cor-superficie); color: var(--cor-texto-suave); font-size: var(--font-size-xs); font-weight: 700; }
 .evento-participantes { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-2) 0 var(--space-3); }
 .evento-participante { display: flex; align-items: center; gap: 7px; padding: 5px 8px; border: 1px solid var(--cor-borda); border-radius: 999px; background: var(--cor-superficie); }
-.evento-participante img { width: 32px; height: 32px; object-fit: cover; border-radius: 50%; }
+.evento-participante img { width: 28px; height: 28px; object-fit: cover; border-radius: 50%; }
 .evento-participante span { display: flex; flex-direction: column; }
 .evento-participante small { color: var(--cor-texto-suave); font-size: .68rem; }
 .participante-form { display: grid; grid-template-columns: repeat(12,minmax(0,1fr)); gap: var(--space-3); align-items: end; margin-top: var(--space-3); }
@@ -910,10 +910,10 @@ tr:hover { background-color: var(--cor-superficie-hover); }
 .selecao-toolbar { display: flex; min-height: 32px; align-items: center; justify-content: space-between; gap: var(--space-2); margin-bottom: var(--space-2); color: var(--cor-texto-suave); }
 .participante-externo { grid-column: span 3; }.participante-genero { grid-column: span 2; }.participante-submit { grid-column: span 2; min-height: 42px; }
 .funcionario-multiplo { width: 100%; min-height: 9rem; }
-.evento-coluna-participantes .selecao-funcionarios { grid-column: 1 / -1; }
-.evento-coluna-participantes .participante-externo { grid-column: span 5; }
-.evento-coluna-participantes .participante-genero { grid-column: span 3; }
-.evento-coluna-participantes .participante-submit { grid-column: span 4; }
+.evento-coluna-adicao .selecao-funcionarios { grid-column: 1 / -1; }
+.evento-coluna-adicao .participante-externo { grid-column: span 5; }
+.evento-coluna-adicao .participante-genero { grid-column: span 3; }
+.evento-coluna-adicao .participante-submit { grid-column: span 4; }
 .evento-paginacao { display: flex; align-items: center; justify-content: center; gap: var(--space-3); margin-top: var(--space-4); color: var(--cor-texto-suave); }
 .pagina-edicao-evento { max-width: 1180px; margin: 40px auto; padding: 0 var(--space-4); }
 .edicao-evento-card { margin: 0; }.edicao-evento-acoes { grid-column: span 3; display: flex; align-items: center; gap: var(--space-2); }
@@ -922,15 +922,16 @@ tr:hover { background-color: var(--cor-superficie-hover); }
 [data-theme="dark"] .evento-vespera { background: #302b1d; border-color: #62583a; border-left-color: #aa9561; }
 [data-theme="dark"] .eventos-vazio { background: #151e2b; border-color: #344255; }
 [data-theme="dark"] .eventos-mensagem-vazia { color: #9babbc; }
-.pagina-equipe-verde > .card { background: #f5faf7; border-color: #d8e8df; }
-.pagina-equipe-amarela > .card { background: #fcfaf2; border-color: #e9dfbf; }
-.pagina-equipe-verde .evento-card.evento-normal { background: #f1f8f4; border-color: #c9dfd2; border-left-color: #739b84; }
-.pagina-equipe-amarela .evento-card.evento-normal { background: #faf7ec; border-color: #e3d7ad; border-left-color: #a69458; }
+.pagina-equipe-verde > .card { background: #e9f5ed; border-color: #b9d8c5; }
+.pagina-equipe-amarela > .card { background: #f8f1d9; border-color: #dac98d; }
+.pagina-equipe-verde .evento-card.evento-normal { background: #e3f1e8; border-color: #afd0bc; border-left-color: #648f76; }
+.pagina-equipe-amarela .evento-card.evento-normal { background: #f5edcf; border-color: #d5c17c; border-left-color: #998442; }
 [data-theme="dark"] .pagina-equipe-verde > .card { background: #13251f; border-color: #29483c; }
 [data-theme="dark"] .pagina-equipe-amarela > .card { background: #292619; border-color: #514a2e; }
 [data-theme="dark"] .pagina-equipe-verde .evento-card.evento-normal { background: #162a23; border-color: #315244; border-left-color: #6f9a85; }
 [data-theme="dark"] .pagina-equipe-amarela .evento-card.evento-normal { background: #302c1d; border-color: #5d5433; border-left-color: #a69458; }
-@media (max-width: 1100px) { .evento-campo-data,.evento-campo-inicio,.evento-campo-fim { grid-column: span 4; }.evento-campo-nome,.evento-campo-local { grid-column: span 6; }.evento-observacao { grid-column: span 8; }.evento-submit { grid-column: span 4; }.evento-conteudo { grid-template-columns: 1fr; }.evento-coluna-dados { padding-right: 0; }.evento-coluna-participantes { padding: var(--space-4) 0 0; border-left: 0; border-top: 1px solid var(--cor-borda-forte); }.selecao-funcionarios { grid-column: span 12; }.participante-externo { grid-column: span 5; }.participante-genero { grid-column: span 3; }.participante-submit { grid-column: span 4; } }
+@media (max-width: 1380px) { .evento-conteudo { grid-template-columns: minmax(240px,.7fr) minmax(380px,1.3fr); }.evento-coluna-adicao { grid-column: 1 / -1; padding: var(--space-4) 0 0; margin-top: var(--space-4); border-left: 0; border-top: 1px solid var(--cor-borda-forte); } }
+@media (max-width: 900px) { .evento-campo-data,.evento-campo-inicio,.evento-campo-fim { grid-column: span 4; }.evento-campo-nome,.evento-campo-local { grid-column: span 6; }.evento-observacao { grid-column: span 8; }.evento-submit { grid-column: span 4; }.evento-conteudo { grid-template-columns: 1fr; }.evento-coluna-dados { padding-right: 0; }.evento-coluna-participantes,.evento-coluna-adicao { padding: var(--space-4) 0 0; margin-top: var(--space-4); border-left: 0; border-top: 1px solid var(--cor-borda-forte); }.selecao-funcionarios { grid-column: span 12; }.participante-externo { grid-column: span 5; }.participante-genero { grid-column: span 3; }.participante-submit { grid-column: span 4; } }
 @media (max-width: 640px) { .evento-form > *, .participante-form > *, .edicao-evento-acoes { grid-column: 1 / -1; }.evento-cabecalho,.evento-filtro-dia,.evento-filtro-periodo { align-items: stretch; flex-direction: column; }.evento-filtros { align-items: stretch; flex-direction: column; }.selecao-toolbar { align-items: flex-start; flex-direction: column; }.evento-paginacao { flex-wrap: wrap; } }
 [data-theme="dark"] .badge-inativo { color: #94a3b8; }
 [data-theme="dark"] .tr-inativo { opacity: 0.5; }
