@@ -109,6 +109,7 @@ class SegurancaTest(unittest.TestCase):
         self.assertIn('10:00–12:00', pagina.text)
         self.assertIn('/static/fotos/interno.jpg', pagina.text)
         self.assertIn('/static/avatar-feminino.svg', pagina.text)
+        self.assertIn('Convidado', pagina.text)
         self.assertEqual(self.client.post('/horarios/adicionar_participante_evento', data={
             'csrf_token': self.token, 'evento_id': evento_id, 'nome_externo': 'Convidado externo'
         }).status_code, 409)
@@ -116,6 +117,26 @@ class SegurancaTest(unittest.TestCase):
         with closing(self.horarios.get_db()) as conn, conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM evento_participantes WHERE evento_id=?', (evento_id,)).fetchone()[0], 0)
             conn.execute('DELETE FROM funcionarios WHERE id IN (?,?)', (funcionario_id, segundo_id))
+
+    def test_eventos_filtram_e_paginam_tres_por_vez(self):
+        with closing(self.horarios.get_db()) as conn, conn:
+            conn.executemany('INSERT INTO eventos (data_evento, nome) VALUES (?, ?)', [
+                ('2040-01-01', 'Evento pagina 1A'), ('2040-01-02', 'Evento pagina 1B'),
+                ('2040-01-03', 'Evento pagina 1C'), ('2040-01-04', 'Evento pagina 2'),
+            ])
+        primeira = self.client.get('/horarios')
+        self.assertEqual(primeira.text.count('class="evento-card '), 3)
+        self.assertIn('pagina-equipe-verde', primeira.text)
+        segunda = self.client.get('/horarios?pagina_eventos=2')
+        self.assertIn('Evento pagina 2', segunda.text)
+        dia = self.client.get('/horarios?evento_data=2040-01-02')
+        self.assertIn('Evento pagina 1B', dia.text)
+        self.assertNotIn('Evento pagina 1A', dia.text)
+        periodo = self.client.get('/horarios?evento_inicio=2040-01-02&evento_fim=2040-01-03')
+        self.assertEqual(periodo.text.count('class="evento-card '), 2)
+        self.assertEqual(self.client.get('/horarios?evento_inicio=2040-01-03&evento_fim=2040-01-02').status_code, 400)
+        with closing(self.horarios.get_db()) as conn, conn:
+            conn.execute("DELETE FROM eventos WHERE nome LIKE 'Evento pagina %'")
     def test_filtro_ausencias_e_aniversario(self):
         with closing(self.horarios.get_db()) as conn, conn:
             pessoa = conn.execute("INSERT INTO funcionarios (nome, data_nascimento) VALUES ('Filtro teste', '1987-12-17')").lastrowid

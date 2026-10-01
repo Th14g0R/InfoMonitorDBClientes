@@ -472,8 +472,8 @@ HTML_INTERFACE = """
     </style>
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <script src="{{ url_for('static', filename='csrf.js') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='horarios-20261001-4') }}">
-<script src="{{ url_for('static', filename='ui.js', v='horarios-20261001-4') }}" defer></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='horarios-20261001-5') }}">
+<script src="{{ url_for('static', filename='ui.js', v='horarios-20261001-5') }}" defer></script>
 </head>
 <body>
     <!-- Skip link para acessibilidade -->
@@ -507,7 +507,7 @@ HTML_INTERFACE = """
         </div>
     </div>
 
-    <div id="conteudo-principal" role="main">
+    <div id="conteudo-principal" class="pagina-equipe-{{ cor_equipe_dia|lower }}" role="main">
 
     {% with messages = get_flashed_messages() %}
       {% if messages %}
@@ -1224,6 +1224,13 @@ def ver_horarios():
     ausencia_inicio = request.args.get('ausencia_inicio', '').strip()
     ausencia_fim = request.args.get('ausencia_fim', '').strip()
     ausencia_motivo = request.args.get('ausencia_motivo', '').strip()
+    evento_data = request.args.get('evento_data', '').strip()
+    evento_inicio = request.args.get('evento_inicio', '').strip()
+    evento_fim = request.args.get('evento_fim', '').strip()
+    try:
+        pagina_eventos = max(1, int(request.args.get('pagina_eventos', '1')))
+    except ValueError:
+        return 'Informe uma página válida.', 400
     filtro_ausencias = bool(ausencia_inicio or ausencia_fim or ausencia_motivo)
     try:
         for valor in (ausencia_inicio, ausencia_fim):
@@ -1233,6 +1240,14 @@ def ver_horarios():
             raise ValueError()
     except ValueError:
         return 'Informe um período válido.', 400
+    try:
+        for valor in (evento_data, evento_inicio, evento_fim):
+            if valor:
+                validar_data(valor)
+        if evento_inicio and evento_fim and evento_inicio > evento_fim:
+            raise ValueError
+    except ValueError:
+        return 'Informe uma data ou período de evento válido.', 400
     with closing(get_db()) as conn, conn:
         cursor = conn.cursor()
         
@@ -1282,21 +1297,40 @@ def ver_horarios():
 
         cursor.execute("SELECT id, descricao, tipo FROM jornadas ORDER BY tipo, descricao")
         jornadas = cursor.fetchall()
-        eventos = []
-        participantes = {}
-        for p in conn.execute('''SELECT ep.id, ep.evento_id, COALESCE(f.nome, ep.nome_externo),
-                ep.funcionario_id IS NULL, f.foto_url, ep.genero
-            FROM evento_participantes ep LEFT JOIN funcionarios f ON f.id=ep.funcionario_id
-            ORDER BY COALESCE(f.nome, ep.nome_externo) COLLATE NOCASE'''):
-            avatar = (p[4] or '/static/avatar-padrao.svg') if not p[3] else (
-                '/static/avatar-feminino.svg' if p[5] == 'feminino' else '/static/avatar-masculino.svg'
-            )
-            participantes.setdefault(p[1], []).append({
-                'id': p[0], 'nome': p[2], 'externo': bool(p[3]), 'avatar': avatar
-            })
+        eventos, participantes = [], {}
         hoje = date.today()
-        for e in conn.execute('''SELECT id, data_evento, nome, observacao, local, hora_inicio, hora_fim
-            FROM eventos ORDER BY CASE WHEN data_evento >= ? THEN 0 ELSE 1 END, data_evento, id''', (hoje.isoformat(),)):
+        filtros_eventos, params_eventos = [], []
+        if evento_data:
+            filtros_eventos.append('data_evento = ?')
+            params_eventos.append(evento_data)
+        else:
+            if evento_inicio:
+                filtros_eventos.append('data_evento >= ?')
+                params_eventos.append(evento_inicio)
+            if evento_fim:
+                filtros_eventos.append('data_evento <= ?')
+                params_eventos.append(evento_fim)
+        where_eventos = (' WHERE ' + ' AND '.join(filtros_eventos)) if filtros_eventos else ''
+        total_eventos = conn.execute('SELECT COUNT(*) FROM eventos' + where_eventos, params_eventos).fetchone()[0]
+        total_paginas_eventos = max(1, (total_eventos + 2) // 3)
+        pagina_eventos = min(pagina_eventos, total_paginas_eventos)
+        eventos_rows = conn.execute(f'''SELECT id, data_evento, nome, observacao, local, hora_inicio, hora_fim
+            FROM eventos{where_eventos} ORDER BY CASE WHEN data_evento >= ? THEN 0 ELSE 1 END,
+            data_evento, id LIMIT 3 OFFSET ?''', (*params_eventos, hoje.isoformat(), (pagina_eventos - 1) * 3)).fetchall()
+        ids_eventos = [e[0] for e in eventos_rows]
+        if ids_eventos:
+            for p in conn.execute(f'''SELECT ep.id, ep.evento_id, COALESCE(f.nome, ep.nome_externo),
+                    ep.funcionario_id IS NULL, f.foto_url, ep.genero
+                FROM evento_participantes ep LEFT JOIN funcionarios f ON f.id=ep.funcionario_id
+                WHERE ep.evento_id IN ({','.join('?' * len(ids_eventos))})
+                ORDER BY COALESCE(f.nome, ep.nome_externo) COLLATE NOCASE''', ids_eventos):
+                avatar = (p[4] or '/static/avatar-padrao.svg') if not p[3] else (
+                    '/static/avatar-feminino.svg' if p[5] == 'feminino' else '/static/avatar-masculino.svg'
+                )
+                participantes.setdefault(p[1], []).append({
+                    'id': p[0], 'nome': p[2], 'externo': bool(p[3]), 'avatar': avatar
+                })
+        for e in eventos_rows:
             data_evento = datetime.strptime(e[1], '%Y-%m-%d').date()
             estado = 'hoje' if data_evento == hoje else 'vespera' if data_evento == hoje + timedelta(days=1) else 'normal'
             eventos.append({'id': e[0], 'data_formatada': data_evento.strftime('%d/%m/%Y'),
@@ -1367,7 +1401,10 @@ def ver_horarios():
         data_filtro_sabado_formatada=data_filtro_sabado_formatada,
         data_cobertura=data_cobertura,
         data_cobertura_formatada=data_cobertura_formatada,
-        modo_todos=modo_todos, data_trocas=data_trocas, funcionario={}, eventos=eventos
+        modo_todos=modo_todos, data_trocas=data_trocas, funcionario={}, eventos=eventos,
+        evento_data=evento_data, evento_inicio=evento_inicio, evento_fim=evento_fim,
+        pagina_eventos=pagina_eventos, total_paginas_eventos=total_paginas_eventos,
+        total_eventos=total_eventos
     )
 
 def validar_formulario_evento():

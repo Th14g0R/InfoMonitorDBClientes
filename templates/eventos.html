@@ -1,5 +1,17 @@
 <div class="card eventos-secao{% if not eventos %} eventos-vazio{% endif %}" id="secao-eventos">
     <div class="section-header"><h3>📌 Eventos</h3></div>
+    <div class="evento-filtros">
+        <form action="/horarios#secao-eventos" method="GET" class="evento-filtro-dia">
+            <label class="form-label">Pesquisar um dia<input type="date" name="evento_data" value="{{ evento_data }}" class="form-control"></label>
+            <button class="btn btn-bancos" type="submit">Pesquisar dia</button>
+        </form>
+        <form action="/horarios#secao-eventos" method="GET" class="evento-filtro-periodo">
+            <label class="form-label">Início<input type="date" name="evento_inicio" value="{{ evento_inicio }}" class="form-control"></label>
+            <label class="form-label">Fim<input type="date" name="evento_fim" value="{{ evento_fim }}" class="form-control"></label>
+            <button class="btn btn-bancos" type="submit">Pesquisar período</button>
+        </form>
+        {% if evento_data or evento_inicio or evento_fim %}<a href="/horarios#secao-eventos" class="btn btn-secondary">Limpar filtro</a>{% endif %}
+    </div>
     {% if pode_editar_horarios() %}
     <form action="/horarios/salvar_evento" method="POST" class="form-grid evento-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -18,23 +30,29 @@
             <h4>{{ evento.data_formatada }} — {{ evento.nome }}</h4>
             {% if pode_editar_horarios() %}<div class="evento-acoes"><a href="/horarios/editar_evento/{{ evento.id }}" class="btn btn-edit btn-sm">✏️ Editar</a><form action="/horarios/excluir_evento/{{ evento.id }}" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-delete btn-sm" onclick="return confirm('Excluir evento?')">Excluir</button></form></div>{% endif %}
         </div>
-        {% if evento.estado == 'hoje' %}<span class="evento-status">Evento de hoje</span>{% elif evento.estado == 'vespera' %}<span class="evento-status">Amanhã</span>{% endif %}
-        <div class="evento-detalhes">
-            {% if evento.local %}<span>📍 {{ evento.local }}</span>{% endif %}
-            {% if evento.hora_inicio %}<span>🕒 {{ evento.hora_inicio }}–{{ evento.hora_fim }}</span>{% endif %}
-        </div>
-        {% if evento.observacao %}<p class="evento-observacao-texto">{{ evento.observacao }}</p>{% endif %}
-        <div class="evento-participantes-titulo"><strong>Participantes</strong><span class="evento-total-participantes">{{ evento.participantes|length }} participante{% if evento.participantes|length != 1 %}s{% endif %}</span></div>
-        {% if evento.participantes %}<div class="evento-participantes">{% for p in evento.participantes %}<div class="evento-participante"><img src="{{ p.avatar }}" alt=""><span>{{ p.nome }}{% if p.externo %}<small>Externo</small>{% endif %}</span>{% if pode_editar_horarios() %}<form action="/horarios/excluir_participante_evento/{{ p.id }}" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn-icon btn-icon-danger" aria-label="Remover {{ p.nome }}">×</button></form>{% endif %}</div>{% endfor %}</div>{% else %}<p class="text-muted">Nenhum participante.</p>{% endif %}
-        {% if pode_editar_horarios() %}
-        <form action="/horarios/adicionar_participante_evento" method="POST" class="form-grid participante-form">
+        <div class="evento-conteudo">
+        <section class="evento-coluna-dados">
+            {% if evento.estado == 'hoje' %}<span class="evento-status">Evento de hoje</span>{% elif evento.estado == 'vespera' %}<span class="evento-status">Amanhã</span>{% endif %}
+            <div class="evento-detalhes">{% if evento.local %}<span>📍 {{ evento.local }}</span>{% endif %}{% if evento.hora_inicio %}<span>🕒 {{ evento.hora_inicio }}–{{ evento.hora_fim }}</span>{% endif %}</div>
+            {% if evento.observacao %}<p class="evento-observacao-texto">{{ evento.observacao }}</p>{% else %}<p class="text-muted">Sem observações.</p>{% endif %}
+        </section>
+        <section class="evento-coluna-participantes">
+            <div class="evento-participantes-titulo"><strong>Participantes</strong><span class="evento-total-participantes">{{ evento.participantes|length }} participante{% if evento.participantes|length != 1 %}s{% endif %}</span></div>
+            {% if evento.participantes %}<div class="evento-participantes">{% for p in evento.participantes %}<div class="evento-participante"><img src="{{ p.avatar }}" alt=""><span>{{ p.nome }}{% if p.externo %}<small>Convidado</small>{% endif %}</span>{% if pode_editar_horarios() %}<form action="/horarios/excluir_participante_evento/{{ p.id }}" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn-icon btn-icon-danger" aria-label="Remover {{ p.nome }}">×</button></form>{% endif %}</div>{% endfor %}</div>{% else %}<p class="text-muted">Nenhum participante.</p>{% endif %}
+            {% if pode_editar_horarios() %}<form action="/horarios/adicionar_participante_evento" method="POST" class="form-grid participante-form">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="evento_id" value="{{ evento.id }}">
             <fieldset class="selecao-funcionarios"><legend>Funcionários</legend><div class="selecao-toolbar"><small>Use Ctrl para selecionar individualmente.</small><button type="button" class="btn btn-secondary btn-sm" onclick="this.closest('fieldset').querySelectorAll('option').forEach(o => o.selected = true)">Selecionar todos</button></div><select name="funcionario_ids" multiple size="6" class="form-select funcionario-multiplo">{% for f in funcionarios if f[11] == 1 %}<option value="{{ f[0] }}">{{ f[1] }}</option>{% endfor %}</select></fieldset>
             <label class="form-label participante-externo">Participante externo<input type="text" name="nome_externo" maxlength="150" class="form-control" placeholder="Nome completo"></label>
             <label class="form-label participante-genero">Avatar externo<select name="genero" class="form-select"><option value="masculino">Masculino</option><option value="feminino">Feminino</option></select></label>
             <button class="btn btn-primary participante-submit">Adicionar participantes</button>
-        </form>
-        {% endif %}
+            </form>{% endif %}
+        </section>
+        </div>
     </article>
     {% else %}<p class="eventos-mensagem-vazia">Nenhum evento cadastrado.</p>{% endfor %}
+    {% if total_paginas_eventos > 1 %}<nav class="evento-paginacao" aria-label="Paginação de eventos">
+        {% if pagina_eventos > 1 %}<a class="btn btn-secondary btn-sm" href="{{ url_for('horarios.ver_horarios', evento_data=evento_data, evento_inicio=evento_inicio, evento_fim=evento_fim, pagina_eventos=pagina_eventos-1) }}#secao-eventos">← Anteriores</a>{% endif %}
+        <span>Página {{ pagina_eventos }} de {{ total_paginas_eventos }} — {{ total_eventos }} eventos</span>
+        {% if pagina_eventos < total_paginas_eventos %}<a class="btn btn-secondary btn-sm" href="{{ url_for('horarios.ver_horarios', evento_data=evento_data, evento_inicio=evento_inicio, evento_fim=evento_fim, pagina_eventos=pagina_eventos+1) }}#secao-eventos">Próximos →</a>{% endif %}
+    </nav>{% endif %}
 </div>
