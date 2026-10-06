@@ -10,12 +10,14 @@ import ssl
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from zoneinfo import ZoneInfo
 
 from cryptography import x509
 from flask import flash, redirect, render_template, request, url_for
 
 LOGGER = logging.getLogger(__name__)
 ALERTA_DIAS = 35
+FUSO_LOCAL = ZoneInfo('America/Fortaleza')
 DOMINIOS = (
     'info-api', 'api-tray', 'api-oto', 'api-anotai',
     'infoapiretaguarda', 'infocob', 'api-scanntech', 'guia',
@@ -92,7 +94,7 @@ def enviar_email(itens, *, teste=False):
 
 
 def formatar_data(valor):
-    return datetime.fromisoformat(valor).strftime('%d/%m/%Y %H:%M UTC') if valor else '—'
+    return datetime.fromisoformat(valor).astimezone(FUSO_LOCAL).strftime('%d/%m/%Y %H:%M GMT-3') if valor else '—'
 
 
 class MonitorCertificados:
@@ -122,7 +124,7 @@ class MonitorCertificados:
             rotina = conn.execute('SELECT * FROM certificados_rotina WHERE id=1').fetchone()
             if rotina['bloqueio_ate'] and rotina['bloqueio_ate'] > instante.isoformat():
                 return 'Uma verificação já está em andamento ou foi executada recentemente.'
-            if not manual and rotina['mes'] == instante.strftime('%Y-%m'):
+            if not manual and rotina['mes'] == instante.astimezone(FUSO_LOCAL).strftime('%Y-%m'):
                 return 'Verificação mensal já concluída.'
             conn.execute('UPDATE certificados_rotina SET bloqueio_ate=? WHERE id=1', ((instante + timedelta(minutes=30)).isoformat(),))
             dominios = conn.execute('SELECT dominio FROM certificados ORDER BY dominio').fetchall()
@@ -169,7 +171,7 @@ class MonitorCertificados:
         finally:
             with closing(self.conectar()) as conn, conn:
                 conn.execute('UPDATE certificados_rotina SET mes=CASE WHEN ? THEN ? ELSE mes END, bloqueio_ate=? WHERE id=1',
-                             (concluida, instante.strftime('%Y-%m'), (agora() + timedelta(minutes=1)).isoformat()))
+                             (concluida, instante.astimezone(FUSO_LOCAL).strftime('%Y-%m'), (agora() + timedelta(minutes=1)).isoformat()))
 
 
 def configurar_certificados(bp, conectar, tem_permissao, scheduler):

@@ -7,7 +7,7 @@ from datetime import timedelta
 from unittest.mock import patch, MagicMock
 
 from flask import Flask
-from certificados import MonitorCertificados, agora, validar_dominio, configurar_certificados
+from certificados import MonitorCertificados, agora, validar_dominio, configurar_certificados, formatar_data
 
 
 class CertificadosTest(unittest.TestCase):
@@ -27,6 +27,11 @@ class CertificadosTest(unittest.TestCase):
     def liberar(self):
         with closing(self.conectar()) as conn, conn:
             conn.execute('UPDATE certificados_rotina SET bloqueio_ate=NULL')
+
+    def test_horario_fortaleza_com_mudanca_de_dia(self):
+        self.assertEqual(formatar_data('2026-11-01T12:00:00+00:00'), '01/11/2026 09:00 GMT-3')
+        self.assertEqual(formatar_data('2026-11-01T01:00:00+00:00'), '31/10/2026 22:00 GMT-3')
+        self.assertEqual(formatar_data(None), '—')
 
     def test_validacao_ssrf(self):
         for dominio in ('localhost', '127.0.0.1', 'https://api.infobrasilsistemas.com.br',
@@ -136,6 +141,7 @@ class CertificadosTest(unittest.TestCase):
             self.assertIsNone(teste['Cc'])
             self.assertIsNone(teste['Bcc'])
             self.assertIn('Datas fictícias', teste.get_content())
+            self.assertIn('01/11/2026 09:00 GMT-3', teste.get_content())
 
 
 if __name__ == '__main__':
