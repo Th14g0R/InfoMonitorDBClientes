@@ -3,7 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from datetime import timedelta
+from datetime import datetime, timedelta
 from unittest.mock import patch, MagicMock
 
 from flask import Flask
@@ -29,8 +29,8 @@ class CertificadosTest(unittest.TestCase):
             conn.execute('UPDATE certificados_rotina SET bloqueio_ate=NULL')
 
     def test_horario_fortaleza_com_mudanca_de_dia(self):
-        self.assertEqual(formatar_data('2026-11-01T12:00:00+00:00'), '01/11/2026 09:00 GMT-3')
-        self.assertEqual(formatar_data('2026-11-01T01:00:00+00:00'), '31/10/2026 22:00 GMT-3')
+        self.assertEqual(formatar_data('2026-11-01T12:00:00+00:00'), '01/11/2026 09:00')
+        self.assertEqual(formatar_data('2026-11-01T01:00:00+00:00'), '31/10/2026 22:00')
         self.assertEqual(formatar_data(None), '—')
 
     def test_validacao_ssrf(self):
@@ -67,24 +67,49 @@ class CertificadosTest(unittest.TestCase):
         with patch('certificados.consultar_certificado', return_value=(vencimento, 'Expirado')), patch('certificados.enviar_email', side_effect=RuntimeError('teste')):
             self.monitor.verificar()
         with closing(self.conectar()) as conn, conn:
-            self.assertIsNone(conn.execute('SELECT mes FROM certificados_rotina').fetchone()[0])
+            self.assertIsNone(conn.execute('SELECT semana FROM certificados_rotina').fetchone()[0])
             self.assertIsNone(conn.execute('SELECT email_em FROM certificados LIMIT 1').fetchone()[0])
         self.liberar()
         with patch('certificados.consultar_certificado', return_value=(vencimento, 'Expirado')), patch('certificados.enviar_email') as email:
             self.monitor.verificar()
             email.assert_called_once()
 
-    def test_rotina_mensal_e_falha_de_consulta(self):
+    def test_rotina_semanal_e_falha_de_consulta(self):
         with patch('certificados.consultar_certificado', side_effect=OSError('DNS indisponível')):
             self.monitor.verificar()
         with closing(self.conectar()) as conn:
-            self.assertIsNone(conn.execute('SELECT mes FROM certificados_rotina').fetchone()[0])
+            self.assertIsNone(conn.execute('SELECT semana FROM certificados_rotina').fetchone()[0])
         self.liberar()
         with patch('certificados.consultar_certificado', return_value=((agora() + timedelta(days=90)).isoformat(), 'Válido')) as consultar:
             self.monitor.verificar()
             self.liberar()
             self.monitor.verificar()
             self.assertEqual(consultar.call_count, 8)
+
+    def test_semana_muda_no_domingo_a_meia_noite_fortaleza(self):
+        with patch('certificados.consultar_certificado', return_value=('2030-01-01T00:00:00+00:00', 'Válido')) as consultar:
+            for instante in ('2026-10-11T02:59:00+00:00', '2026-10-11T03:00:00+00:00'):
+                self.liberar()
+                with patch('certificados.agora', return_value=datetime.fromisoformat(instante)):
+                    self.monitor.verificar()
+            self.assertEqual(consultar.call_count, 16)
+        with closing(self.conectar()) as conn:
+            self.assertEqual(conn.execute('SELECT semana FROM certificados_rotina').fetchone()[0], '2026-10-11')
+
+    def test_migracao_mensal_e_agendamento_semanal(self):
+        from flask import Blueprint
+        with closing(self.conectar()) as conn, conn:
+            conn.execute('DROP TABLE certificados_rotina')
+            conn.execute('CREATE TABLE certificados_rotina(id INTEGER PRIMARY KEY, mes TEXT, bloqueio_ate TEXT)')
+            conn.execute("INSERT INTO certificados_rotina VALUES(1, '2026-10', NULL)")
+        scheduler = MagicMock()
+        configurar_certificados(Blueprint('bancos', __name__), self.conectar, lambda _: False, scheduler)
+        with closing(self.conectar()) as conn:
+            self.assertIsNone(conn.execute('SELECT semana FROM certificados_rotina').fetchone()[0])
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM certificados').fetchone()[0], 8)
+        configuracao = scheduler.add_job.call_args.kwargs
+        self.assertEqual((configuracao['day_of_week'], configuracao['hour'], configuracao['minute']), ('sun', 0, 0))
+        self.assertEqual(configuracao['timezone'], 'America/Fortaleza')
 
     def test_publico_e_permissao(self):
         from flask import Blueprint
@@ -141,7 +166,7 @@ class CertificadosTest(unittest.TestCase):
             self.assertIsNone(teste['Cc'])
             self.assertIsNone(teste['Bcc'])
             self.assertIn('Datas fictícias', teste.get_content())
-            self.assertIn('01/11/2026 09:00 GMT-3', teste.get_content())
+            self.assertIn('01/11/2026 09:00', teste.get_content())
 
 
 if __name__ == '__main__':

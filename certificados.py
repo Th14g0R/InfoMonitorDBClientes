@@ -94,7 +94,7 @@ def enviar_email(itens, *, teste=False):
 
 
 def formatar_data(valor):
-    return datetime.fromisoformat(valor).astimezone(FUSO_LOCAL).strftime('%d/%m/%Y %H:%M GMT-3') if valor else '—'
+    return datetime.fromisoformat(valor).astimezone(FUSO_LOCAL).strftime('%d/%m/%Y %H:%M') if valor else '—'
 
 
 class MonitorCertificados:
@@ -107,7 +107,7 @@ class MonitorCertificados:
                     verificado_em TEXT, email_em TEXT, email_expiracao TEXT, email_status TEXT
                 );
                 CREATE TABLE IF NOT EXISTS certificados_rotina (
-                    id INTEGER PRIMARY KEY CHECK(id=1), mes TEXT, bloqueio_ate TEXT
+                    id INTEGER PRIMARY KEY CHECK(id=1), semana TEXT, bloqueio_ate TEXT
                 );
                 INSERT OR IGNORE INTO certificados_rotina(id) VALUES(1);
                 CREATE TABLE IF NOT EXISTS certificados_emails (
@@ -115,17 +115,21 @@ class MonitorCertificados:
                     resultado TEXT NOT NULL
                 );
             ''')
+            if 'semana' not in {coluna['name'] for coluna in conn.execute('PRAGMA table_info(certificados_rotina)')}:
+                conn.execute('ALTER TABLE certificados_rotina ADD COLUMN semana TEXT')
             conn.executemany('INSERT OR IGNORE INTO certificados(dominio) VALUES (?)', [(d + SUFIXO,) for d in DOMINIOS])
 
     def verificar(self, manual=False):
         instante = agora()
+        local = instante.astimezone(FUSO_LOCAL)
+        semana = (local - timedelta(days=(local.weekday() + 1) % 7)).date().isoformat()
         with closing(self.conectar()) as conn, conn:
             conn.execute('BEGIN IMMEDIATE')
             rotina = conn.execute('SELECT * FROM certificados_rotina WHERE id=1').fetchone()
             if rotina['bloqueio_ate'] and rotina['bloqueio_ate'] > instante.isoformat():
                 return 'Uma verificação já está em andamento ou foi executada recentemente.'
-            if not manual and rotina['mes'] == instante.astimezone(FUSO_LOCAL).strftime('%Y-%m'):
-                return 'Verificação mensal já concluída.'
+            if not manual and rotina['semana'] == semana:
+                return 'Verificação semanal já concluída.'
             conn.execute('UPDATE certificados_rotina SET bloqueio_ate=? WHERE id=1', ((instante + timedelta(minutes=30)).isoformat(),))
             dominios = conn.execute('SELECT dominio FROM certificados ORDER BY dominio').fetchall()
         concluida = False
@@ -170,8 +174,8 @@ class MonitorCertificados:
             return resultado
         finally:
             with closing(self.conectar()) as conn, conn:
-                conn.execute('UPDATE certificados_rotina SET mes=CASE WHEN ? THEN ? ELSE mes END, bloqueio_ate=? WHERE id=1',
-                             (concluida, instante.astimezone(FUSO_LOCAL).strftime('%Y-%m'), (agora() + timedelta(minutes=1)).isoformat()))
+                conn.execute('UPDATE certificados_rotina SET semana=CASE WHEN ? THEN ? ELSE semana END, bloqueio_ate=? WHERE id=1',
+                             (concluida, semana, (agora() + timedelta(minutes=1)).isoformat()))
 
 
 def configurar_certificados(bp, conectar, tem_permissao, scheduler):
@@ -214,7 +218,7 @@ def configurar_certificados(bp, conectar, tem_permissao, scheduler):
                 return 'Limite de 100 subdomínios atingido.', 400
             inserido = conn.execute('INSERT OR IGNORE INTO certificados(dominio) VALUES (?)', (dominio,)).rowcount
             if inserido:
-                conn.execute('UPDATE certificados_rotina SET mes=NULL WHERE id=1')
+                conn.execute('UPDATE certificados_rotina SET semana=NULL WHERE id=1')
         flash('Subdomínio adicionado.' if inserido else 'Subdomínio já cadastrado.')
         return redirect(url_for('bancos.certificados'))
 
@@ -225,5 +229,5 @@ def configurar_certificados(bp, conectar, tem_permissao, scheduler):
         flash(monitor.verificar(manual=True))
         return redirect(url_for('bancos.certificados'))
 
-    scheduler.add_job(monitor.verificar, 'cron', hour=5, minute=0, timezone='America/Fortaleza',
-                      id='certificados_mensal', replace_existing=True, max_instances=1, coalesce=True)
+    scheduler.add_job(monitor.verificar, 'cron', day_of_week='sun', hour=0, minute=0, timezone='America/Fortaleza',
+                      id='certificados_semanal', replace_existing=True, max_instances=1, coalesce=True)
