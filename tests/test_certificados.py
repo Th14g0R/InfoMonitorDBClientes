@@ -95,6 +95,28 @@ class CertificadosTest(unittest.TestCase):
         self.assertEqual(client.post('/admin/certificados/adicionar', data={'dominio': 'teste.infobrasilsistemas.com.br'}).status_code, 403)
         self.assertEqual(client.post('/admin/certificados/verificar').status_code, 403)
 
+    def test_ordenacao_numerica_datas_e_campos_ausentes(self):
+        from flask import Blueprint
+        app = Flask(__name__, template_folder=str(Path.cwd() / 'templates'))
+        app.secret_key = 'teste'
+        app.jinja_env.globals['csrf_token'] = lambda: 'teste'
+        bp = Blueprint('bancos', __name__)
+        configurar_certificados(bp, self.conectar, lambda _: False, MagicMock())
+        app.register_blueprint(bp)
+        with closing(self.conectar()) as conn, conn:
+            conn.execute("DELETE FROM certificados")
+            conn.executemany('INSERT INTO certificados(dominio, expira_em) VALUES (?,?)', [
+                ('dez.infobrasilsistemas.com.br', (agora() + timedelta(days=10)).isoformat()),
+                ('dois.infobrasilsistemas.com.br', (agora() + timedelta(days=2)).isoformat()),
+                ('ausente.infobrasilsistemas.com.br', None)])
+        client = app.test_client()
+        for coluna in ('dias', 'expira_em'):
+            for direcao, primeiro, segundo in (('asc', 'dois', 'dez'), ('desc', 'dez', 'dois')):
+                html = client.get('/certificados', query_string={'ordem': coluna, 'direcao': direcao}).text
+                self.assertLess(html.index('https://' + primeiro), html.index('https://' + segundo))
+                self.assertLess(html.index('https://' + segundo), html.index('https://ausente'))
+        self.assertEqual(client.get('/certificados?ordem=campo_invalido').status_code, 200)
+
     def test_email_corpo_e_tls(self):
         from certificados import enviar_email
         with patch.dict('os.environ', {'SMTP_USER': 'test@example.invalid', 'SMTP_PASS': 'test', 'SMTP_PORT': '587'}), patch('certificados.smtplib.SMTP') as smtp:
@@ -107,6 +129,13 @@ class CertificadosTest(unittest.TestCase):
             self.assertEqual(msg['Subject'], 'Certificado vencendo')
             self.assertIn('Suporte Infobrasil', msg.get_content())
             self.assertIn('Mensagem automática', msg.get_content())
+            servidor.send_message.reset_mock()
+            enviar_email([{'dominio': 'api.infobrasilsistemas.com.br', 'expira_em': '2026-11-01T12:00:00+00:00'}], teste=True)
+            teste = servidor.send_message.call_args.args[0]
+            self.assertEqual(teste['To'], 'suporte@infobrasilsistemas.com.br')
+            self.assertIsNone(teste['Cc'])
+            self.assertIsNone(teste['Bcc'])
+            self.assertIn('Datas fictícias', teste.get_content())
 
 
 if __name__ == '__main__':

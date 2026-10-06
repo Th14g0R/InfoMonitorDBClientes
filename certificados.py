@@ -67,16 +67,16 @@ def consultar_certificado(dominio):
     return expira.isoformat(), status
 
 
-def enviar_email(itens):
+def enviar_email(itens, *, teste=False):
     usuario, senha = os.getenv('SMTP_USER'), os.getenv('SMTP_PASS')
     if not usuario or not senha:
         raise RuntimeError('SMTP não configurado.')
     mensagem = EmailMessage()
     mensagem['From'] = usuario
-    mensagem['To'] = 'atendimento@nossatelecom.com.br'
+    mensagem['To'] = 'suporte@infobrasilsistemas.com.br' if teste else 'atendimento@nossatelecom.com.br'
     mensagem['Subject'] = 'Certificado vencendo'
     linhas = [f"- {item['dominio']}: {formatar_data(item['expira_em'])}" for item in itens]
-    mensagem.set_content('Prezados,\n\nOs certificados abaixo estão vencendo ou já expiraram:\n\n' + '\n'.join(linhas) +
+    mensagem.set_content(('TESTE — Datas fictícias para demonstração. Não é uma solicitação real de renovação.\n\n' if teste else '') + 'Prezados,\n\nOs certificados abaixo estão vencendo ou já expiraram:\n\n' + '\n'.join(linhas) +
         '\n\nSolicitamos a renovação para evitar falhas nos sites por motivo de certificado expirado.\n\nSuporte Infobrasil\nMensagem automática.')
     servidor = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
     porta = int(os.getenv('SMTP_PORT', '587'))
@@ -184,7 +184,18 @@ def configurar_certificados(bp, conectar, tem_permissao, scheduler):
             item['dias'] = math.ceil((datetime.fromisoformat(item['expira_em']) - agora()).total_seconds() / 86400) if item['expira_em'] else None
             if item['dias'] is not None and item['dias'] <= 0 and item['status'] != 'Falha na verificação':
                 item['status'] = 'Expirado'
+        colunas = {'dominio': 'Subdomínio', 'status': 'Situação TLS', 'expira_em': 'Validade',
+                   'dias': 'Dias restantes', 'verificado_em': 'Última verificação',
+                   'email_em': 'Último e-mail enviado', 'email_status': 'Solicitação de renovação'}
+        ordem = request.args.get('ordem', 'dominio')
+        if ordem not in colunas:
+            ordem = 'dominio'
+        direcao = 'desc' if request.args.get('direcao') == 'desc' else 'asc'
+        presentes = [item for item in itens if item[ordem] is not None]
+        ausentes = [item for item in itens if item[ordem] is None]
+        itens = sorted(presentes, key=lambda item: item[ordem], reverse=direcao == 'desc') + ausentes
         return render_template('certificados.html', itens=itens, historico=historico, formatar_data=formatar_data,
+                               colunas=colunas, ordem=ordem, direcao=direcao,
                                pode_editar=tem_permissao('perm_certificados'), alerta_dias=ALERTA_DIAS)
 
     @bp.route('/admin/certificados/adicionar', methods=['POST'])
