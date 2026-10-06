@@ -486,6 +486,7 @@ HTML_INTERFACE = """
         <h2 style="margin: 0;">🗓️ Controle de Horários, Cobertura e Rodízio</h2>
         <div class="d-flex items-center gap-2">
             <a href="{{ url_for('bancos.exibir_servidor') }}" class="btn btn-primary">🖥️ Servidores</a>
+            <a href="/certificados" class="btn btn-primary">Certificados</a>
             {% if not session.get('logged_in') %}
                 <a href="{{ url_for('bancos.admin_login', next='/admin') }}" class="btn btn-bancos">🗄️ Gestão de Bancos</a>
             {% elif usuario_tem_permissao('perm_gestao_bancos') %}

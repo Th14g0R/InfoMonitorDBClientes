@@ -27,6 +27,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from werkzeug.security import generate_password_hash, check_password_hash
 import urllib.request
 import urllib.error
+from certificados import configurar_certificados
 from backups import interpretar_status_backups
 from gestao_bancos import listar_pastas, adicionar_banco
 from seguranca import (
@@ -38,15 +39,16 @@ from seguranca import (
 )
 
 # Configuração do Blueprint e Banco
-bancos_bp = Blueprint('bancos', __name__)
+bancos_bp = Blueprint('bancos', __name__, template_folder='templates')
 LOGGER = logging.getLogger(__name__)
 ALLOW_PUBLIC_REGISTER = os.getenv('ALLOW_PUBLIC_REGISTER', '0') == '1'
 
-# Nomes das 3 áreas de acesso que podem ser concedidas por usuário (o Master sempre tem as 3, sempre).
+# Permissões concedidas por usuário; o Master tem acesso total.
 PERMISSOES_DISPONIVEIS = {
     'perm_servidores': 'Editar CNAME/Lojas na Lista de Servidores',
     'perm_gestao_bancos': 'Gestão de Bancos (Admin: enviar/criar/editar/excluir alias)',
     'perm_horarios': 'Painel de Horários',
+    'perm_certificados': 'Gerenciar certificados (adicionar e verificar subdomínios)',
 }
 
 @bancos_bp.before_request
@@ -76,7 +78,7 @@ PAGINAS_PUBLICAS = {
     'bancos.exibir_orfaos', 'bancos.exibir_historico', 'bancos.exibir_backups_ftp',
     'bancos.api_historico', 'bancos.api_testar_cname',
     'bancos.admin_login', 'bancos.esqueci_senha', 'bancos.admin_register',
-    'bancos.redefinir_senha_token',
+    'bancos.redefinir_senha_token', 'bancos.certificados',
 }
 
 
@@ -194,7 +196,7 @@ def init_db_sistema():
         pass
 
     # Colunas de nível de acesso por página (1 = tem acesso). O Master sempre tem acesso a tudo, independente destas colunas.
-    for coluna in ('perm_servidores', 'perm_horarios', 'perm_gestao_bancos'):
+    for coluna in PERMISSOES_DISPONIVEIS:
         try:
             cursor.execute(f"ALTER TABLE usuarios ADD COLUMN {coluna} INTEGER DEFAULT 0;")
         except sqlite3.OperationalError:
@@ -711,6 +713,7 @@ def salvar_historico_diario(metricas_servidores=None):
 # --- AGENDADOR FIXO PARA AS 04:00 DA MANHÃ ---
 scheduler = BackgroundScheduler(daemon=True)
 scheduler.add_job(salvar_historico_diario, 'cron', hour=4, minute=0)
+configurar_certificados(bancos_bp, get_db_connection, tem_permissao, scheduler)
 scheduler.start()
 
 def calcular_runway_disco(servidor, tamanho_gb_atual, capacidade_total_gb=100):
@@ -1541,6 +1544,7 @@ HTML_LAYOUT = """
                     <a href="/orfaos" {% if modo_orfaos %}aria-current="page"{% endif %}>Arquivos órfãos no disco</a>
                     <a href="/historico" {% if modo_historico %}aria-current="page"{% endif %}>Histórico de disco</a>
                     <a href="/backups-ftp">Backups FTP</a>
+                    <a href="/certificados">Certificados</a>
                     <a href="/todos?filtro=sem_lojas">Clientes sem lojas cadastradas</a>
                 </div>
             </details>
@@ -2673,6 +2677,10 @@ HTML_ADMIN = r"""
                                     <div class="form-check form-check-inline">
                                         <input class="form-check-input" type="checkbox" name="perm_horarios" id="perm_horarios_{{ u.id }}" {% if u.perm_horarios %}checked{% endif %}>
                                         <label class="form-check-label small" for="perm_horarios_{{ u.id }}" title="Painel de Horários">Horários</label>
+                                    </div>
+                                    <div class="form-check form-check-inline">
+                                        <input class="form-check-input" type="checkbox" name="perm_certificados" id="perm_certificados_{{ u.id }}" {% if u.perm_certificados %}checked{% endif %}>
+                                        <label class="form-check-label small" for="perm_certificados_{{ u.id }}">Certificados</label>
                                     </div>
                                     <button type="submit" class="btn btn-sm btn-outline-primary ms-1">💾</button>
                                 </form>
@@ -3943,8 +3951,8 @@ def salvar_permissoes_usuario():
         return jsonify({"sucesso": False, "mensagem": "O usuário Master já tem acesso a tudo."}), 400
 
     conn.execute(
-        "UPDATE usuarios SET perm_servidores = ?, perm_gestao_bancos = ?, perm_horarios = ? WHERE id = ?",
-        (valores['perm_servidores'], valores['perm_gestao_bancos'], valores['perm_horarios'], user_id)
+        "UPDATE usuarios SET perm_servidores = ?, perm_gestao_bancos = ?, perm_horarios = ?, perm_certificados = ? WHERE id = ?",
+        (valores['perm_servidores'], valores['perm_gestao_bancos'], valores['perm_horarios'], valores['perm_certificados'], user_id)
     )
     conn.commit()
     conn.close()
@@ -3978,7 +3986,7 @@ def admin_painel():
     usuarios_lista = []
     if session.get('eh_master'):
         conn = get_db_connection()
-        usuarios_lista = conn.execute("SELECT id, nome, email, eh_master, ativo, perm_servidores, perm_gestao_bancos, perm_horarios FROM usuarios").fetchall()
+        usuarios_lista = conn.execute("SELECT id, nome, email, eh_master, ativo, perm_servidores, perm_gestao_bancos, perm_horarios, perm_certificados FROM usuarios").fetchall()
         conn.close()
 
     leitura_raw = ler_databases_conf_remoto_estruturado(srv_atual)

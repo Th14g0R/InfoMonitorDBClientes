@@ -56,6 +56,8 @@ class SegurancaTest(unittest.TestCase):
         cls.temp.cleanup()
 
     def setUp(self):
+        with self.security._rate_limit_lock:
+            self.security._rate_limit_store.clear()
         self.client = self.app.test_client()
         response = self.client.get('/admin/login')
         self.assertEqual(response.status_code, 200)
@@ -63,6 +65,39 @@ class SegurancaTest(unittest.TestCase):
         with self.client.session_transaction() as session:
             self.token = session['_csrf_token']
             session.update(logged_in=True, user_id=self.user_id, eh_master=True)
+
+    def test_certificados_publico_e_acoes_protegidas(self):
+        visitante = self.app.test_client()
+        response = visitante.get('/certificados')
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('Verificar agora', response.text)
+        self.assertIn('Verificar agora', self.client.get('/certificados').text)
+        self.assertEqual(self.client.post('/admin/certificados/verificar').status_code, 400)
+        with patch('certificados.MonitorCertificados.verificar', return_value='Concluído') as verificar:
+            response = self.client.post('/admin/certificados/verificar', data={'csrf_token': self.token})
+            self.assertEqual(response.status_code, 302)
+            verificar.assert_called_once_with(manual=True)
+
+    def test_certificados_permissao_concedida_e_revogada(self):
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            uid = conn.execute('INSERT INTO usuarios(nome,email,senha_hash,ativo) VALUES (?,?,?,1)',
+                               ('Certificados', 'certificados@example.invalid', generate_password_hash(self.password))).lastrowid
+        try:
+            usuario = self.app.test_client()
+            usuario.get('/admin/login')
+            with usuario.session_transaction() as sessao:
+                token = sessao['_csrf_token']
+                sessao.update(logged_in=True, user_id=uid)
+            for permitido in (True, False):
+                resposta = self.client.post('/admin/usuarios/permissoes', json={'user_id': uid, 'perm_certificados': permitido}, headers={'X-CSRF-Token': self.token})
+                self.assertEqual(resposta.status_code, 200)
+                with patch('certificados.MonitorCertificados.verificar', return_value='Concluído') as verificar:
+                    resposta = usuario.post('/admin/certificados/verificar', data={'csrf_token': token})
+                    self.assertEqual(resposta.status_code, 302 if permitido else 403)
+                    self.assertEqual(verificar.call_count, int(permitido))
+        finally:
+            with closing(self.bancos.get_db_connection()) as conn, conn:
+                conn.execute('DELETE FROM usuarios WHERE id=?', (uid,))
 
     def test_csrf_missing_invalid_and_foreign_session(self):
         for token in (None, 'invalid', 'á', 'b' * 64):

@@ -227,3 +227,20 @@ O número da versão está em `VERSION` e as mudanças em `CHANGELOG.md`. Antes 
 atualizar, faça backup dos dados, pare o serviço, execute `git pull --ff-only`,
 instale `requirements.lock` dentro da `.venv` e reinicie. Não copie um
 `sistema.db` local sobre o servidor.
+
+
+### Monitoramento de certificados
+
+A página pública `/certificados` também está disponível nos menus de Servidores e Horários.
+Os oito subdomínios iniciais são cadastrados automaticamente na inicialização, sem substituir registros existentes.
+O Master pode adicionar subdomínios e verificar manualmente; outros usuários precisam da permissão **Certificados**, concedida em Gestão de Bancos.
+
+O agendador verifica às 05h de Fortaleza e executa a consulta uma vez por mês.
+Falhas de consulta ou SMTP permitem nova tentativa no dia seguinte.
+Vencimentos em até 35 dias geram um e-mail agrupado para `atendimento@nossatelecom.com.br`,
+com assunto **Certificado vencendo**, validade de cada subdomínio e assinatura **Suporte Infobrasil**.
+Um envio aceito pelo SMTP fica registrado; a mesma validade não gera alertas duplicados.
+O registro confirma aceitação pelo SMTP, sem garantir leitura ou entrega na caixa de entrada.
+As configurações são as mesmas do CNAME: `SMTP_SERVER`, `SMTP_PORT`, `SMTP_USER` e `SMTP_PASS`.
+O serviço precisa permanecer ativo para executar a rotina; reinicie-o após aplicar esta atualização.
+Novos subdomínios devem pertencer a `infobrasilsistemas.com.br` e resolver para IPs públicos.
