@@ -1,8 +1,15 @@
 [server]
+# Permite acesso por qualquer IP da rede local (0.0.0.0) na porta 8501
+address = "0.0.0.0"
+port = 8501
+headless = true
+
 # Limite máximo de upload em MB (telefonia compactada .ogg/.mp3)
 maxUploadSize = 64
+
+# Configurações para acesso via IP local na rede interna sem bloqueio de CORS/XSRF
 enableCORS = false
-enableXsrfProtection = true
+enableXsrfProtection = false
 
 [browser]
 gatherUsageStats = false
