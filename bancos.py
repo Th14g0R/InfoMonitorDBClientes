@@ -1562,11 +1562,13 @@ HTML_LAYOUT = """
                     {% else %}
                         <button type="button" onclick="return avisarSemPermissao('Importação de Lojas')">Importar lojas</button>
                     {% endif %}
+                    <a href="http://localhost:8501" target="_blank" rel="noopener noreferrer">🎧 Transcritor Call Center</a>
                 </div>
             </details>
             {% endif %}
             <a href="?atualizar=1{% if busca_termo %}&busca={{ busca_termo|urlencode }}{% endif %}{% if ordem_atual %}&ordem={{ ordem_atual|urlencode }}{% endif %}{% if filtro_status %}&filtro={{ filtro_status|urlencode }}{% endif %}" class="btn" title="Atualizar dados do servidor">↻ Atualizar</a>
             <a href="/horarios" class="btn">🗓️ Horários</a>
+            <a href="http://localhost:8501" target="_blank" rel="noopener noreferrer" class="btn" title="Transcrição e Auditoria de Chamadas Call Center">🎧 Transcritor Call Center</a>
             <button id="theme-toggle" class="theme-toggle" aria-label="Alternar tema" title="Alternar tema claro/escuro">
                 <svg class="moon-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
                 <svg class="sun-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>

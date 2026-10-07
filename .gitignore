@@ -26,6 +26,7 @@ __pycache__/
 *.pyo
 .pytest_cache/
 .test-security-*/
+.teste-*/
 .mypy_cache/
 .ruff_cache/
 .coverage
