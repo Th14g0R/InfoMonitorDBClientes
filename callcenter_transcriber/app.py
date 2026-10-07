@@ -97,7 +97,11 @@ with st.sidebar:
     st.title("⚙️ Painel do Atendente")
     
     st.markdown("### 🔑 Chave de API Google Gemini")
-    st.caption("Cada atendente deve digitar sua própria chave API para transcrever.")
+    st.markdown(
+        "Cada atendente deve digitar sua própria chave API para transcrever.\n\n"
+        "👉 Obtenha sua chave gratuitamente em:\n"
+        "[API keys | Google AI Studio](https://aistudio.google.com/api-keys)"
+    )
     
     chave_salva = st.session_state.get("api_key", "").strip()
     api_key = st.text_input(
@@ -105,7 +109,7 @@ with st.sidebar:
         value=chave_salva,
         type="password",
         placeholder="Cole sua chave AIzaSy... aqui",
-        help="Chave de API pessoal do Google Gemini. Obtenha gratuitamente em: https://aistudio.google.com/app/apikey"
+        help="Chave de API pessoal do Google Gemini. Obtenha gratuitamente em: https://aistudio.google.com/api-keys"
     )
     if api_key:
         st.session_state["api_key"] = api_key.strip()
@@ -135,7 +139,7 @@ with st.sidebar:
     )
     
     st.markdown("---")
-    st.markdown("[🖥️ **Acessar Monitor de Bancos (InfoMonitor)**](http://localhost:5000)")
+    st.markdown("[🖥️ **Acessar Monitor banco de dados**](http://192.168.243.2:8888/)")
     
     if "resultado" in st.session_state:
         if st.button("🗑️ Limpar Transcrição Atual", use_container_width=True):
@@ -364,7 +368,7 @@ def processar_audio(arquivo, chave_api: str, modelo_desejado: str, status_placeh
 if uploaded_file is not None:
     chave_atual = (st.session_state.get("api_key") or os.getenv("GEMINI_API_KEY") or "").strip()
     if not chave_atual:
-        st.warning("🔑 **Atenção Atendente:** Para iniciar a transcrição, digite ou cole sua **Chave API do Gemini** no menu lateral à esquerda.")
+        st.warning("🔑 **Atenção Atendente:** Para iniciar a transcrição, digite ou cole sua **Chave API do Gemini** no menu lateral à esquerda (obtenha gratuitamente em: [API keys | Google AI Studio](https://aistudio.google.com/api-keys)).")
         st.button(
             "🚀 Transcrever e Auditar Ligação",
             disabled=True,
