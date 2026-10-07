@@ -155,22 +155,114 @@ st.title("🎧 Infobrasil Sistemas — Auditoria & Transcrição de Chamadas")
 st.markdown("Identificação inteligente de interlocutores, empresa do cliente, prazos e **reprodução com legenda sincronizada em tempo real**.")
 
 # ---------------------------------------------------------
+# Validações de Áudio: Formatos Compactados, Máx 64MB e Máx 2h
+# ---------------------------------------------------------
+LIMITE_TAMANHO_MB = 64.0
+LIMITE_DURACAO_SEGUNDOS = 7200  # 2 horas (120 minutos)
+FORMATOS_PERMITIDOS = [".mp3", ".ogg", ".m4a", ".aac"]
+
+def inspecionar_audio(uploaded_file) -> dict:
+    """Valida formato (sem .wav), tamanho (máx 64MB) e duração (máx 2h) do áudio."""
+    nome = uploaded_file.name
+    ext = Path(nome).suffix.lower()
+    tam_mb = uploaded_file.size / (1024 * 1024)
+    
+    info = {
+        "valido": True,
+        "erros": [],
+        "nome": nome,
+        "ext": ext,
+        "tamanho_mb": tam_mb,
+        "duracao_segundos": 0.0,
+        "duracao_formatada": "Não calculada"
+    }
+    
+    # 1. Bloqueio de formatos sem compactação (.wav)
+    if ext == ".wav":
+        info["valido"] = False
+        info["erros"].append(
+            "O formato **.wav** é um formato sem compactação e não é permitido. "
+            "Por favor, converta ou exporte sua gravação em formato compactado: **.ogg**, **.mp3** ou **.m4a**."
+        )
+    elif ext not in FORMATOS_PERMITIDOS:
+        info["valido"] = False
+        info["erros"].append(
+            f"Extensão **{ext}** não permitida. Utilize apenas formatos compactados: **.ogg**, **.mp3**, **.m4a** ou **.aac**."
+        )
+    
+    # 2. Bloqueio de tamanho (máximo 64 MB)
+    if tam_mb > LIMITE_TAMANHO_MB:
+        info["valido"] = False
+        info["erros"].append(
+            f"O arquivo possui **{tam_mb:.1f} MB**, ultrapassando o limite máximo de **{LIMITE_TAMANHO_MB:.0f} MB**. "
+            "Gravações de telefonia compactadas em .ogg/.mp3 raramente passam de 25 MB. Compacte ou reduza o arquivo."
+        )
+        
+    # 3. Inspeção de duração da gravação (máximo 2 horas = 7200s)
+    try:
+        from mutagen import File as MutagenFile
+        uploaded_file.seek(0)
+        bytes_audio = uploaded_file.read()
+        uploaded_file.seek(0)
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            tmp.write(bytes_audio)
+            tmp_path = tmp.name
+            
+        try:
+            m_audio = MutagenFile(tmp_path)
+            if m_audio and m_audio.info and hasattr(m_audio.info, "length"):
+                dur_seg = float(m_audio.info.length)
+                info["duracao_segundos"] = dur_seg
+                m, s = divmod(int(dur_seg), 60)
+                h, m = divmod(m, 60)
+                info["duracao_formatada"] = f"{h}h {m:02d}m {s:02d}s" if h > 0 else f"{m:02d}m {s:02d}s"
+                
+                if dur_seg > LIMITE_DURACAO_SEGUNDOS:
+                    info["valido"] = False
+                    info["erros"].append(
+                        f"A gravação possui **{info['duracao_formatada']}**, ultrapassando o limite de **2 horas de áudio** (120 min). "
+                        "Divida a ligação em partes menores para realizar a transcrição."
+                    )
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+        
+    return info
+
+# ---------------------------------------------------------
 # Upload de Áudio
 # ---------------------------------------------------------
-col_upload, col_info = st.columns([1.4, 1])
+col_upload, col_info = st.columns([1.3, 1.1])
 
 with col_upload:
     uploaded_file = st.file_uploader(
-        "Selecione o arquivo de gravação de ligação:",
-        type=["mp3", "ogg", "wav", "m4a", "aac"],
-        help="Formatos aceitos: .ogg, .mp3, .wav, .m4a. Suporta gravações telefônicas PBX de qualquer duração."
+        "Selecione o arquivo de gravação de ligação (formatos compactados):",
+        type=["mp3", "ogg", "m4a", "aac"],
+        help="Formatos aceitos: .ogg, .mp3, .m4a, .aac. Limites: máximo 64 MB e até 2 horas de áudio. Arquivos sem compactação (.wav) não são permitidos."
     )
 
 with col_info:
     if uploaded_file is not None:
-        tam_mb = uploaded_file.size / (1024 * 1024)
-        st.markdown("**Resumo do Arquivo:**")
-        st.info(f"📁 **Nome:** `{uploaded_file.name}`\n\n⚖️ **Tamanho:** `{tam_mb:.2f} MB`\n\n✨ Pronto para envio via Google File API segura.")
+        info_audio = inspecionar_audio(uploaded_file)
+        if not info_audio["valido"]:
+            st.error("⚠️ **Arquivo não atende aos requisitos:**")
+            for err in info_audio["erros"]:
+                st.markdown(f"- ❌ {err}")
+        else:
+            st.markdown("**Resumo do Arquivo:**")
+            dur_txt = f"\n\n⏱️ **Duração:** `{info_audio['duracao_formatada']}` *(Limite: 2h)*" if info_audio["duracao_segundos"] > 0 else ""
+            st.success(
+                f"📁 **Nome:** `{info_audio['nome']}`\n\n"
+                f"⚖️ **Tamanho:** `{info_audio['tamanho_mb']:.2f} MB` *(Limite: 64 MB)*"
+                f"{dur_txt}\n\n"
+                f"✨ **Formato compactado aceito:** `{info_audio['ext']}`"
+            )
 
 # ---------------------------------------------------------
 # Função de Processamento com a API Gemini
@@ -366,8 +458,18 @@ def processar_audio(arquivo, chave_api: str, modelo_desejado: str, status_placeh
 
 # Botão de Execução
 if uploaded_file is not None:
+    info_audio = inspecionar_audio(uploaded_file)
     chave_atual = (st.session_state.get("api_key") or os.getenv("GEMINI_API_KEY") or "").strip()
-    if not chave_atual:
+    
+    if not info_audio["valido"]:
+        st.error("🚫 **Envio bloqueado:** O arquivo não atende aos limites do sistema (formato sem compactação, tamanho > 64 MB ou duração > 2 horas).")
+        st.button(
+            "🚫 Transcrição Bloqueada",
+            disabled=True,
+            use_container_width=True,
+            help="Corrija os erros apontados no resumo do arquivo para prosseguir."
+        )
+    elif not chave_atual:
         st.warning("🔑 **Atenção Atendente:** Para iniciar a transcrição, digite ou cole sua **Chave API do Gemini** no menu lateral à esquerda (obtenha gratuitamente em: [API keys | Google AI Studio](https://aistudio.google.com/api-keys)).")
         st.button(
             "🚀 Transcrever e Auditar Ligação",
@@ -386,7 +488,7 @@ if uploaded_file is not None:
                     st.session_state["audio_bytes"] = uploaded_file.getvalue()
                     st.session_state["mime_type"] = (
                         "audio/ogg" if uploaded_file.name.endswith(".ogg")
-                        else ("audio/mp3" if uploaded_file.name.endswith(".mp3") else "audio/wav")
+                        else ("audio/mp4" if uploaded_file.name.endswith(".m4a") or uploaded_file.name.endswith(".aac") else "audio/mp3")
                     )
                     st.session_state["modelo_usado"] = modelo_usado
                     status_box.empty()

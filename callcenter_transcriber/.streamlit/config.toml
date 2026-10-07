@@ -1,0 +1,8 @@
+[server]
+# Limite máximo de upload em MB (telefonia compactada .ogg/.mp3)
+maxUploadSize = 64
+enableCORS = false
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false

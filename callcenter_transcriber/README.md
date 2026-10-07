@@ -1,6 +1,6 @@
 # 🎧 Infobrasil Sistemas — Transcrição & Auditoria de Call Center
 
-Ferramenta visual desenvolvida com **Streamlit**, **ReportLab** e a API oficial **Google GenAI (`google-genai`)** para auditoria de chamadas telefônicas de suporte técnico nos formatos **.ogg**, **.mp3**, **.wav** e **.m4a**.
+Ferramenta visual desenvolvida com **Streamlit**, **ReportLab** e a API oficial **Google GenAI (`google-genai`)** para auditoria de chamadas telefônicas de suporte técnico nos formatos compactados **.ogg**, **.mp3**, **.m4a** e **.aac** (com limite de segurança de até **64 MB** e até **2 horas** de áudio por ligação; formatos sem compactação como `.wav` são rejeitados para economia de banda e recursos).
 
 ---
 
