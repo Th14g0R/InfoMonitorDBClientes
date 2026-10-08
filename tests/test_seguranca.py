@@ -78,6 +78,21 @@ class SegurancaTest(unittest.TestCase):
             self.assertEqual(response.status_code, 302)
             verificar.assert_called_once_with(manual=True)
 
+    def test_cnpj_publico_e_api_validacao(self):
+        visitante = self.app.test_client()
+        resp = visitante.get('/cnpj')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('Consulta CNPJ Pro', resp.text)
+        self.assertIn('Receita Federal', resp.text)
+
+        resp2 = visitante.get('/consulta-cnpj')
+        self.assertEqual(resp2.status_code, 200)
+        self.assertIn('Consulta CNPJ Pro', resp2.text)
+
+        resp3 = visitante.get('/api/cnpj/123')
+        self.assertEqual(resp3.status_code, 400)
+        self.assertIn('erro', resp3.get_json())
+
     def test_certificados_permissao_concedida_e_revogada(self):
         with closing(self.bancos.get_db_connection()) as conn, conn:
             uid = conn.execute('INSERT INTO usuarios(nome,email,senha_hash,ativo) VALUES (?,?,?,1)',

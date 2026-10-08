@@ -405,7 +405,7 @@ def aplicar_config_flask(app):
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data:; "
             "font-src 'self'; "
-            "connect-src 'self'; "
+            "connect-src 'self' https://publica.cnpj.ws; "
             "frame-ancestors 'none'; "
             "base-uri 'self'; "
             "form-action 'self'"

@@ -76,7 +76,7 @@ def revalidar_sessao_a_cada_requisicao():
 PAGINAS_PUBLICAS = {
     'bancos.exibir_servidor', 'bancos.exibir_todos', 'bancos.exibir_inativos',
     'bancos.exibir_orfaos', 'bancos.exibir_historico', 'bancos.exibir_backups_ftp',
-    'bancos.api_historico', 'bancos.api_testar_cname',
+    'bancos.api_historico', 'bancos.api_testar_cname', 'bancos.api_consulta_cnpj',
     'bancos.admin_login', 'bancos.esqueci_senha', 'bancos.admin_register',
     'bancos.redefinir_senha_token', 'bancos.certificados', 'bancos.consulta_cnpj',
 }
@@ -5470,8 +5470,34 @@ def api_historico():
 @bancos_bp.route('/cnpj')
 @bancos_bp.route('/consulta-cnpj')
 def consulta_cnpj():
-    """Página interativa em React para consulta detalhada de CNPJs na Receita Federal."""
+    """Página interativa para consulta detalhada de CNPJs na Receita Federal."""
     return render_template('cnpj.html')
+
+
+@bancos_bp.route('/api/cnpj/<cnpj>')
+def api_consulta_cnpj(cnpj):
+    """Proxy local para consulta de CNPJ (evita problemas de CORS ou falta de internet direta nas estações)."""
+    clean = re.sub(r'\D', '', cnpj)
+    if len(clean) != 14:
+        return jsonify(erro='CNPJ deve ter 14 dígitos numéricos.'), 400
+    try:
+        req = urllib.request.Request(
+            f'https://publica.cnpj.ws/cnpj/{clean}',
+            headers={'User-Agent': 'InfoMonitor/1.0', 'Accept': 'application/json'}
+        )
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            return jsonify(data)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return jsonify(erro='CNPJ não encontrado na base da Receita Federal.'), 404
+        if e.code == 429:
+            return jsonify(erro='Limite de consultas excedido na API pública gratuita (3 consultas por minuto). Aguarde alguns instantes.'), 429
+        return jsonify(erro=f'Erro {e.code} ao consultar a API da Receita Federal.'), e.code
+    except urllib.error.URLError as e:
+        return jsonify(erro=f'Falha ao conectar com o serviço da Receita Federal: {str(e.reason)}'), 502
+    except Exception as e:
+        return jsonify(erro=f'Erro interno ao processar consulta de CNPJ: {str(e)}'), 500
 
 
 if __name__ == '__main__':
