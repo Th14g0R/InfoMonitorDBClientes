@@ -78,7 +78,7 @@ PAGINAS_PUBLICAS = {
     'bancos.exibir_orfaos', 'bancos.exibir_historico', 'bancos.exibir_backups_ftp',
     'bancos.api_historico', 'bancos.api_testar_cname',
     'bancos.admin_login', 'bancos.esqueci_senha', 'bancos.admin_register',
-    'bancos.redefinir_senha_token', 'bancos.certificados',
+    'bancos.redefinir_senha_token', 'bancos.certificados', 'bancos.consulta_cnpj',
 }
 
 
@@ -1545,6 +1545,7 @@ HTML_LAYOUT = """
                     <a href="/historico" {% if modo_historico %}aria-current="page"{% endif %}>Histórico de disco</a>
                     <a href="/backups-ftp">Backups FTP</a>
                     <a href="/certificados">Certificados</a>
+                    <a href="/cnpj">Consulta CNPJ</a>
                     <a href="/todos?filtro=sem_lojas">Clientes sem lojas cadastradas</a>
                 </div>
             </details>
@@ -5466,5 +5467,13 @@ def api_historico():
     return resposta
 
 
+@bancos_bp.route('/cnpj')
+@bancos_bp.route('/consulta-cnpj')
+def consulta_cnpj():
+    """Página interativa em React para consulta detalhada de CNPJs na Receita Federal."""
+    return render_template('cnpj.html')
+
+
 if __name__ == '__main__':
     raise SystemExit("Inicie pelo InfoMonitorDBClientes.py, não por bancos.py.")
+

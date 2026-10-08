@@ -487,6 +487,7 @@ HTML_INTERFACE = """
         <div class="d-flex items-center gap-2">
             <a href="{{ url_for('bancos.exibir_servidor') }}" class="btn btn-primary">🖥️ Servidores</a>
             <a href="/certificados" class="btn btn-primary">Certificados</a>
+            <a href="/cnpj" class="btn btn-primary" title="Consulta de CNPJs na Receita Federal">🔍 CNPJ</a>
             <a href="http://{{ request.host.split(':')[0] }}:8501" target="_blank" rel="noopener noreferrer" class="btn btn-secondary" title="Transcrição e Auditoria de Chamadas Call Center">🎧 Transcritor Call Center</a>
             {% if not session.get('logged_in') %}
                 <a href="{{ url_for('bancos.admin_login', next='/admin') }}" class="btn btn-bancos">🗄️ Gestão de Bancos</a>
