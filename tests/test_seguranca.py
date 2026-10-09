@@ -168,6 +168,46 @@ class SegurancaTest(unittest.TestCase):
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM evento_participantes WHERE evento_id=?', (evento_id,)).fetchone()[0], 0)
             conn.execute('DELETE FROM funcionarios WHERE id IN (?,?)', (funcionario_id, segundo_id))
 
+    def test_feriados_impactam_cobertura_diaria(self):
+        with closing(self.horarios.get_db()) as conn, conn:
+            func_id = conn.execute("INSERT INTO funcionarios (nome, ativo) VALUES ('Plantonista Feriado', 1)").lastrowid
+        # 1. Feriado sem expediente
+        resp = self.client.post('/horarios/salvar_evento', data={
+            'csrf_token': self.token, 'data_evento': '2032-04-14',
+            'nome': 'Feriado Tiradentes Teste', 'tipo': 'feriado_sem_expediente'
+        })
+        self.assertEqual(resp.status_code, 302)
+        cobertura_folga = self.horarios.calcular_cobertura_diaria('2032-04-14')
+        self.assertTrue(all(c['sem_expediente'] for c in cobertura_folga))
+        self.assertTrue(all(c['alerta'] == 'folga' for c in cobertura_folga))
+        self.assertTrue(all(c['quantidade'] == 0 for c in cobertura_folga))
+        pagina_folga = self.client.get('/horarios?data_cobertura=2032-04-14')
+        self.assertIn('Feriado (Sem Expediente)', pagina_folga.text)
+        self.assertIn('FOLGA', pagina_folga.text)
+
+        # 2. Feriado escala reduzida
+        resp = self.client.post('/horarios/salvar_evento', data={
+            'csrf_token': self.token, 'data_evento': '2032-04-15',
+            'nome': 'Plantão Reduzido Teste', 'tipo': 'feriado_escala_reduzida',
+            'hora_inicio': '08:00', 'hora_fim': '12:00'
+        })
+        self.assertEqual(resp.status_code, 302)
+        with closing(self.horarios.get_db()) as conn:
+            ev_id = conn.execute("SELECT id FROM eventos WHERE nome='Plantão Reduzido Teste'").fetchone()[0]
+        self.client.post('/horarios/adicionar_participante_evento', data={
+            'csrf_token': self.token, 'evento_id': ev_id, 'funcionario_ids': [func_id]
+        })
+        cobertura_plantao = self.horarios.calcular_cobertura_diaria('2032-04-15')
+        slot_8h = next(c for c in cobertura_plantao if c['faixa'].startswith('08:00'))
+        self.assertEqual(slot_8h['quantidade'], 1)
+        self.assertEqual(slot_8h['atendentes'][0]['nome'], 'Plantonista Feriado')
+        pagina_plantao = self.client.get('/horarios?data_cobertura=2032-04-15')
+        self.assertIn('Feriado em Escala Reduzida', pagina_plantao.text)
+
+        with closing(self.horarios.get_db()) as conn, conn:
+            conn.execute("DELETE FROM eventos WHERE nome IN ('Feriado Tiradentes Teste', 'Plantão Reduzido Teste')")
+            conn.execute("DELETE FROM funcionarios WHERE id = ?", (func_id,))
+
     def test_eventos_filtram_e_paginam_tres_por_vez(self):
         prefixo = date.today().strftime('%Y-%m-')
         with closing(self.horarios.get_db()) as conn, conn:

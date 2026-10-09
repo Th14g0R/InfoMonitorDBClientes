@@ -57,6 +57,11 @@ def migrar_horarios(conn):
         WHERE NOT EXISTS (SELECT 1 FROM jornadas WHERE tipo = 'Semana'
             AND manha_inicio = '08:00' AND manha_fim = '12:00'
             AND COALESCE(tarde_inicio, '') = '' AND COALESCE(tarde_fim, '') = '')''')
+    tabelas = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if 'eventos' in tabelas:
+        colunas_eventos = {row[1] for row in conn.execute('PRAGMA table_info(eventos)').fetchall()}
+        if 'tipo' not in colunas_eventos:
+            conn.execute("ALTER TABLE eventos ADD COLUMN tipo TEXT NOT NULL DEFAULT 'comum'")
 
 
 def validar_data(valor):
@@ -202,7 +207,61 @@ def intervalos_cobertura(conn, data):
         WHERE f.ativo = 1 AND (c.nome LIKE '%Suporte%' OR
             CASE WHEN s.id IS NOT NULL THEN s.cargo_id ELSE f.cargo_id END IS NULL)''',
         (data, dia.weekday())).fetchall()
+    tabelas = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    feriado_evento = None
+    if 'eventos' in tabelas:
+        colunas_ev = {r[1] for r in conn.execute('PRAGMA table_info(eventos)').fetchall()}
+        if 'tipo' in colunas_ev:
+            feriado_evento = conn.execute('''SELECT id, tipo, hora_inicio, hora_fim FROM eventos
+                WHERE data_evento = ? AND tipo IN ('feriado_sem_expediente', 'feriado_escala_reduzida')
+                ORDER BY CASE WHEN tipo = 'feriado_escala_reduzida' THEN 1 ELSE 2 END, id DESC LIMIT 1''',
+                (data,)).fetchone()
+
     resultado = []
+    if feriado_evento and feriado_evento[1] == 'feriado_sem_expediente':
+        for pessoa, nome, foto in pessoas:
+            resultado.append((pessoa, nome, foto, []))
+        return resultado
+
+    if feriado_evento and feriado_evento[1] == 'feriado_escala_reduzida':
+        ev_id, _, ev_inicio, ev_fim = feriado_evento
+        participantes = {r[0] for r in conn.execute(
+            'SELECT funcionario_id FROM evento_participantes WHERE evento_id = ? AND funcionario_id IS NOT NULL',
+            (ev_id,)).fetchall()}
+        ids_pessoas = {p[0] for p in pessoas}
+        if participantes:
+            interrogs = ','.join('?' * len(participantes))
+            extras = conn.execute(f'''SELECT id, nome, foto_url FROM funcionarios
+                WHERE id IN ({interrogs}) AND ativo = 1''', tuple(participantes)).fetchall()
+            for extra in extras:
+                if extra[0] not in ids_pessoas:
+                    pessoas.append(extra)
+                    ids_pessoas.add(extra[0])
+
+        for pessoa, nome, foto in pessoas:
+            if pessoa in participantes:
+                if ev_inicio and ev_fim:
+                    intervalos = [(ev_inicio, ev_fim)]
+                elif dia.weekday() == 5:
+                    intervalos = []
+                    for (horario,) in conn.execute(
+                            'SELECT horario FROM escala_sabado WHERE funcionario_id = ? AND data_sabado = ?', (pessoa, data)):
+                        partes = re.fullmatch(r'(\d{2}:\d{2})\s*-\s*(\d{2}:\d{2})', horario or '')
+                        if partes:
+                            intervalos.append(partes.groups())
+                elif dia.weekday() == 6:
+                    intervalos = []
+                else:
+                    try:
+                        horarios = jornada_no_dia(conn, pessoa, data)
+                        intervalos = [(horarios[i], horarios[i + 1]) for i in (0, 2) if horarios[i] and horarios[i + 1]]
+                    except ValueError:
+                        intervalos = []
+            else:
+                intervalos = []
+            resultado.append((pessoa, nome, foto, intervalos))
+        return resultado
+
     for pessoa, nome, foto in pessoas:
         if dia.weekday() == 6:
             intervalos = []

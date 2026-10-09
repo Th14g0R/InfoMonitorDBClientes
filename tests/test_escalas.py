@@ -94,6 +94,28 @@ class EscalasTest(unittest.TestCase):
     def test_domingo_nao_usa_jornada_da_semana(self):
         self.assertTrue(all(not row[3] for row in intervalos_cobertura(self.conn, '2026-09-20')))
 
+    def test_intervalos_cobertura_feriado_sem_expediente(self):
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS eventos (id INTEGER PRIMARY KEY, data_evento TEXT, nome TEXT, tipo TEXT, hora_inicio TEXT, hora_fim TEXT);
+            CREATE TABLE IF NOT EXISTS evento_participantes (id INTEGER PRIMARY KEY, evento_id INTEGER, funcionario_id INTEGER);
+            INSERT INTO eventos (id, data_evento, nome, tipo) VALUES (1, '2026-09-14', 'Feriado Nacional', 'feriado_sem_expediente');
+        """)
+        resultado = intervalos_cobertura(self.conn, '2026-09-14')
+        self.assertTrue(resultado)
+        self.assertTrue(all(not row[3] for row in resultado))
+
+    def test_intervalos_cobertura_feriado_escala_reduzida(self):
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS eventos (id INTEGER PRIMARY KEY, data_evento TEXT, nome TEXT, tipo TEXT, hora_inicio TEXT, hora_fim TEXT);
+            CREATE TABLE IF NOT EXISTS evento_participantes (id INTEGER PRIMARY KEY, evento_id INTEGER, funcionario_id INTEGER);
+            INSERT INTO eventos (id, data_evento, nome, tipo, hora_inicio, hora_fim) VALUES
+                (2, '2026-09-15', 'Plantão Feriado', 'feriado_escala_reduzida', '08:00', '12:00');
+            INSERT INTO evento_participantes (evento_id, funcionario_id) VALUES (2, 1);
+        """)
+        resultado = dict((row[0], row[3]) for row in intervalos_cobertura(self.conn, '2026-09-15'))
+        self.assertEqual(resultado[1], [('08:00', '12:00')])
+        self.assertEqual(resultado[2], [])
+
     def test_backup_copia_banco_antigo_sem_alterar_origem(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd(), prefix='.test-security-backup-') as pasta:
             origem = Path(pasta) / 'sistema.db'

@@ -174,6 +174,7 @@ def init_db():
             'local': "TEXT NOT NULL DEFAULT ''",
             'hora_inicio': "TEXT NOT NULL DEFAULT ''",
             'hora_fim': "TEXT NOT NULL DEFAULT ''",
+            'tipo': "TEXT NOT NULL DEFAULT 'comum'",
         }.items():
             if coluna not in colunas_eventos:
                 cursor.execute(f'ALTER TABLE eventos ADD COLUMN {coluna} {definicao}')
@@ -266,9 +267,24 @@ def calcular_cobertura_diaria(data_referencia=None):
             "SELECT id FROM funcionarios WHERE strftime('%m-%d', data_nascimento) = ?",
             (data_referencia[5:],))}
 
+        evento_feriado = None
+        tabelas = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        if 'eventos' in tabelas:
+            colunas_ev = {r[1] for r in conn.execute('PRAGMA table_info(eventos)').fetchall()}
+            if 'tipo' in colunas_ev:
+                evento_feriado = conn.execute('''
+                    SELECT id, nome, tipo, hora_inicio, hora_fim FROM eventos
+                    WHERE data_evento = ? AND tipo IN ('feriado_sem_expediente', 'feriado_escala_reduzida')
+                    ORDER BY CASE WHEN tipo = 'feriado_escala_reduzida' THEN 1 ELSE 2 END, id DESC LIMIT 1
+                ''', (data_referencia,)).fetchone()
+
     horarios_grade = []
     minutos_inicio = hora_para_minutos("07:30")
     minutos_fim = hora_para_minutos("19:00")
+
+    ev_tipo = evento_feriado[2] if evento_feriado else None
+    ev_h_ini = evento_feriado[3] if evento_feriado else ''
+    ev_h_fim = evento_feriado[4] if evento_feriado else ''
 
     while minutos_inicio < minutos_fim:
         m_start = minutos_inicio
@@ -301,17 +317,31 @@ def calcular_cobertura_diaria(data_referencia=None):
                                    'aniversariante': f_id in aniversariantes})
 
         qtd = len(atendentes)
-        alerta = "normal"
-        if m_start < hora_para_minutos("08:00") or m_start >= hora_para_minutos("18:00"):
-            if qtd < 1: alerta = "critico"
+        if ev_tipo == 'feriado_sem_expediente':
+            alerta = "folga"
+        elif ev_tipo == 'feriado_escala_reduzida':
+            if ev_h_ini and ev_h_fim:
+                em_plantao = (hora_para_minutos(ev_h_ini) <= m_start and m_end <= hora_para_minutos(ev_h_fim))
+            else:
+                em_plantao = (hora_para_minutos("08:00") <= m_start and m_end <= hora_para_minutos("18:00"))
+            if em_plantao:
+                alerta = "normal" if qtd >= 1 else "atencao"
+            else:
+                alerta = "folga" if qtd == 0 else "normal"
         else:
-            if qtd <= 2: alerta = "atencao"
+            alerta = "normal"
+            if m_start < hora_para_minutos("08:00") or m_start >= hora_para_minutos("18:00"):
+                if qtd < 1: alerta = "critico"
+            else:
+                if qtd <= 2: alerta = "atencao"
 
         horarios_grade.append({
             'faixa': h_label,
             'quantidade': qtd,
             'atendentes': atendentes,
-            'alerta': alerta
+            'alerta': alerta,
+            'sem_expediente': ev_tipo == 'feriado_sem_expediente',
+            'feriado': bool(ev_tipo)
         })
         minutos_inicio += 30
 
@@ -369,6 +399,12 @@ HTML_INTERFACE = """
         .cov-normal { border-top: 4px solid var(--cor-sucesso); background: var(--cor-sucesso-bg); }
         .cov-atencao { border-top: 4px solid var(--cor-aviso); background: var(--cor-aviso-bg); }
         .cov-critico { border-top: 4px solid var(--cor-perigo); background: var(--cor-perigo-bg); }
+        .cov-folga { border-top: 4px solid #94a3b8; background: rgba(148, 163, 184, 0.12); }
+        .badge-feriado-folga { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; padding: 2px 8px; border-radius: 999px; font-size: var(--font-size-xs); font-weight: 700; display: inline-flex; align-items: center; gap: 4px; }
+        .badge-feriado-plantao { background: #fef9c3; color: #854d0e; border: 1px solid #fde68a; padding: 2px 8px; border-radius: 999px; font-size: var(--font-size-xs); font-weight: 700; display: inline-flex; align-items: center; gap: 4px; }
+        .evento-feriado-folga { border-left-color: #22c55e !important; }
+        .evento-feriado-plantao { border-left-color: #eab308 !important; }
+        .evento-campo-tipo { grid-column: span 3; }
         .slot-hora { font-weight: 600; font-size: var(--font-size-sm); color: var(--cor-texto); margin-bottom: var(--space-1); }
         .slot-qtd { font-size: var(--font-size-xs); color: var(--cor-texto-suave); margin-bottom: var(--space-2); }
 
@@ -716,7 +752,17 @@ HTML_INTERFACE = """
             </form>
         </div>
 
-        {% if data_cobertura %}
+        {% if feriado_cobertura %}
+            {% if feriado_cobertura.tipo == 'feriado_sem_expediente' %}
+                <div class="info-box info-box-primary" style="margin-bottom: 10px; background-color: #f0fdf4; border: 1px solid #86efac; color: #166534;">
+                    🏖️ <strong>Feriado (Sem Expediente):</strong> {{ feriado_cobertura.nome }} ({{ data_cobertura_formatada }}). Toda a equipe está de folga hoje.
+                </div>
+            {% elif feriado_cobertura.tipo == 'feriado_escala_reduzida' %}
+                <div class="info-box info-box-primary" style="margin-bottom: 10px; background-color: #fefce8; border: 1px solid #fde047; color: #854d0e;">
+                    ⚡ <strong>Feriado em Escala Reduzida (Plantão):</strong> {{ feriado_cobertura.nome }} ({{ data_cobertura_formatada }}){% if feriado_cobertura.hora_inicio %} — Plantão das {{ feriado_cobertura.hora_inicio }} às {{ feriado_cobertura.hora_fim }}{% endif %}. Apenas os colaboradores escalados no evento participam do atendimento.
+                </div>
+            {% endif %}
+        {% elif data_cobertura %}
             <div class="info-box info-box-primary" style="margin-bottom: 10px;">
                 ℹ️ Exibindo cobertura para o dia <strong>{{ data_cobertura_formatada }}</strong>.
             </div>
@@ -735,6 +781,8 @@ HTML_INTERFACE = """
                                     {% if at.aniversariante %}<span class="aniversario-icone" aria-hidden="true">🎂</span>{% endif %}
                                 </button>
                             {% endfor %}
+                        {% elif c.sem_expediente %}
+                            <span style="color: #64748b; font-size:0.7em; font-weight: bold;">🏖️ FOLGA</span>
                         {% else %}
                             <span style="color: #78281f; font-size:0.7em; font-weight: bold;">⚠️ VAZIO</span>
                         {% endif %}
@@ -1322,7 +1370,7 @@ def ver_horarios():
         total_eventos = conn.execute('SELECT COUNT(*) FROM eventos' + where_eventos, params_eventos).fetchone()[0]
         total_paginas_eventos = max(1, (total_eventos + 2) // 3)
         pagina_eventos = min(pagina_eventos, total_paginas_eventos)
-        eventos_rows = conn.execute(f'''SELECT id, data_evento, nome, observacao, local, hora_inicio, hora_fim
+        eventos_rows = conn.execute(f'''SELECT id, data_evento, nome, observacao, local, hora_inicio, hora_fim, COALESCE(tipo, 'comum')
             FROM eventos{where_eventos} ORDER BY CASE WHEN data_evento >= ? THEN 0 ELSE 1 END,
             data_evento, id LIMIT 3 OFFSET ?''', (*params_eventos, hoje.isoformat(), (pagina_eventos - 1) * 3)).fetchall()
         ids_eventos = [e[0] for e in eventos_rows]
@@ -1343,7 +1391,7 @@ def ver_horarios():
             estado = 'hoje' if data_evento == hoje else 'vespera' if data_evento == hoje + timedelta(days=1) else 'normal'
             eventos.append({'id': e[0], 'data_formatada': data_evento.strftime('%d/%m/%Y'),
                 'nome': e[2], 'observacao': e[3], 'local': e[4], 'hora_inicio': e[5],
-                'hora_fim': e[6], 'estado': estado, 'participantes': participantes.get(e[0], [])})
+                'hora_fim': e[6], 'tipo': e[7], 'estado': estado, 'participantes': participantes.get(e[0], [])})
 
         query_escala = """
             SELECT e.id, strftime('%d/%m/%Y', e.data_sabado), e.cor_equipe, f.nome, e.horario, e.observacao, f.equipe_sabado, f.foto_url, f.ativo
@@ -1390,6 +1438,22 @@ def ver_horarios():
         cursor.execute(query_trocas, params_trocas)
         trocas = cursor.fetchall()
 
+        feriado_cobertura = None
+        ev_cob = conn.execute('''
+            SELECT id, nome, tipo, hora_inicio, hora_fim, observacao FROM eventos
+            WHERE data_evento = ? AND tipo IN ('feriado_sem_expediente', 'feriado_escala_reduzida')
+            ORDER BY CASE WHEN tipo = 'feriado_escala_reduzida' THEN 1 ELSE 2 END, id DESC LIMIT 1
+        ''', (data_cobertura,)).fetchone()
+        if ev_cob:
+            feriado_cobertura = {
+                'id': ev_cob[0],
+                'nome': ev_cob[1],
+                'tipo': ev_cob[2],
+                'hora_inicio': ev_cob[3],
+                'hora_fim': ev_cob[4],
+                'observacao': ev_cob[5]
+            }
+
     cobertura = calcular_cobertura_diaria(data_referencia=data_cobertura)
 
     return render_template_string(
@@ -1401,6 +1465,7 @@ def ver_horarios():
         cor_equipe_dia=cor_equipe_dia,
         trocas=trocas,
         cobertura=cobertura,
+        feriado_cobertura=feriado_cobertura,
         ausencias=ausencias, motivos_ausencias=motivos_ausencias,
         ausencia_inicio=ausencia_inicio, ausencia_fim=ausencia_fim, ausencia_motivo=ausencia_motivo,
         filtro_ausencias=filtro_ausencias, substituicoes=substituicoes,
@@ -1420,6 +1485,9 @@ def validar_formulario_evento():
     observacao = request.form.get('observacao', '').strip()
     local = request.form.get('local', '').strip()
     hora_inicio, hora_fim = request.form.get('hora_inicio', '').strip(), request.form.get('hora_fim', '').strip()
+    tipo = request.form.get('tipo', 'comum').strip() or 'comum'
+    if tipo not in ('comum', 'feriado_sem_expediente', 'feriado_escala_reduzida'):
+        tipo = 'comum'
     try:
         validar_data(data_evento)
         if bool(hora_inicio) != bool(hora_fim):
@@ -1433,7 +1501,7 @@ def validar_formulario_evento():
         raise ValueError('Informe data e horários válidos; o término deve ser posterior ao início.')
     if not nome or len(nome) > 150 or len(local) > 200 or len(observacao) > 1000:
         raise ValueError('Revise os dados do evento.')
-    return data_evento, nome, observacao, local, hora_inicio, hora_fim
+    return data_evento, nome, observacao, local, hora_inicio, hora_fim, tipo
 
 @horarios_bp.post('/horarios/salvar_evento')
 @login_required
@@ -1444,9 +1512,9 @@ def salvar_evento():
         return str(erro), 400
     with closing(get_db()) as conn, conn:
         evento_id = conn.execute('''INSERT INTO eventos
-            (data_evento,nome,observacao,local,hora_inicio,hora_fim) VALUES (?,?,?,?,?,?)''',
+            (data_evento,nome,observacao,local,hora_inicio,hora_fim,tipo) VALUES (?,?,?,?,?,?,?)''',
             dados).lastrowid
-    registrar_acao_admin('criar_evento', {'evento_id': evento_id, 'data_evento': dados[0], 'nome': dados[1]})
+    registrar_acao_admin('criar_evento', {'evento_id': evento_id, 'data_evento': dados[0], 'nome': dados[1], 'tipo': dados[6]})
     return redirect(url_for('horarios.ver_horarios') + '#secao-eventos')
 
 @horarios_bp.route('/horarios/editar_evento/<int:id>', methods=['GET', 'POST'])
@@ -1462,9 +1530,9 @@ def editar_evento(id):
             except ValueError as erro:
                 return str(erro), 400
             conn.execute('''UPDATE eventos SET data_evento=?, nome=?, observacao=?, local=?,
-                hora_inicio=?, hora_fim=? WHERE id=?''', (*dados, id))
+                hora_inicio=?, hora_fim=?, tipo=? WHERE id=?''', (*dados, id))
             registrar_acao_admin('editar_evento', {
-                'evento_id': id, 'data_evento': dados[0], 'nome': dados[1]
+                'evento_id': id, 'data_evento': dados[0], 'nome': dados[1], 'tipo': dados[6]
             })
             return redirect(url_for('horarios.ver_horarios') + '#secao-eventos')
     return render_template('editar_evento.html', evento=dict(evento))

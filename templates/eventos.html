@@ -16,18 +16,48 @@
     <form action="/horarios/salvar_evento" method="POST" class="form-grid evento-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label class="form-label evento-campo-data">Data<input type="date" name="data_evento" required class="form-control"></label>
+        <label class="form-label evento-campo-tipo">Tipo
+            <select name="tipo" class="form-select" id="evento-select-tipo" onchange="atualizarAjudaTipoEvento(this)">
+                <option value="comum">📌 Comum / Informativo</option>
+                <option value="feriado_sem_expediente">🏖️ Feriado (Sem Expediente)</option>
+                <option value="feriado_escala_reduzida">⚡ Feriado (Escala Reduzida / Plantão)</option>
+            </select>
+        </label>
         <label class="form-label evento-campo-nome">Nome<input type="text" name="nome" required maxlength="150" class="form-control"></label>
         <label class="form-label evento-campo-local">Local<input type="text" name="local" maxlength="200" class="form-control"></label>
         <label class="form-label evento-campo-inicio">Início<input type="time" name="hora_inicio" class="form-control"></label>
         <label class="form-label evento-campo-fim">Fim<input type="time" name="hora_fim" class="form-control"></label>
         <label class="form-label evento-observacao">Observação<textarea name="observacao" maxlength="1000" rows="2" class="form-control"></textarea></label>
         <button class="btn btn-success evento-submit">Adicionar evento</button>
+        <div id="evento-ajuda-tipo" class="text-muted evento-ajuda" style="grid-column: span 12; font-size: 0.8rem; margin-top: -4px;">
+            ℹ️ <strong>Comum / Informativo:</strong> Não altera a grade de atendimento da equipe.
+        </div>
     </form>
+    <script>
+    function atualizarAjudaTipoEvento(sel) {
+        var el = document.getElementById('evento-ajuda-tipo');
+        if (!el) return;
+        if (sel.value === 'feriado_sem_expediente') {
+            el.innerHTML = '🏖️ <strong>Feriado Sem Expediente:</strong> Toda a equipe terá folga neste dia. A Cobertura de Atendimento será zerada automaticamente.';
+        } else if (sel.value === 'feriado_escala_reduzida') {
+            el.innerHTML = '⚡ <strong>Feriado com Escala Reduzida (Plantão):</strong> Apenas os colaboradores vinculados como participantes abaixo trabalharão neste plantão.';
+        } else {
+            el.innerHTML = 'ℹ️ <strong>Comum / Informativo:</strong> Não altera a grade de atendimento da equipe.';
+        }
+    }
+    </script>
     {% endif %}
     {% for evento in eventos %}
-    <article class="evento-card evento-{{ evento.estado }}">
+    <article class="evento-card evento-{{ evento.estado }}{% if evento.tipo == 'feriado_sem_expediente' %} evento-feriado-folga{% elif evento.tipo == 'feriado_escala_reduzida' %} evento-feriado-plantao{% endif %}">
         <div class="evento-cabecalho">
-            <h4>{{ evento.data_formatada }} — {{ evento.nome }}</h4>
+            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                <h4>{{ evento.data_formatada }} — {{ evento.nome }}</h4>
+                {% if evento.tipo == 'feriado_sem_expediente' %}
+                    <span class="badge badge-feriado-folga">🏖️ Feriado (Sem Expediente)</span>
+                {% elif evento.tipo == 'feriado_escala_reduzida' %}
+                    <span class="badge badge-feriado-plantao">⚡ Feriado (Escala Reduzida)</span>
+                {% endif %}
+            </div>
             {% if pode_editar_horarios() %}<div class="evento-acoes"><a href="/horarios/editar_evento/{{ evento.id }}" class="btn btn-edit btn-sm">✏️ Editar</a><form action="/horarios/excluir_evento/{{ evento.id }}" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-delete btn-sm" onclick="return confirm('Excluir evento?')">Excluir</button></form></div>{% endif %}
         </div>
         <div class="evento-conteudo">
@@ -35,17 +65,25 @@
             {% if evento.estado == 'hoje' %}<span class="evento-status">Evento de hoje</span>{% elif evento.estado == 'vespera' %}<span class="evento-status">Amanhã</span>{% endif %}
             <div class="evento-detalhes">{% if evento.local %}<span>📍 {{ evento.local }}</span>{% endif %}{% if evento.hora_inicio %}<span>🕒 {{ evento.hora_inicio }}–{{ evento.hora_fim }}</span>{% endif %}</div>
             {% if evento.observacao %}<p class="evento-observacao-texto">{{ evento.observacao }}</p>{% else %}<p class="text-muted">Sem observações.</p>{% endif %}
+            {% if evento.tipo == 'feriado_sem_expediente' %}
+                <p class="text-muted" style="font-size: 0.85em; font-style: italic; color: #166534;">🏖️ Folga geral para toda a equipe. Cobertura zerada neste dia.</p>
+            {% elif evento.tipo == 'feriado_escala_reduzida' %}
+                <p class="text-muted" style="font-size: 0.85em; font-style: italic; color: #854d0e;">⚡ Plantão com atendimento reduzido. Apenas os técnicos escalados ao lado atendem.</p>
+            {% endif %}
         </section>
         <section class="evento-coluna-participantes">
-            <div class="evento-participantes-titulo"><strong>Participantes</strong><span class="evento-total-participantes">{{ evento.participantes|length }} participante{% if evento.participantes|length != 1 %}s{% endif %}</span></div>
-            {% if evento.participantes %}<div class="evento-participantes">{% for p in evento.participantes %}<div class="evento-participante"><img src="{{ p.avatar }}" alt=""><span>{{ p.nome }}{% if p.externo %}<small>Convidado</small>{% endif %}</span>{% if pode_editar_horarios() %}<form action="/horarios/excluir_participante_evento/{{ p.id }}" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn-icon btn-icon-danger" aria-label="Remover {{ p.nome }}">×</button></form>{% endif %}</div>{% endfor %}</div>{% else %}<p class="text-muted">Nenhum participante.</p>{% endif %}
+            <div class="evento-participantes-titulo">
+                <strong>{{ 'Equipe de Plantão' if evento.tipo == 'feriado_escala_reduzida' else 'Participantes' }}</strong>
+                <span class="evento-total-participantes">{{ evento.participantes|length }} {{ 'escalado(s)' if evento.tipo == 'feriado_escala_reduzida' else ('participante' ~ ('s' if evento.participantes|length != 1 else '')) }}</span>
+            </div>
+            {% if evento.participantes %}<div class="evento-participantes">{% for p in evento.participantes %}<div class="evento-participante"><img src="{{ p.avatar }}" alt=""><span>{{ p.nome }}{% if p.externo %}<small>Convidado</small>{% endif %}</span>{% if pode_editar_horarios() %}<form action="/horarios/excluir_participante_evento/{{ p.id }}" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn-icon btn-icon-danger" aria-label="Remover {{ p.nome }}">×</button></form>{% endif %}</div>{% endfor %}</div>{% else %}<p class="text-muted">{{ 'Nenhum funcionário escalado ainda (adicione abaixo).' if evento.tipo == 'feriado_escala_reduzida' else 'Nenhum participante.' }}</p>{% endif %}
         </section>
         {% if pode_editar_horarios() %}<section class="evento-coluna-adicao"><form action="/horarios/adicionar_participante_evento" method="POST" class="form-grid participante-form">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="evento_id" value="{{ evento.id }}">
-            <fieldset class="selecao-funcionarios"><legend>Funcionários</legend><div class="selecao-toolbar"><small>Use Ctrl para selecionar individualmente.</small><button type="button" class="btn btn-secondary btn-sm" onclick="this.closest('fieldset').querySelectorAll('option').forEach(o => o.selected = true)">Selecionar todos</button></div><select name="funcionario_ids" multiple size="6" class="form-select funcionario-multiplo">{% for f in funcionarios if f[11] == 1 %}<option value="{{ f[0] }}">{{ f[1] }}</option>{% endfor %}</select></fieldset>
+            <fieldset class="selecao-funcionarios"><legend>{{ 'Funcionários para Escala' if evento.tipo == 'feriado_escala_reduzida' else 'Funcionários' }}</legend><div class="selecao-toolbar"><small>Use Ctrl para selecionar individualmente.</small><button type="button" class="btn btn-secondary btn-sm" onclick="this.closest('fieldset').querySelectorAll('option').forEach(o => o.selected = true)">Selecionar todos</button></div><select name="funcionario_ids" multiple size="6" class="form-select funcionario-multiplo">{% for f in funcionarios if f[11] == 1 %}<option value="{{ f[0] }}">{{ f[1] }}</option>{% endfor %}</select></fieldset>
             <label class="form-label participante-externo">Participante externo<input type="text" name="nome_externo" maxlength="150" class="form-control" placeholder="Nome completo"></label>
             <label class="form-label participante-genero">Avatar externo<select name="genero" class="form-select"><option value="masculino">Masculino</option><option value="feminino">Feminino</option></select></label>
-            <button class="btn btn-primary participante-submit">Adicionar participantes</button>
+            <button class="btn btn-primary participante-submit">{{ 'Escalar no plantão' if evento.tipo == 'feriado_escala_reduzida' else 'Adicionar participantes' }}</button>
             </form></section>{% endif %}
         </div>
     </article>

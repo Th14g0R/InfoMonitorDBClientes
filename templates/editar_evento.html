@@ -12,6 +12,13 @@
         <form method="POST" class="form-grid evento-form">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <label class="form-label evento-campo-data">Data<input type="date" name="data_evento" required value="{{ evento.data_evento }}" class="form-control"></label>
+            <label class="form-label evento-campo-tipo">Tipo
+                <select name="tipo" class="form-select">
+                    <option value="comum" {% if evento.tipo == 'comum' or not evento.tipo %}selected{% endif %}>📌 Comum / Informativo</option>
+                    <option value="feriado_sem_expediente" {% if evento.tipo == 'feriado_sem_expediente' %}selected{% endif %}>🏖️ Feriado (Sem Expediente)</option>
+                    <option value="feriado_escala_reduzida" {% if evento.tipo == 'feriado_escala_reduzida' %}selected{% endif %}>⚡ Feriado (Escala Reduzida / Plantão)</option>
+                </select>
+            </label>
             <label class="form-label evento-campo-nome">Nome<input type="text" name="nome" required maxlength="150" value="{{ evento.nome }}" class="form-control"></label>
             <label class="form-label evento-campo-local">Local<input type="text" name="local" maxlength="200" value="{{ evento.local }}" class="form-control"></label>
             <label class="form-label evento-campo-inicio">Início<input type="time" name="hora_inicio" value="{{ evento.hora_inicio }}" class="form-control"></label>
