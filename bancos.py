@@ -38,6 +38,13 @@ from backups import (
     ASSUNTO_ALERTA_PADRAO,
     FUSO_LOCAL,
 )
+from cobian import (
+    init_db_cobian,
+    limpar_cache_conexoes_cobian,
+    obter_status_conexoes_cobian,
+    salvar_vinculo_cliente_ip,
+    remover_vinculo_cliente_ip,
+)
 from gestao_bancos import listar_pastas, adicionar_banco
 from seguranca import (
     senha_atende_politica, login_bloqueado, registrar_falha_login, limpar_falhas_login,
@@ -276,6 +283,9 @@ def init_db_sistema():
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_backups_alertas_data_ref ON backups_alertas_emails (data_referencia)')
+
+    # Tabela de Vínculos de IPs e Conexões do Cobian Backup 11
+    init_db_cobian(conn)
 
     # Migração automática (roda uma única vez): copia os registros da tabela antiga para a nova, como 1ª loja de cada alias
     cursor.execute("SELECT COUNT(*) as total FROM clientes_lojas")
@@ -516,6 +526,7 @@ def limpar_cache_global():
         CACHE_DADOS['orfaos'] = {'dados': [], 'timestamp': 0}
         CACHE_DADOS['metricas'] = {'dados': [], 'timestamp': 0}
         CACHE_DADOS['backups_ftp'] = {'dados': None, 'timestamp': 0}
+        limpar_cache_conexoes_cobian()
         return CACHE_DADOS['generation']
 
 # --- RECURSO: STATUS DE BACKUPS FTP (lê e interpreta a página de texto do servidor de backups) ---
@@ -5195,6 +5206,15 @@ HTML_BACKUPS_FTP = """
         .badge-ATRASADO { background: #fffbeb; color: #92400e; }
         .badge-SEM_ARQUIVO, .badge-ERRO { background: #fef2f2; color: #991b1b; }
         .badge-CRITICO { background: #fee2e2; color: #991b1b; font-weight: 800; border: 1px solid #fecaca; }
+        .badge-conexao { display: inline-flex; align-items: center; gap: 4px; font-size: 0.72em; font-weight: 700; padding: 2px 8px; border-radius: 999px; white-space: nowrap; line-height: 1.3; }
+        .badge-conexao.online { background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
+        .badge-conexao.offline { background: #f1f5f9; color: #64748b; border: 1px solid #e2e8f0; }
+        .info-ip { margin-top: 6px; font-size: 0.82em; color: var(--cor-texto-suave); display: flex; align-items: center; gap: 6px; }
+        .info-ip code { font-family: Consolas, monospace; font-size: 0.95em; background: #f1f5f9; padding: 1px 6px; border-radius: 4px; color: var(--cor-texto); border: 1px solid #e2e8f0; }
+        .btn-editar-ip { background: transparent; border: none; cursor: pointer; padding: 2px 4px; font-size: 0.85em; border-radius: 4px; color: var(--cor-texto-suave); }
+        .btn-editar-ip:hover { background: #e2e8f0; color: var(--cor-texto); }
+        .stat-conexao .valor { color: var(--cor-sucesso); }
+        .alerta-info-conexoes { background: #eff6ff; border: 1px solid #bfdbfe; border-left: 4px solid var(--cor-primaria); color: #1e40af; padding: 10px 14px; border-radius: var(--raio); margin-bottom: 16px; font-size: 0.85em; }
         .rodape-info { color: var(--cor-texto-suave); font-size: 0.85em; margin-top: 20px; }
         .alerta-erro { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 14px 18px; border-radius: var(--raio); margin-bottom: 18px; }
         .alerta-sucesso { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; padding: 14px 18px; border-radius: var(--raio); margin-bottom: 18px; }
@@ -5291,7 +5311,18 @@ HTML_BACKUPS_FTP = """
                 <div class="valor">{{ status.total_erro }}</div>
                 <div class="rotulo">❌ Sem arquivo / erro</div>
             </div>
+            <div class="stat-card stat-conexao">
+                <div class="valor">{{ info_conexoes.total_online }} <span style="font-size: 0.55em; color: var(--cor-texto-suave); font-weight: 500;">/ {{ info_conexoes.total_online + info_conexoes.total_offline }}</span></div>
+                <div class="rotulo">🟢 Conexões Cobian (16032)</div>
+            </div>
         </div>
+
+        {% if info_conexoes.ips_sem_vinculo %}
+            <div class="alerta-info-conexoes">
+                ⚡ <strong>{{ info_conexoes.ips_sem_vinculo|length }} conexão(ões) ativa(s) na porta 16032 sem vínculo com clientes cadastrados:</strong>
+                <code>{{ info_conexoes.ips_sem_vinculo|join(', ') }}</code>
+            </div>
+        {% endif %}
 
         <div class="filtros">
             <a href="/backups-ftp" class="btn {% if not filtro %}ativo{% endif %}">Todos ({{ status.clientes|length }})</a>
@@ -5303,20 +5334,37 @@ HTML_BACKUPS_FTP = """
         <div class="grid-clientes">
             {% for c in clientes %}
                 <div class="card-cliente status-{{ c.status }} {% if c.critico %}critico{% endif %}">
-                    <div class="alias">
-                        {{ c.alias }}
-                        {% if c.critico %}<span style="font-size: 0.8em; color: var(--cor-perigo); margin-left: 4px;">⚠️ ({{ c.dias_atraso }} dias)</span>{% endif %}
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;">
+                        <div class="alias">
+                            {{ c.alias }}
+                            {% if c.critico %}<span style="font-size: 0.8em; color: var(--cor-perigo); margin-left: 4px;">⚠️ ({{ c.dias_atraso }} dias)</span>{% endif %}
+                        </div>
+                        <span class="badge-conexao {% if c.online %}online{% else %}offline{% endif %}" title="{% if c.online %}Conectado via porta 16032 (IP: {{ c.ip or 'Ativo' }}){% elif c.ip %}Desconectado da porta 16032 (Último IP: {{ c.ip }}){% else %}Nenhum IP vinculado{% endif %}">
+                            {% if c.online %}🟢 Online{% else %}⚪ Offline{% endif %}
+                        </span>
                     </div>
+
+                    <div class="info info-ip">
+                        <strong>IP:</strong>
+                        <code>{{ c.ip if c.ip else '—' }}</code>
+                        {% if pode_disparar %}
+                            <button type="button" class="btn-editar-ip" onclick="editarIpCliente('{{ c.alias }}', '{{ c.ip or '' }}')" title="Vincular ou alterar IP de {{ c.alias }}">✏️</button>
+                        {% endif %}
+                    </div>
+
                     {% if c.timestamp %}<div class="info">🕒 {{ c.timestamp }}{% if c.idade %} ({{ c.idade }}){% endif %}</div>{% endif %}
                     {% if c.caminho %}<div class="info" title="{{ c.caminho }}">📁 {{ c.caminho }}</div>{% endif %}
-                    <span class="badge-status badge-{{ c.status }}">
-                        {% if c.status == 'OK' %}✅ Em dia
-                        {% elif c.status == 'ATRASADO' %}
-                            {% if c.critico %}🚨 Atraso Crítico ({{ c.dias_atraso }}d)
-                            {% else %}🕒 Atrasado{% endif %}
-                        {% elif c.status == 'SEM_ARQUIVO' %}❌ Sem arquivo
-                        {% else %}❌ Erro{% endif %}
-                    </span>
+                    
+                    <div style="margin-top: 8px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
+                        <span class="badge-status badge-{{ c.status }}">
+                            {% if c.status == 'OK' %}✅ Em dia
+                            {% elif c.status == 'ATRASADO' %}
+                                {% if c.critico %}🚨 Atraso Crítico ({{ c.dias_atraso }}d)
+                                {% else %}🕒 Atrasado{% endif %}
+                            {% elif c.status == 'SEM_ARQUIVO' %}❌ Sem arquivo
+                            {% else %}❌ Erro{% endif %}
+                        </span>
+                    </div>
                 </div>
             {% else %}
                 <p style="color: var(--cor-texto-suave);">Nenhum cliente encontrado para este filtro.</p>
@@ -5329,7 +5377,7 @@ HTML_BACKUPS_FTP = """
         <div class="bloco-historico">
             <div class="bloco-historico-topo">
                 <h3>📜 Histórico de Alertas de Backup Enviados</h3>
-                <span style="font-size: 0.82em; color: var(--cor-texto-suave);">Registros de disparos automáticos das 14h e manuais</span>
+                <span style="font-size: 0.82em; color: var(--cor-texto-suave);">Registros de disparos automáticos das 09h e manuais</span>
             </div>
             {% if historico_emails %}
                 <div class="tabela-responsiva">
@@ -5375,6 +5423,34 @@ HTML_BACKUPS_FTP = """
             {% endif %}
         </div>
     {% endif %}
+
+    <script>
+    function editarIpCliente(alias, ipAtual) {
+        const novoIp = prompt(`Definir ou alterar o endereço IP para o cliente "${alias}":\n(Deixe vazio para desvincular)`, ipAtual || '');
+        if (novoIp === null) return;
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = '/admin/backups-ftp/salvar-ip';
+        form.style.display = 'none';
+
+        const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+        const inputs = {
+            'csrf_token': csrf,
+            'alias': alias,
+            'ip': novoIp.trim(),
+            'acao': novoIp.trim() ? 'salvar' : 'remover'
+        };
+        for (const [key, val] of Object.entries(inputs)) {
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = key;
+            input.value = val;
+            form.appendChild(input);
+        }
+        document.body.appendChild(form);
+        form.submit();
+    }
+    </script>
 </body>
 </html>
 """
@@ -5382,7 +5458,9 @@ HTML_BACKUPS_FTP = """
 
 @bancos_bp.route('/backups-ftp')
 def exibir_backups_ftp():
-    forcar = solicitar_refresh('backups_ftp')
+    forcar = solicitar_refresh('backups_ftp', limpar_cache=True) or (request.args.get('atualizar') == '1')
+    if forcar:
+        limpar_cache_conexoes_cobian()
     status = obter_status_backups_ftp(forcar_atualizacao=forcar)
     filtro = request.args.get('filtro', '')  # '', 'ok', 'atrasado', 'sem_arquivo'
     msg_sucesso = request.args.get('msg_sucesso')
@@ -5395,6 +5473,7 @@ def exibir_backups_ftp():
     try:
         marcador_email = obter_marcador_alerta_hoje(conn, analise)
         historico_emails = obter_historico_alertas_backups(conn, limite=20)
+        info_conexoes = obter_status_conexoes_cobian(clientes, conn=conn, forcar=forcar)
     finally:
         conn.close()
 
@@ -5427,10 +5506,37 @@ def exibir_backups_ftp():
         marcador_email=marcador_email,
         historico_emails=historico_emails,
         analise=analise,
+        info_conexoes=info_conexoes,
         pode_disparar=pode_disparar,
         msg_sucesso=msg_sucesso,
         msg_erro=msg_erro
     )
+
+
+@bancos_bp.route('/admin/backups-ftp/salvar-ip', methods=['POST'])
+def salvar_ip_cliente_backup():
+    """Vincular ou alterar o endereço IP de um cliente Cobian Backup 11."""
+    if not session.get('logged_in'):
+        return redirect(url_for('bancos.admin_login', next='/backups-ftp'))
+    if not (session.get('eh_master') or tem_permissao('perm_servidores')):
+        return "Você não tem permissão para esta ação.", 403
+
+    alias = request.form.get('alias', '').strip()
+    ip = request.form.get('ip', '').strip()
+    acao = request.form.get('acao', 'salvar')
+
+    conn = get_db_connection()
+    try:
+        if acao == 'remover' or not ip:
+            remover_vinculo_cliente_ip(conn, alias)
+            return redirect(url_for('bancos.exibir_backups_ftp', msg_sucesso=f"Vínculo de IP para '{alias}' removido."))
+
+        salvar_vinculo_cliente_ip(conn, alias, ip, origem='manual')
+        return redirect(url_for('bancos.exibir_backups_ftp', msg_sucesso=f"IP {ip} vinculado com sucesso a '{alias}'."))
+    except ValueError as e:
+        return redirect(url_for('bancos.exibir_backups_ftp', msg_erro=str(e)))
+    finally:
+        conn.close()
 
 
 @bancos_bp.route('/admin/backups-ftp/disparar-alerta', methods=['POST'])
