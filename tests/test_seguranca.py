@@ -732,6 +732,106 @@ class SegurancaTest(unittest.TestCase):
             response = self.client.get('/backups-ftp?filtro=sem_arquivo')
             self.assertNotIn(b'loja-teste', response.data)
 
+    def test_job_alerta_backups_agendado_as_14h(self):
+        job = self.bancos.scheduler.get_job('alerta_backups_diario')
+        self.assertIsNotNone(job)
+        self.assertEqual(str(job.trigger.timezone), 'America/Fortaleza')
+        # Verifica campos de hora=14 e minuto=0
+        campos = {f.name: str(f) for f in job.trigger.fields}
+        self.assertEqual(campos.get('hour'), '14')
+        self.assertEqual(campos.get('minute'), '0')
+
+    def test_backups_ftp_pagina_renderiza_marcador_e_historico(self):
+        from backups import interpretar_status_backups
+        status = interpretar_status_backups('''
+O cliente loja-ok possui o arquivo criado a menos de 1 dia - status [OK] 2026-10-12 22:00:00.
+O cliente loja-critica esta a mais de 1 dia sem bkp - status ERRO 2026-10-09 10:00:00.
+''')
+        with patch.object(self.bancos, 'obter_status_backups_ftp', return_value=status):
+            response = self.client.get('/backups-ftp')
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b'Alerta Di\xc3\xa1rio de Backups em Atraso', response.data)
+            self.assertIn(b'suporte@infobrasilsistemas.com.br', response.data)
+            self.assertIn(b'card-cliente status-ATRASADO critico', response.data)
+            self.assertIn(b'Atraso Cr\xc3\xadtico', response.data)
+            self.assertIn(b'Hist\xc3\xb3rico de Alertas de Backup Enviados', response.data)
+
+    def test_executar_rotina_alerta_backups_limite_diario_e_criterio(self):
+        status_sem_criticos = {
+            'clientes': [
+                {'alias': 'ok1', 'status': 'OK', 'idade': 'menos de 1 dia', 'timestamp': '2026-10-12 20:00:00'},
+                {'alias': 'atrasado1', 'status': 'ATRASADO', 'idade': 'a mais de 1 dia', 'timestamp': '2026-10-12 10:00:00'},
+            ],
+            'total_ok': 1, 'total_atrasado': 1, 'total_erro': 0, 'ultima_atualizacao': '2026-10-13 08:00:00'
+        }
+        status_com_criticos = {
+            'clientes': [
+                {'alias': 'ok1', 'status': 'OK', 'idade': 'menos de 1 dia', 'timestamp': '2026-10-12 20:00:00'},
+                {'alias': 'critico1', 'status': 'ATRASADO', 'idade': 'a mais de 1 dia', 'timestamp': '2026-10-09 10:00:00'},
+            ],
+            'total_ok': 1, 'total_atrasado': 1, 'total_erro': 0, 'ultima_atualizacao': '2026-10-13 08:00:00'
+        }
+
+        # Limpa envios anteriores do dia de teste no banco
+        hoje_teste = '2026-10-13'
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            conn.execute("DELETE FROM backups_alertas_emails WHERE data_referencia = ?", (hoje_teste,))
+
+        with patch.object(self.bancos, 'obter_status_backups_ftp', return_value=status_sem_criticos), \
+                patch.object(self.bancos, 'enviar_email_alerta_backups') as mock_envio:
+            # 1. Sem clientes com >= 3 dias: não deve enviar e-mail
+            sucesso, msg = self.bancos.executar_rotina_alerta_backups(forcar=False)
+            self.assertFalse(sucesso)
+            mock_envio.assert_not_called()
+
+        with patch.object(self.bancos, 'obter_status_backups_ftp', return_value=status_com_criticos), \
+                patch.object(self.bancos, 'enviar_email_alerta_backups', return_value=(True, 'ok')) as mock_envio:
+            # 2. Com cliente com 4 dias (>= 3): envia e-mail
+            sucesso, msg = self.bancos.executar_rotina_alerta_backups(forcar=False)
+            self.assertTrue(sucesso)
+            mock_envio.assert_called_once()
+            args = mock_envio.call_args.kwargs
+            self.assertEqual(args['destinatario'], 'suporte@infobrasilsistemas.com.br')
+            self.assertEqual(args['assunto'], 'Alerta de backup em atraso')
+            self.assertIn('critico1', args['corpo_html'])
+
+            # 3. Segunda tentativa no mesmo dia: limite de 1 por dia deve bloquear envio duplicado
+            mock_envio.reset_mock()
+            sucesso2, msg2 = self.bancos.executar_rotina_alerta_backups(forcar=False)
+            self.assertFalse(sucesso2)
+            self.assertIn('já enviado hoje', msg2)
+            mock_envio.assert_not_called()
+
+            # 4. Disparo com forcar=True: permite envio manual mesmo que já enviado hoje
+            sucesso3, msg3 = self.bancos.executar_rotina_alerta_backups(forcar=True, usuario_solicitante='Tester')
+            self.assertTrue(sucesso3)
+            mock_envio.assert_called_once()
+
+    def test_rota_manual_disparar_alerta_seguranca(self):
+        visitante = self.app.test_client()
+        visitante.get('/backups-ftp')
+        with visitante.session_transaction() as sess:
+            token_visitante = sess['_csrf_token']
+
+        # Sem CSRF: erro 400
+        self.assertEqual(visitante.post('/admin/backups-ftp/disparar-alerta', data={'forcar': '1'}).status_code, 400)
+
+        # Deslogado mas com CSRF: redireciona para login
+        resp = visitante.post('/admin/backups-ftp/disparar-alerta', data={'csrf_token': token_visitante, 'forcar': '1'})
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn('/admin/login', resp.headers['Location'])
+
+        # Logado como Master: dispara com sucesso e redireciona para backups-ftp
+        with patch.object(self.bancos, 'executar_rotina_alerta_backups', return_value=(True, 'Enviado')):
+            resp_logado = self.client.post(
+                '/admin/backups-ftp/disparar-alerta',
+                data={'csrf_token': self.token, 'forcar': '1'}
+            )
+            self.assertEqual(resp_logado.status_code, 302)
+            self.assertIn('/backups-ftp', resp_logado.headers['Location'])
+            self.assertIn('msg_sucesso=Enviado', resp_logado.headers['Location'])
+
+
     def test_paths(self):
         base = '/opt/infobrasil'
         self.assertEqual(self.security.validar_caminho_banco(base + '/cliente/dados.fdb', base),

@@ -28,7 +28,16 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import urllib.request
 import urllib.error
 from certificados import configurar_certificados
-from backups import interpretar_status_backups
+from backups import (
+    interpretar_status_backups,
+    analisar_status_para_alerta,
+    gerar_relatorio_email_backups,
+    enviar_email_alerta_backups,
+    extrair_dias_atraso,
+    EMAIL_DESTINATARIO_PADRAO,
+    ASSUNTO_ALERTA_PADRAO,
+    FUSO_LOCAL,
+)
 from gestao_bancos import listar_pastas, adicionar_banco
 from seguranca import (
     senha_atende_politica, login_bloqueado, registrar_falha_login, limpar_falhas_login,
@@ -249,6 +258,24 @@ def init_db_sistema():
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_clientes_lojas_alias ON clientes_lojas (alias)')
+
+    # Tabela de Histórico e Marcadores de Alertas de Backups por E-mail
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS backups_alertas_emails (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data_envio TEXT NOT NULL,
+            data_referencia TEXT NOT NULL,
+            destinatario TEXT NOT NULL,
+            assunto TEXT NOT NULL,
+            status_envio TEXT NOT NULL,
+            total_ok INTEGER DEFAULT 0,
+            total_atrasado INTEGER DEFAULT 0,
+            total_critico INTEGER DEFAULT 0,
+            clientes_criticos TEXT,
+            detalhes TEXT
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_backups_alertas_data_ref ON backups_alertas_emails (data_referencia)')
 
     # Migração automática (roda uma única vez): copia os registros da tabela antiga para a nova, como 1ª loja de cada alias
     cursor.execute("SELECT COUNT(*) as total FROM clientes_lojas")
@@ -710,9 +737,197 @@ def salvar_historico_diario(metricas_servidores=None):
     conn.commit()
     conn.close()
 
-# --- AGENDADOR FIXO PARA AS 04:00 DA MANHÃ ---
+# --- ROTINA DE ALERTA DIÁRIO DE BACKUPS FTP POR E-MAIL (14:00) ---
+def obter_marcador_alerta_hoje(conn, analise=None):
+    """
+    Retorna o marcador de status do envio do alerta diário de backups para a data de hoje.
+    Garante o cumprimento da regra de enviar no máximo 1 e-mail por dia e evita envios repetidos.
+    """
+    hoje_str = datetime.now(FUSO_LOCAL).strftime('%Y-%m-%d')
+    hora_atual = datetime.now(FUSO_LOCAL).hour
+
+    row = conn.execute('''
+        SELECT * FROM backups_alertas_emails
+        WHERE data_referencia = ? AND status_envio = 'ENVIADO'
+        ORDER BY id DESC LIMIT 1
+    ''', (hoje_str,)).fetchone()
+
+    if row:
+        horario = row['data_envio'].split(' ')[1][:5] if ' ' in row['data_envio'] else row['data_envio']
+        return {
+            'enviado_hoje': True,
+            'agendado': False,
+            'sem_pendencias': False,
+            'data_envio': row['data_envio'],
+            'destinatario': row['destinatario'],
+            'total_critico': row['total_critico'],
+            'clientes_criticos': row['clientes_criticos'] or '',
+            'badge_tipo': 'sucesso',
+            'badge_rotulo': '✅ Alerta enviado hoje',
+            'texto_status': f"Alerta diário enviado hoje às {horario} para {row['destinatario']}.",
+            'detalhes': f"{row['total_critico']} cliente(s) com atraso crítico notificados."
+        }
+
+    total_critico = analise.get('total_critico', 0) if analise else 0
+    if total_critico > 0:
+        horario_texto = "às 14:00" if hora_atual < 14 else "pendente de disparo (após 14h)"
+        return {
+            'enviado_hoje': False,
+            'agendado': True,
+            'sem_pendencias': False,
+            'total_critico': total_critico,
+            'clientes_criticos': ', '.join(c['alias'] for c in analise.get('clientes_criticos', [])),
+            'badge_tipo': 'aviso',
+            'badge_rotulo': '🕒 Agendado às 14h',
+            'texto_status': f"Envio agendado para {horario_texto} ({total_critico} cliente(s) com ≥ 3 dias de atraso).",
+            'detalhes': f"Destinatário configurado: {EMAIL_DESTINATARIO_PADRAO}."
+        }
+
+    return {
+        'enviado_hoje': False,
+        'agendado': False,
+        'sem_pendencias': True,
+        'total_critico': 0,
+        'clientes_criticos': '',
+        'badge_tipo': 'info',
+        'badge_rotulo': 'ℹ️ Sem pendências',
+        'texto_status': "Nenhum alerta necessário hoje (nenhum cliente com 3 ou mais dias de atraso).",
+        'detalhes': "Disparo automático monitorado para às 14:00 caso ocorra atraso crítico."
+    }
+
+
+def obter_historico_alertas_backups(conn, limite=20):
+    """Retorna os registros mais recentes de envios e tentativas de alertas de backups."""
+    cursor = conn.execute('''
+        SELECT id, data_envio, data_referencia, destinatario, assunto,
+               status_envio, total_ok, total_atrasado, total_critico,
+               clientes_criticos, detalhes
+        FROM backups_alertas_emails
+        ORDER BY id DESC
+        LIMIT ?
+    ''', (limite,))
+    return [dict(linha) for linha in cursor.fetchall()]
+
+
+def executar_rotina_alerta_backups(forcar=False, usuario_solicitante=None):
+    """
+    Executa a verificação e envio do alerta diário de backups em atraso.
+    - Destinatário: suporte@infobrasilsistemas.com.br
+    - Assunto: Alerta de backup em atraso
+    - Condição: Envia e-mail quando houver algum cliente com 3 ou mais dias de atraso.
+    - Limite: Apenas 1 e-mail por dia (exceto em disparo manual com forcar=True).
+    - Horário de agendamento: 14:00.
+    """
+    agora_dt = datetime.now(FUSO_LOCAL)
+    hoje_str = agora_dt.strftime('%Y-%m-%d')
+    data_formatada = agora_dt.strftime('%d/%m/%Y %H:%M')
+
+    conn = get_db_connection()
+    try:
+        if not forcar:
+            enviado = conn.execute('''
+                SELECT id, data_envio FROM backups_alertas_emails
+                WHERE data_referencia = ? AND status_envio = 'ENVIADO'
+                LIMIT 1
+            ''', (hoje_str,)).fetchone()
+            if enviado:
+                LOGGER.info("Alerta de backups diário já enviado hoje (%s) às %s. Limite de 1 por dia respeitado.",
+                            hoje_str, enviado['data_envio'])
+                return False, f"Alerta diário já enviado hoje ({hoje_str}). Limite de 1 envio por dia mantido."
+
+        status = obter_status_backups_ftp(forcar_atualizacao=True)
+        if status.get('erro'):
+            LOGGER.warning("Falha ao obter status de backups para rotina de alerta: %s", status['erro'])
+            conn.execute('''
+                INSERT INTO backups_alertas_emails
+                (data_envio, data_referencia, destinatario, assunto, status_envio, detalhes)
+                VALUES (?, ?, ?, ?, 'FALHA', ?)
+            ''', (
+                agora_dt.strftime('%Y-%m-%d %H:%M:%S'),
+                hoje_str,
+                EMAIL_DESTINATARIO_PADRAO,
+                ASSUNTO_ALERTA_PADRAO,
+                f"Falha na consulta remota: {status['erro']}"
+            ))
+            conn.commit()
+            return False, f"Não foi possível consultar os backups: {status['erro']}"
+
+        analise = analisar_status_para_alerta(status.get('clientes', []), data_referencia=agora_dt.date(), dias_corte=3)
+
+        if not forcar and not analise['tem_alerta']:
+            LOGGER.info("Rotina de alerta de backups: nenhum cliente com 3 ou mais dias de atraso. Nenhum e-mail enviado.")
+            return False, "Nenhum cliente com 3 ou mais dias de atraso identificado."
+
+        corpo_html, corpo_texto = gerar_relatorio_email_backups(
+            analise,
+            ultima_atualizacao=status.get('ultima_atualizacao'),
+            data_envio=data_formatada
+        )
+
+        criticos_desc = ', '.join(
+            f"{c['alias']} ({c['dias_atraso']} dias)" if c['dias_atraso'] < 999 else f"{c['alias']} (sem arquivo)"
+            for c in analise['clientes_criticos']
+        ) if analise['clientes_criticos'] else 'Nenhum crítico (envio forçado)'
+
+        try:
+            enviar_email_alerta_backups(
+                destinatario=EMAIL_DESTINATARIO_PADRAO,
+                assunto=ASSUNTO_ALERTA_PADRAO,
+                corpo_html=corpo_html,
+                corpo_texto=corpo_texto,
+                servidor_smtp=SMTP_SERVER,
+                porta_smtp=SMTP_PORT,
+                usuario_smtp=SMTP_USER,
+                senha_smtp=SMTP_PASS
+            )
+            status_envio = 'ENVIADO'
+            detalhes = 'Disparo automático das 14h' if not usuario_solicitante else f'Disparo manual por {usuario_solicitante}'
+            sucesso = True
+            msg_retorno = "E-mail de alerta de backups enviado com sucesso!"
+        except Exception as exc:
+            LOGGER.exception("Falha ao enviar e-mail de alerta de backups: %s", exc)
+            status_envio = 'FALHA'
+            detalhes = f"Erro no envio SMTP: {str(exc)}"
+            sucesso = False
+            msg_retorno = f"Falha ao enviar e-mail: {str(exc)}"
+
+        conn.execute('''
+            INSERT INTO backups_alertas_emails
+            (data_envio, data_referencia, destinatario, assunto, status_envio,
+             total_ok, total_atrasado, total_critico, clientes_criticos, detalhes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            agora_dt.strftime('%Y-%m-%d %H:%M:%S'),
+            hoje_str,
+            EMAIL_DESTINATARIO_PADRAO,
+            ASSUNTO_ALERTA_PADRAO,
+            status_envio,
+            analise['total_ok'],
+            analise['total_atrasado'],
+            analise['total_critico'],
+            criticos_desc,
+            detalhes
+        ))
+        conn.commit()
+        return sucesso, msg_retorno
+    finally:
+        conn.close()
+
+
+# --- AGENDADORES FIXOS: 04:00 (HISTÓRICO) E 14:00 (ALERTA DE BACKUPS) ---
 scheduler = BackgroundScheduler(daemon=True)
 scheduler.add_job(salvar_historico_diario, 'cron', hour=4, minute=0)
+scheduler.add_job(
+    executar_rotina_alerta_backups,
+    'cron',
+    hour=14,
+    minute=0,
+    timezone='America/Fortaleza',
+    id='alerta_backups_diario',
+    replace_existing=True,
+    max_instances=1,
+    coalesce=True
+)
 configurar_certificados(bancos_bp, get_db_connection, tem_permissao, scheduler)
 scheduler.start()
 
@@ -4953,8 +5168,10 @@ HTML_BACKUPS_FTP = """
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--cor-fundo); color: var(--cor-texto); margin: 0; padding: 20px; }
         .topo { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; flex-wrap: wrap; gap: 10px; }
         .topo h2 { margin: 0; }
-        .btn { padding: 8px 14px; background: var(--cor-superficie); color: var(--cor-texto); border: 1px solid var(--cor-borda); border-radius: var(--raio); cursor: pointer; font-weight: 600; text-decoration: none; font-size: 0.85em; }
+        .btn { padding: 8px 14px; background: var(--cor-superficie); color: var(--cor-texto); border: 1px solid var(--cor-borda); border-radius: var(--raio); cursor: pointer; font-weight: 600; text-decoration: none; font-size: 0.85em; display: inline-flex; align-items: center; gap: 6px; }
         .btn:hover { background: #f1f5f9; }
+        .btn-disparo { background: var(--cor-primaria); color: #ffffff; border-color: var(--cor-primaria); }
+        .btn-disparo:hover { background: #1d4ed8; }
         .stats { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
         .stat-card { background: var(--cor-superficie); border: 1px solid var(--cor-borda); border-radius: var(--raio); padding: 16px 22px; min-width: 150px; flex: 1; }
         .stat-card .valor { font-size: 2em; font-weight: 700; }
@@ -4965,18 +5182,42 @@ HTML_BACKUPS_FTP = """
         .filtros { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
         .filtros a.ativo { background: var(--cor-primaria); color: white; border-color: var(--cor-primaria); }
         .grid-clientes { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
-        .card-cliente { background: var(--cor-superficie); border: 1px solid var(--cor-borda); border-left: 4px solid var(--cor-borda); border-radius: var(--raio); padding: 12px 14px; }
+        .card-cliente { background: var(--cor-superficie); border: 1px solid var(--cor-borda); border-left: 4px solid var(--cor-borda); border-radius: var(--raio); padding: 12px 14px; transition: transform 0.15s ease, box-shadow 0.15s ease; }
+        .card-cliente:hover { transform: translateY(-2px); box-shadow: 0 4px 10px rgba(0,0,0,0.06); }
         .card-cliente.status-OK { border-left-color: var(--cor-sucesso); }
         .card-cliente.status-ATRASADO { border-left-color: var(--cor-aviso); }
         .card-cliente.status-SEM_ARQUIVO, .card-cliente.status-ERRO { border-left-color: var(--cor-perigo); }
+        .card-cliente.critico { border-left: 5px solid var(--cor-perigo); background: #fffdf5; box-shadow: 0 0 0 1px #fed7aa; }
         .card-cliente .alias { font-weight: 700; word-break: break-word; }
         .card-cliente .info { font-size: 0.8em; color: var(--cor-texto-suave); margin-top: 4px; }
         .badge-status { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.72em; font-weight: 700; margin-top: 6px; }
         .badge-OK { background: #f0fdf4; color: #166534; }
         .badge-ATRASADO { background: #fffbeb; color: #92400e; }
         .badge-SEM_ARQUIVO, .badge-ERRO { background: #fef2f2; color: #991b1b; }
+        .badge-CRITICO { background: #fee2e2; color: #991b1b; font-weight: 800; border: 1px solid #fecaca; }
         .rodape-info { color: var(--cor-texto-suave); font-size: 0.85em; margin-top: 20px; }
         .alerta-erro { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 14px 18px; border-radius: var(--raio); margin-bottom: 18px; }
+        .alerta-sucesso { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; padding: 14px 18px; border-radius: var(--raio); margin-bottom: 18px; }
+
+        /* Card do Marcador de E-mail Diário */
+        .card-alerta-email { background: var(--cor-superficie); border: 1px solid var(--cor-borda); border-radius: var(--raio); padding: 16px 20px; margin-bottom: 20px; box-shadow: 0 2px 6px rgba(0,0,0,0.03); }
+        .alerta-email-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; }
+        .alerta-email-info { display: flex; align-items: center; gap: 12px; }
+        .icone-email { font-size: 1.8em; }
+        .badge-marcador { display: inline-block; padding: 4px 12px; border-radius: 999px; font-size: 0.78em; font-weight: 700; }
+        .badge-marcador-sucesso { background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
+        .badge-marcador-aviso { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
+        .badge-marcador-info { background: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; }
+
+        /* Bloco de Histórico */
+        .bloco-historico { background: var(--cor-superficie); border: 1px solid var(--cor-borda); border-radius: var(--raio); padding: 18px 20px; margin-top: 26px; }
+        .bloco-historico-topo { margin-bottom: 14px; }
+        .bloco-historico-topo h3 { margin: 0 0 4px 0; font-size: 1.1em; }
+        .tabela-responsiva { overflow-x: auto; }
+        .tabela-historico { width: 100%; border-collapse: collapse; font-size: 0.85em; text-align: left; }
+        .tabela-historico th { background: #f8fafc; padding: 10px 12px; border-bottom: 1px solid var(--cor-borda); color: var(--cor-texto-suave); font-weight: 600; }
+        .tabela-historico td { padding: 10px 12px; border-bottom: 1px solid var(--cor-borda); vertical-align: middle; }
+        .tabela-historico tr:hover td { background: #f8fafc; }
     </style>
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <script src="{{ url_for('static', filename='csrf.js') }}"></script>
@@ -4992,9 +5233,51 @@ HTML_BACKUPS_FTP = """
         </div>
     </div>
 
+    {% if msg_sucesso %}
+        <div class="alerta-sucesso">✅ {{ msg_sucesso }}</div>
+    {% endif %}
+    {% if msg_erro %}
+        <div class="alerta-erro">⚠️ {{ msg_erro }}</div>
+    {% endif %}
+
     {% if status.erro %}
         <div class="alerta-erro">⚠️ {{ status.erro }}</div>
     {% else %}
+        <!-- Marcador de E-mail Diário (14:00) -->
+        <div class="card-alerta-email">
+            <div class="alerta-email-header">
+                <div class="alerta-email-info">
+                    <span class="icone-email">✉️</span>
+                    <div>
+                        <h3 style="margin:0; font-size: 1.05em; color: var(--cor-texto);">Alerta Diário de Backups em Atraso</h3>
+                        <div style="font-size: 0.82em; color: var(--cor-texto-suave); margin-top: 3px;">
+                            Destinatário: <code>suporte@infobrasilsistemas.com.br</code> • Envio diário às 14:00 quando houver clientes com atraso ≥ 3 dias (máximo 1 por dia)
+                        </div>
+                    </div>
+                </div>
+                <div style="display:flex; align-items:center; gap: 10px; flex-wrap: wrap;">
+                    <span class="badge-marcador badge-marcador-{{ marcador_email.badge_tipo }}">{{ marcador_email.badge_rotulo }}</span>
+                    {% if pode_disparar %}
+                        <form action="/admin/backups-ftp/disparar-alerta" method="POST" style="margin:0;">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <input type="hidden" name="forcar" value="1">
+                            <button type="submit" class="btn btn-disparo" onclick="return confirm('Confirmar o envio manual do relatório de alertas para suporte@infobrasilsistemas.com.br?');" title="Dispara o envio de e-mail imediatamente">
+                                ⚡ Disparar Alerta Agora
+                            </button>
+                        </form>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="alerta-email-corpo">
+                <p style="margin: 0; font-size: 0.88em; color: var(--cor-texto);">
+                    <strong>Status de hoje:</strong> {{ marcador_email.texto_status }}
+                </p>
+                {% if marcador_email.detalhes %}
+                    <div style="font-size: 0.8em; color: var(--cor-texto-suave); margin-top: 4px;">{{ marcador_email.detalhes }}</div>
+                {% endif %}
+            </div>
+        </div>
+
         <div class="stats">
             <div class="stat-card stat-ok">
                 <div class="valor">{{ status.total_ok }}</div>
@@ -5019,13 +5302,18 @@ HTML_BACKUPS_FTP = """
 
         <div class="grid-clientes">
             {% for c in clientes %}
-                <div class="card-cliente status-{{ c.status }}">
-                    <div class="alias">{{ c.alias }}</div>
+                <div class="card-cliente status-{{ c.status }} {% if c.critico %}critico{% endif %}">
+                    <div class="alias">
+                        {{ c.alias }}
+                        {% if c.critico %}<span style="font-size: 0.8em; color: var(--cor-perigo); margin-left: 4px;">⚠️ ({{ c.dias_atraso }} dias)</span>{% endif %}
+                    </div>
                     {% if c.timestamp %}<div class="info">🕒 {{ c.timestamp }}{% if c.idade %} ({{ c.idade }}){% endif %}</div>{% endif %}
                     {% if c.caminho %}<div class="info" title="{{ c.caminho }}">📁 {{ c.caminho }}</div>{% endif %}
                     <span class="badge-status badge-{{ c.status }}">
                         {% if c.status == 'OK' %}✅ Em dia
-                        {% elif c.status == 'ATRASADO' %}🕒 Atrasado
+                        {% elif c.status == 'ATRASADO' %}
+                            {% if c.critico %}🚨 Atraso Crítico ({{ c.dias_atraso }}d)
+                            {% else %}🕒 Atrasado{% endif %}
                         {% elif c.status == 'SEM_ARQUIVO' %}❌ Sem arquivo
                         {% else %}❌ Erro{% endif %}
                     </span>
@@ -5036,6 +5324,56 @@ HTML_BACKUPS_FTP = """
         </div>
 
         <p class="rodape-info">Última atualização informada pelo servidor de backups: {{ status.ultima_atualizacao or '—' }}</p>
+
+        <!-- Histórico de Alertas de Backups Enviados -->
+        <div class="bloco-historico">
+            <div class="bloco-historico-topo">
+                <h3>📜 Histórico de Alertas de Backup Enviados</h3>
+                <span style="font-size: 0.82em; color: var(--cor-texto-suave);">Registros de disparos automáticos das 14h e manuais</span>
+            </div>
+            {% if historico_emails %}
+                <div class="tabela-responsiva">
+                    <table class="tabela-historico">
+                        <thead>
+                            <tr>
+                                <th>Data / Hora</th>
+                                <th>Situação</th>
+                                <th>Destinatário</th>
+                                <th>Totais</th>
+                                <th>Clientes Críticos</th>
+                                <th>Detalhes</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for h in historico_emails %}
+                                <tr>
+                                    <td style="font-weight: 600; white-space: nowrap;">{{ h.data_envio }}</td>
+                                    <td>
+                                        {% if h.status_envio == 'ENVIADO' %}
+                                            <span class="badge-status badge-OK">✅ Enviado</span>
+                                        {% else %}
+                                            <span class="badge-status badge-ERRO">❌ Falha</span>
+                                        {% endif %}
+                                    </td>
+                                    <td style="color: var(--cor-texto-suave);"><code>{{ h.destinatario }}</code></td>
+                                    <td style="white-space: nowrap; font-size: 0.85em;">
+                                        <span style="color: var(--cor-sucesso);">OK: {{ h.total_ok }}</span> |
+                                        <span style="color: var(--cor-aviso);">Atraso: {{ h.total_atrasado }}</span> |
+                                        <span style="color: var(--cor-perigo); font-weight: 700;">Críticos: {{ h.total_critico }}</span>
+                                    </td>
+                                    <td style="font-size: 0.85em; max-width: 280px; word-break: break-word;">
+                                        {{ h.clientes_criticos or '—' }}
+                                    </td>
+                                    <td style="font-size: 0.85em; color: var(--cor-texto-suave);">{{ h.detalhes or '—' }}</td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% else %}
+                <p style="color: var(--cor-texto-suave); font-size: 0.85em; margin: 10px 0;">Nenhum envio registrado no histórico ainda.</p>
+            {% endif %}
+        </div>
     {% endif %}
 </body>
 </html>
@@ -5047,8 +5385,29 @@ def exibir_backups_ftp():
     forcar = solicitar_refresh('backups_ftp')
     status = obter_status_backups_ftp(forcar_atualizacao=forcar)
     filtro = request.args.get('filtro', '')  # '', 'ok', 'atrasado', 'sem_arquivo'
+    msg_sucesso = request.args.get('msg_sucesso')
+    msg_erro = request.args.get('msg_erro')
 
-    clientes = status['clientes']
+    clientes = list(status.get('clientes') or [])
+    analise = analisar_status_para_alerta(clientes)
+
+    conn = get_db_connection()
+    try:
+        marcador_email = obter_marcador_alerta_hoje(conn, analise)
+        historico_emails = obter_historico_alertas_backups(conn, limite=20)
+    finally:
+        conn.close()
+
+    mapa_analise = {c['alias']: c for c in analise.get('todos_ordenados', [])}
+    for c in clientes:
+        info_c = mapa_analise.get(c['alias'])
+        if info_c:
+            c['dias_atraso'] = info_c['dias_atraso']
+            c['critico'] = info_c['critico']
+        else:
+            c['dias_atraso'] = 0
+            c['critico'] = False
+
     if filtro == 'ok':
         clientes = [c for c in clientes if c['status'] == 'OK']
     elif filtro == 'atrasado':
@@ -5058,7 +5417,37 @@ def exibir_backups_ftp():
 
     clientes = sorted(clientes, key=lambda c: c['alias'].lower())
 
-    return render_template_string(HTML_BACKUPS_FTP, status=status, clientes=clientes, filtro=filtro)
+    pode_disparar = bool(session.get('logged_in') and (session.get('eh_master') or tem_permissao('perm_servidores')))
+
+    return render_template_string(
+        HTML_BACKUPS_FTP,
+        status=status,
+        clientes=clientes,
+        filtro=filtro,
+        marcador_email=marcador_email,
+        historico_emails=historico_emails,
+        analise=analise,
+        pode_disparar=pode_disparar,
+        msg_sucesso=msg_sucesso,
+        msg_erro=msg_erro
+    )
+
+
+@bancos_bp.route('/admin/backups-ftp/disparar-alerta', methods=['POST'])
+def disparar_alerta_backups_manual():
+    """Disparo manual de alerta de backups para administradores autorizados."""
+    if not session.get('logged_in'):
+        return redirect(url_for('bancos.admin_login', next='/backups-ftp'))
+    if not (session.get('eh_master') or tem_permissao('perm_servidores')):
+        return "Você não tem permissão para esta ação.", 403
+
+    usuario_nome = nome_para_assinatura(session.get('user_nome', 'Admin'))
+    forcar = request.form.get('forcar') == '1'
+    sucesso, msg = executar_rotina_alerta_backups(forcar=forcar, usuario_solicitante=usuario_nome)
+    if sucesso:
+        return redirect(url_for('bancos.exibir_backups_ftp', msg_sucesso=msg))
+    return redirect(url_for('bancos.exibir_backups_ftp', msg_erro=msg))
+
 
 
 @bancos_bp.route('/')
