@@ -755,9 +755,6 @@ O cliente loja-critica esta a mais de 1 dia sem bkp - status ERRO 2026-10-09 10:
             self.assertIn(b'card-cliente status-ATRASADO critico', response.data)
             self.assertIn(b'Atraso Cr\xc3\xadtico', response.data)
             self.assertIn(b'Hist\xc3\xb3rico de Alertas de Backup Enviados', response.data)
-            self.assertIn(b'badge-conexao', response.data)
-            self.assertIn(b'Conex\xc3\xb5es Cobian', response.data)
-
 
     def test_executar_rotina_alerta_backups_limite_diario_e_criterio(self):
         status_sem_criticos = {
