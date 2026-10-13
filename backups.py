@@ -441,10 +441,20 @@ def enviar_email_alerta_backups(
     Envia o e-mail de alerta de backups em atraso via SMTP configurado no projeto.
     Suporta servidores SMTP convencionais com STARTTLS (ex: porta 587) e SMTP_SSL (porta 465).
     """
-    servidor = servidor_smtp or os.getenv('SMTP_SERVER', 'smtp.gmail.com')
-    porta = int(porta_smtp or os.getenv('SMTP_PORT', 587))
     usuario = usuario_smtp or os.getenv('SMTP_USER')
     senha = senha_smtp or os.getenv('SMTP_PASS')
+
+    if not (usuario and senha):
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+        except Exception:
+            pass
+        usuario = usuario or os.getenv('SMTP_USER')
+        senha = senha or os.getenv('SMTP_PASS')
+
+    servidor = servidor_smtp or os.getenv('SMTP_SERVER', 'smtp.gmail.com')
+    porta = int(porta_smtp or os.getenv('SMTP_PORT', 587))
 
     if not usuario or not senha:
         raise RuntimeError('Configuração de SMTP incompleta: SMTP_USER e SMTP_PASS devem estar definidos no ambiente.')
