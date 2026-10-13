@@ -758,25 +758,6 @@ O cliente loja-critica esta a mais de 1 dia sem bkp - status ERRO 2026-10-09 10:
             self.assertIn(b'badge-conexao', response.data)
             self.assertIn(b'Conex\xc3\xb5es Cobian', response.data)
 
-    def test_salvar_ip_cliente_backup_rota(self):
-        # 1. Usuário não autenticado é redirecionado para login
-        visitante = self.app.test_client()
-        visitante.get('/admin/login')
-        with visitante.session_transaction() as sess:
-            token_visitante = sess['_csrf_token']
-        res_anon = visitante.post('/admin/backups-ftp/salvar-ip', data={'csrf_token': token_visitante, 'alias': 'loja-teste', 'ip': '189.85.119.175'})
-        self.assertEqual(res_anon.status_code, 302)
-        self.assertIn('/login', res_anon.headers.get('Location', ''))
-
-        # 2. Usuário master autenticado salva IP com sucesso
-        res_ok = self.client.post('/admin/backups-ftp/salvar-ip', data={'csrf_token': self.token, 'alias': 'loja-teste', 'ip': '189.85.119.175', 'acao': 'salvar'})
-        self.assertEqual(res_ok.status_code, 302)
-        self.assertIn('/backups-ftp', res_ok.headers.get('Location', ''))
-
-        with closing(self.bancos.get_db_connection()) as conn:
-            row = conn.execute("SELECT ip FROM cobian_clientes_ips WHERE alias = 'loja-teste'").fetchone()
-            self.assertIsNotNone(row)
-            self.assertEqual(row['ip'], '189.85.119.175')
 
     def test_executar_rotina_alerta_backups_limite_diario_e_criterio(self):
         status_sem_criticos = {

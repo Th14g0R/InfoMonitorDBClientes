@@ -42,8 +42,6 @@ from cobian import (
     init_db_cobian,
     limpar_cache_conexoes_cobian,
     obter_status_conexoes_cobian,
-    salvar_vinculo_cliente_ip,
-    remover_vinculo_cliente_ip,
 )
 from gestao_bancos import listar_pastas, adicionar_banco
 from seguranca import (
@@ -5211,8 +5209,6 @@ HTML_BACKUPS_FTP = """
         .badge-conexao.offline { background: #f1f5f9; color: #64748b; border: 1px solid #e2e8f0; }
         .info-ip { margin-top: 6px; font-size: 0.82em; color: var(--cor-texto-suave); display: flex; align-items: center; gap: 6px; }
         .info-ip code { font-family: Consolas, monospace; font-size: 0.95em; background: #f1f5f9; padding: 1px 6px; border-radius: 4px; color: var(--cor-texto); border: 1px solid #e2e8f0; }
-        .btn-editar-ip { background: transparent; border: none; cursor: pointer; padding: 2px 4px; font-size: 0.85em; border-radius: 4px; color: var(--cor-texto-suave); }
-        .btn-editar-ip:hover { background: #e2e8f0; color: var(--cor-texto); }
         .stat-conexao .valor { color: var(--cor-sucesso); }
         .alerta-info-conexoes { background: #eff6ff; border: 1px solid #bfdbfe; border-left: 4px solid var(--cor-primaria); color: #1e40af; padding: 10px 14px; border-radius: var(--raio); margin-bottom: 16px; font-size: 0.85em; }
         .rodape-info { color: var(--cor-texto-suave); font-size: 0.85em; margin-top: 20px; }
@@ -5339,17 +5335,14 @@ HTML_BACKUPS_FTP = """
                             {{ c.alias }}
                             {% if c.critico %}<span style="font-size: 0.8em; color: var(--cor-perigo); margin-left: 4px;">⚠️ ({{ c.dias_atraso }} dias)</span>{% endif %}
                         </div>
-                        <span class="badge-conexao {% if c.online %}online{% else %}offline{% endif %}" title="{% if c.online %}Conectado via porta 16032 (IP: {{ c.ip or 'Ativo' }}){% elif c.ip %}Desconectado da porta 16032 (Último IP: {{ c.ip }}){% else %}Nenhum IP vinculado{% endif %}">
+                        <span class="badge-conexao {% if c.online %}online{% else %}offline{% endif %}" title="{% if c.online %}Conectado ao Cobian (IP: {{ c.ip or 'Ativo' }}{% if c.tempo_conexao %} • Tempo: {{ c.tempo_conexao }}{% endif %}){% elif c.ip %}Desconectado do Cobian (Último IP visto: {{ c.ip }}){% else %}Desconectado{% endif %}">
                             {% if c.online %}🟢 Online{% else %}⚪ Offline{% endif %}
                         </span>
                     </div>
 
                     <div class="info info-ip">
                         <strong>IP:</strong>
-                        <code>{{ c.ip if c.ip else '—' }}</code>
-                        {% if pode_disparar %}
-                            <button type="button" class="btn-editar-ip" onclick="editarIpCliente('{{ c.alias }}', '{{ c.ip or '' }}')" title="Vincular ou alterar IP de {{ c.alias }}">✏️</button>
-                        {% endif %}
+                        <code>{{ c.ip if c.ip else '-' }}</code>
                     </div>
 
                     {% if c.timestamp %}<div class="info">🕒 {{ c.timestamp }}{% if c.idade %} ({{ c.idade }}){% endif %}</div>{% endif %}
@@ -5424,33 +5417,6 @@ HTML_BACKUPS_FTP = """
         </div>
     {% endif %}
 
-    <script>
-    function editarIpCliente(alias, ipAtual) {
-        const novoIp = prompt(`Definir ou alterar o endereço IP para o cliente "${alias}":\n(Deixe vazio para desvincular)`, ipAtual || '');
-        if (novoIp === null) return;
-        const form = document.createElement('form');
-        form.method = 'POST';
-        form.action = '/admin/backups-ftp/salvar-ip';
-        form.style.display = 'none';
-
-        const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
-        const inputs = {
-            'csrf_token': csrf,
-            'alias': alias,
-            'ip': novoIp.trim(),
-            'acao': novoIp.trim() ? 'salvar' : 'remover'
-        };
-        for (const [key, val] of Object.entries(inputs)) {
-            const input = document.createElement('input');
-            input.type = 'hidden';
-            input.name = key;
-            input.value = val;
-            form.appendChild(input);
-        }
-        document.body.appendChild(form);
-        form.submit();
-    }
-    </script>
 </body>
 </html>
 """
@@ -5511,32 +5477,6 @@ def exibir_backups_ftp():
         msg_sucesso=msg_sucesso,
         msg_erro=msg_erro
     )
-
-
-@bancos_bp.route('/admin/backups-ftp/salvar-ip', methods=['POST'])
-def salvar_ip_cliente_backup():
-    """Vincular ou alterar o endereço IP de um cliente Cobian Backup 11."""
-    if not session.get('logged_in'):
-        return redirect(url_for('bancos.admin_login', next='/backups-ftp'))
-    if not (session.get('eh_master') or tem_permissao('perm_servidores')):
-        return "Você não tem permissão para esta ação.", 403
-
-    alias = request.form.get('alias', '').strip()
-    ip = request.form.get('ip', '').strip()
-    acao = request.form.get('acao', 'salvar')
-
-    conn = get_db_connection()
-    try:
-        if acao == 'remover' or not ip:
-            remover_vinculo_cliente_ip(conn, alias)
-            return redirect(url_for('bancos.exibir_backups_ftp', msg_sucesso=f"Vínculo de IP para '{alias}' removido."))
-
-        salvar_vinculo_cliente_ip(conn, alias, ip, origem='manual')
-        return redirect(url_for('bancos.exibir_backups_ftp', msg_sucesso=f"IP {ip} vinculado com sucesso a '{alias}'."))
-    except ValueError as e:
-        return redirect(url_for('bancos.exibir_backups_ftp', msg_erro=str(e)))
-    finally:
-        conn.close()
 
 
 @bancos_bp.route('/admin/backups-ftp/disparar-alerta', methods=['POST'])
