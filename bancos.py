@@ -875,10 +875,10 @@ def executar_rotina_alerta_backups(forcar=False, usuario_solicitante=None):
                 assunto=ASSUNTO_ALERTA_PADRAO,
                 corpo_html=corpo_html,
                 corpo_texto=corpo_texto,
-                servidor_smtp=SMTP_SERVER,
-                porta_smtp=SMTP_PORT,
-                usuario_smtp=SMTP_USER,
-                senha_smtp=SMTP_PASS
+                servidor_smtp=SMTP_SERVER or os.getenv('SMTP_SERVER', 'smtp.gmail.com'),
+                porta_smtp=SMTP_PORT or int(os.getenv('SMTP_PORT', 587)),
+                usuario_smtp=SMTP_USER or os.getenv('SMTP_USER'),
+                senha_smtp=SMTP_PASS or os.getenv('SMTP_PASS')
             )
             status_envio = 'ENVIADO'
             detalhes = 'Disparo automático das 14h' if not usuario_solicitante else f'Disparo manual por {usuario_solicitante}'
