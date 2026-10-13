@@ -159,7 +159,8 @@ def analisar_status_para_alerta(clientes, data_referencia=None, dias_corte=3):
     clientes_atrasados.sort(key=lambda x: (-x['dias_atraso'], x['alias'].lower()))
     clientes_criticos.sort(key=lambda x: (-x['dias_atraso'], x['alias'].lower()))
 
-    todos_ordenados = clientes_ok + clientes_atrasados
+    # Clientes atrasados primeiro (informação principal), seguidos pelos clientes em dia
+    todos_ordenados = clientes_atrasados + clientes_ok
 
     return {
         'total_clientes': len(clientes),
@@ -178,7 +179,8 @@ def analisar_status_para_alerta(clientes, data_referencia=None, dias_corte=3):
 def gerar_relatorio_email_backups(dados_analise, ultima_atualizacao=None, data_envio=None):
     """
     Gera as versões HTML e texto simples do e-mail de alerta de backup em atraso.
-    Os clientes são ordenados por OK, depois Atrasados, com os mais atrasados grifados.
+    Os clientes atrasados são apresentados primeiro (com os mais atrasados grifados),
+    seguidos pelos clientes com backup em dia.
     """
     if not data_envio:
         data_envio = datetime.now(FUSO_LOCAL).strftime('%d/%m/%Y %H:%M')
@@ -202,9 +204,9 @@ def gerar_relatorio_email_backups(dados_analise, ultima_atualizacao=None, data_e
     linhas_txt.append("")
     linhas_txt.append("RESUMO GERAL:")
     linhas_txt.append(f"  - Total de Clientes Monitorados: {total_clientes}")
-    linhas_txt.append(f"  - Backups em Dia (OK): {total_ok}")
     linhas_txt.append(f"  - Backups em Atraso: {total_atrasado}")
     linhas_txt.append(f"  - Clientes com Atraso Crítico (>= 3 dias): {total_critico}")
+    linhas_txt.append(f"  - Backups em Dia (OK): {total_ok}")
     linhas_txt.append("")
 
     if total_critico > 0:
@@ -216,17 +218,7 @@ def gerar_relatorio_email_backups(dados_analise, ultima_atualizacao=None, data_e
         linhas_txt.append("")
 
     linhas_txt.append("--------------------------------------------------------------------------------")
-    linhas_txt.append(f"1. CLIENTES COM BACKUP EM DIA (OK) [{len(clientes_ok)}]")
-    linhas_txt.append("--------------------------------------------------------------------------------")
-    if clientes_ok:
-        for c in clientes_ok:
-            linhas_txt.append(f"  [OK] {c['alias']} | Último bkp: {c.get('timestamp') or '—'} ({c.get('idade') or 'em dia'})")
-    else:
-        linhas_txt.append("  Nenhum cliente em dia.")
-    linhas_txt.append("")
-
-    linhas_txt.append("--------------------------------------------------------------------------------")
-    linhas_txt.append(f"2. CLIENTES COM BACKUP EM ATRASO [{len(clientes_atrasados)}] - MAIS ATRASADOS GRIFADOS")
+    linhas_txt.append(f"1. CLIENTES COM BACKUP EM ATRASO [{len(clientes_atrasados)}] - MAIS ATRASADOS GRIFADOS")
     linhas_txt.append("--------------------------------------------------------------------------------")
     if clientes_atrasados:
         for c in clientes_atrasados:
@@ -235,67 +227,75 @@ def gerar_relatorio_email_backups(dados_analise, ultima_atualizacao=None, data_e
                 tag = f"[*** GRIFADO - CRÍTICO: {dias_str} DE ATRASO ***]"
             else:
                 tag = f"[ATRASADO: {dias_str}]"
-            linhas_txt.append(f"  {tag} {c['alias']} | Último bkp: {c.get('timestamp') or '—'} ({c.get('idade') or 'sem data'})")
+            linhas_txt.append(f"  {tag} {c['alias']} | Último bkp: {c.get('timestamp') or '—'}")
     else:
         linhas_txt.append("  Nenhum cliente em atraso.")
+    linhas_txt.append("")
+
+    linhas_txt.append("--------------------------------------------------------------------------------")
+    linhas_txt.append(f"2. CLIENTES COM BACKUP EM DIA (OK) [{len(clientes_ok)}]")
+    linhas_txt.append("--------------------------------------------------------------------------------")
+    if clientes_ok:
+        for c in clientes_ok:
+            linhas_txt.append(f"  [OK] {c['alias']} | Último bkp: {c.get('timestamp') or '—'}")
+    else:
+        linhas_txt.append("  Nenhum cliente em dia.")
     linhas_txt.append("")
     linhas_txt.append("Mensagem automática do InfoMonitor. Destinatário: suporte@infobrasilsistemas.com.br")
     linhas_txt.append("================================================================================")
     corpo_texto = "\n".join(linhas_txt)
 
     # Construção do HTML
-    linhas_html_ok = []
-    for c in clientes_ok:
-        ts = c.get('timestamp') or '—'
-        idade = c.get('idade') or 'em dia'
-        linhas_html_ok.append(f"""
-        <tr style="border-bottom: 1px solid #e2e8f0;">
-            <td style="padding: 10px 14px; font-weight: 600; color: #1e293b;">{c['alias']}</td>
-            <td style="padding: 10px 14px;">
-                <span style="background-color: #dcfce7; color: #15803d; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700;">✅ Em dia</span>
-            </td>
-            <td style="padding: 10px 14px; color: #64748b; font-size: 13px;">0 dias</td>
-            <td style="padding: 10px 14px; color: #334155; font-size: 13px;">{ts}</td>
-            <td style="padding: 10px 14px; color: #64748b; font-size: 13px;">{idade}</td>
-        </tr>
-        """)
-
+    # Linhas de Clientes Atrasados
     linhas_html_atrasados = []
     for c in clientes_atrasados:
         ts = c.get('timestamp') or '—'
-        idade = c.get('idade') or 'sem data'
         dias = c.get('dias_atraso', 0)
         dias_str = f"{dias} dias" if dias < 999 else "Sem arquivo"
 
         if c.get('critico'):
-            # Grifado com destaque visual intenso (amarelo/vermelho com borda e badge)
+            # Grifado com destaque visual intenso (amarelo com borda vermelha e badge crítico)
+            # Sem ícone antes do alias para evitar quebras de linha indesejadas
             linhas_html_atrasados.append(f"""
-            <tr style="background-color: #fef3c7; border: 2px solid #f59e0b; border-left: 6px solid #dc2626; font-weight: bold;">
-                <td style="padding: 11px 14px; color: #78350f; font-size: 14px;">
-                    <mark style="background-color: #fde047; padding: 2px 6px; border-radius: 3px; color: #78350f;">⚠️ {c['alias']}</mark>
+            <tr style="background-color: #fef3c7; border-top: 1px solid #fde68a; border-bottom: 1px solid #f59e0b; border-left: 6px solid #dc2626;">
+                <td style="padding: 10px 14px; white-space: nowrap; font-size: 13px;">
+                    <mark style="background-color: #fde047; padding: 2px 8px; border-radius: 4px; color: #78350f; font-weight: 700; white-space: nowrap; display: inline-block;">{c['alias']}</mark>
                 </td>
-                <td style="padding: 11px 14px;">
-                    <span style="background-color: #fee2e2; color: #991b1b; padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 800; border: 1px solid #fca5a5;">🚨 CRÍTICO (≥ 3 DIAS)</span>
+                <td style="padding: 10px 14px; white-space: nowrap;">
+                    <span style="background-color: #fee2e2; color: #991b1b; padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 800; border: 1px solid #fca5a5; white-space: nowrap; display: inline-block;">🚨 CRÍTICO (≥ 3 DIAS)</span>
                 </td>
-                <td style="padding: 11px 14px; color: #b91c1c; font-size: 13px;">
+                <td style="padding: 10px 14px; color: #b91c1c; font-size: 13px; white-space: nowrap;">
                     <strong>{dias_str}</strong>
                 </td>
-                <td style="padding: 11px 14px; color: #78350f; font-size: 13px;">{ts}</td>
-                <td style="padding: 11px 14px; color: #92400e; font-size: 13px;">{idade}</td>
+                <td style="padding: 10px 14px; color: #78350f; font-size: 13px; white-space: nowrap;">{ts}</td>
             </tr>
             """)
         else:
             linhas_html_atrasados.append(f"""
             <tr style="border-bottom: 1px solid #e2e8f0; background-color: #ffffff;">
-                <td style="padding: 10px 14px; font-weight: 600; color: #1e293b;">{c['alias']}</td>
-                <td style="padding: 10px 14px;">
-                    <span style="background-color: #fef3c7; color: #92400e; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700;">🕒 Atrasado</span>
+                <td style="padding: 10px 14px; font-weight: 600; color: #1e293b; white-space: nowrap; font-size: 13px;">{c['alias']}</td>
+                <td style="padding: 10px 14px; white-space: nowrap;">
+                    <span style="background-color: #fef3c7; color: #92400e; padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; border: 1px solid #fde68a; white-space: nowrap; display: inline-block;">🕒 Atrasado</span>
                 </td>
-                <td style="padding: 10px 14px; color: #d97706; font-size: 13px;">{dias_str}</td>
-                <td style="padding: 10px 14px; color: #334155; font-size: 13px;">{ts}</td>
-                <td style="padding: 10px 14px; color: #64748b; font-size: 13px;">{idade}</td>
+                <td style="padding: 10px 14px; color: #d97706; font-size: 13px; white-space: nowrap;">{dias_str}</td>
+                <td style="padding: 10px 14px; color: #334155; font-size: 13px; white-space: nowrap;">{ts}</td>
             </tr>
             """)
+
+    # Linhas de Clientes em Dia (OK)
+    linhas_html_ok = []
+    for c in clientes_ok:
+        ts = c.get('timestamp') or '—'
+        linhas_html_ok.append(f"""
+        <tr style="border-bottom: 1px solid #e2e8f0; background-color: #ffffff;">
+            <td style="padding: 10px 14px; font-weight: 600; color: #1e293b; white-space: nowrap; font-size: 13px;">{c['alias']}</td>
+            <td style="padding: 10px 14px; white-space: nowrap;">
+                <span style="background-color: #dcfce7; color: #15803d; padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; border: 1px solid #bbf7d0; white-space: nowrap; display: inline-block;">✅ Em dia</span>
+            </td>
+            <td style="padding: 10px 14px; color: #64748b; font-size: 13px; white-space: nowrap;">0 dias</td>
+            <td style="padding: 10px 14px; color: #334155; font-size: 13px; white-space: nowrap;">{ts}</td>
+        </tr>
+        """)
 
     alerta_banner = ""
     if total_critico > 0:
@@ -306,7 +306,7 @@ def gerar_relatorio_email_backups(dados_analise, ultima_atualizacao=None, data_e
                 <div>
                     <h3 style="margin: 0; color: #991b1b; font-size: 16px; font-weight: 700;">Atenção: {total_critico} cliente(s) com 3 ou mais dias de atraso no backup!</h3>
                     <p style="margin: 4px 0 0 0; color: #7f1d1d; font-size: 13px;">
-                        Identificamos backups que não foram gerados há 3 dias ou mais. Os clientes mais atrasados estão <strong>grifados em amarelo com borda de destaque</strong> na listagem abaixo.
+                        Identificamos backups que não foram gerados há 3 dias ou mais. Os clientes mais atrasados estão <strong>grifados em amarelo com destaque</strong> na listagem abaixo.
                     </p>
                 </div>
             </div>
@@ -330,7 +330,7 @@ def gerar_relatorio_email_backups(dados_analise, ultima_atualizacao=None, data_e
                             <h1 style="margin: 0; font-size: 22px; font-weight: 700; color: #ffffff;">💽 Alerta de Backup em Atraso</h1>
                             <p style="margin: 6px 0 0 0; font-size: 13px; color: #cbd5e1;">InfoMonitor DB Clientes • Infobrasil Sistemas</p>
                         </td>
-                        <td align="right" style="font-size: 12px; color: #e2e8f0;">
+                        <td align="right" style="font-size: 12px; color: #e2e8f0; white-space: nowrap;">
                             <div><strong>Envio:</strong> {data_envio}</div>
                             {f'<div><strong>Atualização:</strong> {ultima_atualizacao}</div>' if ultima_atualizacao else ''}
                         </td>
@@ -352,11 +352,6 @@ def gerar_relatorio_email_backups(dados_analise, ultima_atualizacao=None, data_e
                             <div style="font-size: 24px; font-weight: 800; color: #1e293b; margin-top: 4px;">{total_clientes}</div>
                         </td>
                         <td width="3%"></td>
-                        <td width="24%" style="background-color: #f0fdf4; border-radius: 8px; padding: 14px 18px; border: 1px solid #bbf7d0;">
-                            <div style="font-size: 11px; font-weight: 700; color: #166534; text-transform: uppercase;">Backups em Dia (OK)</div>
-                            <div style="font-size: 24px; font-weight: 800; color: #16a34a; margin-top: 4px;">{total_ok}</div>
-                        </td>
-                        <td width="3%"></td>
                         <td width="24%" style="background-color: #fffbeb; border-radius: 8px; padding: 14px 18px; border: 1px solid #fde68a;">
                             <div style="font-size: 11px; font-weight: 700; color: #92400e; text-transform: uppercase;">Atrasados (Geral)</div>
                             <div style="font-size: 24px; font-weight: 800; color: #d97706; margin-top: 4px;">{total_atrasado}</div>
@@ -366,47 +361,50 @@ def gerar_relatorio_email_backups(dados_analise, ultima_atualizacao=None, data_e
                             <div style="font-size: 11px; font-weight: 700; color: #991b1b; text-transform: uppercase;">Críticos (≥ 3 dias)</div>
                             <div style="font-size: 24px; font-weight: 800; color: #dc2626; margin-top: 4px;">{total_critico}</div>
                         </td>
+                        <td width="3%"></td>
+                        <td width="24%" style="background-color: #f0fdf4; border-radius: 8px; padding: 14px 18px; border: 1px solid #bbf7d0;">
+                            <div style="font-size: 11px; font-weight: 700; color: #166534; text-transform: uppercase;">Backups em Dia (OK)</div>
+                            <div style="font-size: 24px; font-weight: 800; color: #16a34a; margin-top: 4px;">{total_ok}</div>
+                        </td>
                     </tr>
                 </table>
 
-                <!-- Seção 1: Backups em Dia (OK) -->
+                <!-- Seção 1: Backups em Atraso (com grifados) -->
                 <div style="margin-bottom: 26px;">
-                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; border-bottom: 2px solid #22c55e; padding-bottom: 6px;">
-                        <h3 style="margin: 0; font-size: 15px; color: #15803d; font-weight: 700;">✅ Clientes com Backup em Dia (OK) — {len(clientes_ok)}</h3>
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; border-bottom: 2px solid #ea580c; padding-bottom: 6px;">
+                        <h3 style="margin: 0; font-size: 15px; color: #c2410c; font-weight: 700;">⚠️ Clientes com Backup em Atraso — {len(clientes_atrasados)} (Mais atrasados grifados)</h3>
                     </div>
-                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse: collapse; font-size: 13px; text-align: left; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden;">
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse: collapse; font-size: 13px; text-align: left; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden; table-layout: auto;">
                         <thead>
                             <tr style="background-color: #f8fafc; border-bottom: 2px solid #cbd5e1; color: #475569; font-size: 12px; text-transform: uppercase;">
-                                <th style="padding: 10px 14px;">Cliente (Alias)</th>
-                                <th style="padding: 10px 14px;">Status</th>
-                                <th style="padding: 10px 14px;">Atraso</th>
-                                <th style="padding: 10px 14px;">Último Backup</th>
-                                <th style="padding: 10px 14px;">Idade</th>
+                                <th style="padding: 10px 14px; white-space: nowrap;">Cliente (Alias)</th>
+                                <th style="padding: 10px 14px; white-space: nowrap;">Situação</th>
+                                <th style="padding: 10px 14px; white-space: nowrap;">Dias de Atraso</th>
+                                <th style="padding: 10px 14px; white-space: nowrap;">Último Backup</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {''.join(linhas_html_ok) if linhas_html_ok else '<tr><td colspan="5" style="padding: 14px; text-align: center; color: #94a3b8;">Nenhum cliente em dia.</td></tr>'}
+                            {''.join(linhas_html_atrasados) if linhas_html_atrasados else '<tr><td colspan="4" style="padding: 14px; text-align: center; color: #94a3b8;">Nenhum cliente em atraso.</td></tr>'}
                         </tbody>
                     </table>
                 </div>
 
-                <!-- Seção 2: Backups em Atraso (com grifados) -->
+                <!-- Seção 2: Backups em Dia (OK) -->
                 <div style="margin-bottom: 16px;">
-                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; border-bottom: 2px solid #ea580c; padding-bottom: 6px;">
-                        <h3 style="margin: 0; font-size: 15px; color: #c2410c; font-weight: 700;">⚠️ Clientes com Backup em Atraso — {len(clientes_atrasados)} (Mais atrasados grifados)</h3>
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; border-bottom: 2px solid #22c55e; padding-bottom: 6px;">
+                        <h3 style="margin: 0; font-size: 15px; color: #15803d; font-weight: 700;">✅ Clientes com Backup em Dia (OK) — {len(clientes_ok)}</h3>
                     </div>
-                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse: collapse; font-size: 13px; text-align: left; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden;">
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse: collapse; font-size: 13px; text-align: left; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden; table-layout: auto;">
                         <thead>
                             <tr style="background-color: #f8fafc; border-bottom: 2px solid #cbd5e1; color: #475569; font-size: 12px; text-transform: uppercase;">
-                                <th style="padding: 10px 14px;">Cliente (Alias)</th>
-                                <th style="padding: 10px 14px;">Situação</th>
-                                <th style="padding: 10px 14px;">Dias de Atraso</th>
-                                <th style="padding: 10px 14px;">Último Backup</th>
-                                <th style="padding: 10px 14px;">Idade Informada</th>
+                                <th style="padding: 10px 14px; white-space: nowrap;">Cliente (Alias)</th>
+                                <th style="padding: 10px 14px; white-space: nowrap;">Situação</th>
+                                <th style="padding: 10px 14px; white-space: nowrap;">Dias de Atraso</th>
+                                <th style="padding: 10px 14px; white-space: nowrap;">Último Backup</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {''.join(linhas_html_atrasados) if linhas_html_atrasados else '<tr><td colspan="5" style="padding: 14px; text-align: center; color: #94a3b8;">Nenhum cliente em atraso.</td></tr>'}
+                            {''.join(linhas_html_ok) if linhas_html_ok else '<tr><td colspan="4" style="padding: 14px; text-align: center; color: #94a3b8;">Nenhum cliente em dia.</td></tr>'}
                         </tbody>
                     </table>
                 </div>
@@ -417,7 +415,7 @@ def gerar_relatorio_email_backups(dados_analise, ultima_atualizacao=None, data_e
         <tr>
             <td style="background-color: #f8fafc; border-top: 1px solid #e2e8f0; padding: 18px 30px; font-size: 12px; color: #64748b; text-align: center;">
                 Este relatório foi gerado automaticamente pelo <strong>InfoMonitor</strong> e enviado para <code>suporte@infobrasilsistemas.com.br</code>.<br>
-                Configuração: disparo diário às 14:00 quando houver clientes com 3 ou mais dias de atraso (máximo 1 e-mail por dia).
+                Configuração: disparo diário às 09:00 quando houver clientes com 3 ou mais dias de atraso (máximo 1 e-mail por dia).
             </td>
         </tr>
     </table>

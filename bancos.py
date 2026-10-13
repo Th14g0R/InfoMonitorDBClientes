@@ -737,7 +737,7 @@ def salvar_historico_diario(metricas_servidores=None):
     conn.commit()
     conn.close()
 
-# --- ROTINA DE ALERTA DIÁRIO DE BACKUPS FTP POR E-MAIL (14:00) ---
+# --- ROTINA DE ALERTA DIÁRIO DE BACKUPS FTP POR E-MAIL (09:00) ---
 def obter_marcador_alerta_hoje(conn, analise=None):
     """
     Retorna o marcador de status do envio do alerta diário de backups para a data de hoje.
@@ -770,7 +770,7 @@ def obter_marcador_alerta_hoje(conn, analise=None):
 
     total_critico = analise.get('total_critico', 0) if analise else 0
     if total_critico > 0:
-        horario_texto = "às 14:00" if hora_atual < 14 else "pendente de disparo (após 14h)"
+        horario_texto = "às 09:00" if hora_atual < 9 else "pendente de disparo (após 09h)"
         return {
             'enviado_hoje': False,
             'agendado': True,
@@ -778,7 +778,7 @@ def obter_marcador_alerta_hoje(conn, analise=None):
             'total_critico': total_critico,
             'clientes_criticos': ', '.join(c['alias'] for c in analise.get('clientes_criticos', [])),
             'badge_tipo': 'aviso',
-            'badge_rotulo': '🕒 Agendado às 14h',
+            'badge_rotulo': '🕒 Agendado às 09h',
             'texto_status': f"Envio agendado para {horario_texto} ({total_critico} cliente(s) com ≥ 3 dias de atraso).",
             'detalhes': f"Destinatário configurado: {EMAIL_DESTINATARIO_PADRAO}."
         }
@@ -792,7 +792,7 @@ def obter_marcador_alerta_hoje(conn, analise=None):
         'badge_tipo': 'info',
         'badge_rotulo': 'ℹ️ Sem pendências',
         'texto_status': "Nenhum alerta necessário hoje (nenhum cliente com 3 ou mais dias de atraso).",
-        'detalhes': "Disparo automático monitorado para às 14:00 caso ocorra atraso crítico."
+        'detalhes': "Disparo automático monitorado para às 09:00 caso ocorra atraso crítico."
     }
 
 
@@ -816,7 +816,7 @@ def executar_rotina_alerta_backups(forcar=False, usuario_solicitante=None):
     - Assunto: Alerta de backup em atraso
     - Condição: Envia e-mail quando houver algum cliente com 3 ou mais dias de atraso.
     - Limite: Apenas 1 e-mail por dia (exceto em disparo manual com forcar=True).
-    - Horário de agendamento: 14:00.
+    - Horário de agendamento: 09:00.
     """
     agora_dt = datetime.now(FUSO_LOCAL)
     hoje_str = agora_dt.strftime('%Y-%m-%d')
@@ -914,13 +914,13 @@ def executar_rotina_alerta_backups(forcar=False, usuario_solicitante=None):
         conn.close()
 
 
-# --- AGENDADORES FIXOS: 04:00 (HISTÓRICO) E 14:00 (ALERTA DE BACKUPS) ---
+# --- AGENDADORES FIXOS: 04:00 (HISTÓRICO) E 09:00 (ALERTA DE BACKUPS) ---
 scheduler = BackgroundScheduler(daemon=True)
 scheduler.add_job(salvar_historico_diario, 'cron', hour=4, minute=0)
 scheduler.add_job(
     executar_rotina_alerta_backups,
     'cron',
-    hour=14,
+    hour=9,
     minute=0,
     timezone='America/Fortaleza',
     id='alerta_backups_diario',
@@ -5243,7 +5243,7 @@ HTML_BACKUPS_FTP = """
     {% if status.erro %}
         <div class="alerta-erro">⚠️ {{ status.erro }}</div>
     {% else %}
-        <!-- Marcador de E-mail Diário (14:00) -->
+        <!-- Marcador de E-mail Diário (09:00) -->
         <div class="card-alerta-email">
             <div class="alerta-email-header">
                 <div class="alerta-email-info">
@@ -5251,7 +5251,7 @@ HTML_BACKUPS_FTP = """
                     <div>
                         <h3 style="margin:0; font-size: 1.05em; color: var(--cor-texto);">Alerta Diário de Backups em Atraso</h3>
                         <div style="font-size: 0.82em; color: var(--cor-texto-suave); margin-top: 3px;">
-                            Destinatário: <code>suporte@infobrasilsistemas.com.br</code> • Envio diário às 14:00 quando houver clientes com atraso ≥ 3 dias (máximo 1 por dia)
+                            Destinatário: <code>suporte@infobrasilsistemas.com.br</code> • Envio diário às 09:00 quando houver clientes com atraso ≥ 3 dias (máximo 1 por dia)
                         </div>
                     </div>
                 </div>

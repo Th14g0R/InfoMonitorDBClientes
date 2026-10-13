@@ -99,9 +99,9 @@ Total de clientes ERRO --> [ 3 ]
         self.assertEqual(analise['total_ok'], 2)
         self.assertEqual(analise['total_atrasado'], 3)
 
-        # Verifica ordenação de todos_ordenados: OKs primeiro (alfa, zebra), depois atrasados ordenados por dias desc (gama, delta, beta)
+        # Verifica ordenação de todos_ordenados: atrasados primeiro por dias desc (gama, delta, beta), depois OKs alfabéticos (alfa, zebra)
         aliases_ordenados = [c['alias'] for c in analise['todos_ordenados']]
-        self.assertEqual(aliases_ordenados, ['alfa-ok', 'zebra-ok', 'gama-4dias', 'delta-3dias', 'beta-1dia'])
+        self.assertEqual(aliases_ordenados, ['gama-4dias', 'delta-3dias', 'beta-1dia', 'alfa-ok', 'zebra-ok'])
 
         # Verifica que os mais atrasados (>= 3 dias) estão marcados como críticos
         criticos = [c['alias'] for c in analise['clientes_criticos']]
@@ -124,15 +124,38 @@ Total de clientes ERRO --> [ 3 ]
             {'alias': 'loja-critica', 'status': 'ATRASADO', 'idade': 'a mais de 1 dia', 'timestamp': '2026-10-09 10:00:00'},
         ]
         analise = analisar_status_para_alerta(clientes, data_referencia=ref)
-        corpo_html, corpo_texto = gerar_relatorio_email_backups(analise, ultima_atualizacao='2026-10-13 07:00:00', data_envio='13/10/2026 14:00')
+        corpo_html, corpo_texto = gerar_relatorio_email_backups(analise, ultima_atualizacao='2026-10-13 07:00:00', data_envio='13/10/2026 09:00')
 
         self.assertIn('Alerta de Backup em Atraso', corpo_html)
         self.assertIn('loja-ok', corpo_html)
         self.assertIn('loja-critica', corpo_html)
-        # O cliente crítico com 4 dias deve ter grifo/destaque em amarelo/vermelho
+        # O cliente crítico com 4 dias deve ter grifo/destaque em amarelo com badge crítico
         self.assertIn('CRÍTICO', corpo_html)
         self.assertIn('background-color: #fef3c7', corpo_html)
         self.assertIn('GRIFADO', corpo_texto)
+
+        # 1. Coluna IDADE INFORMADA removida
+        self.assertNotIn('Idade Informada', corpo_html)
+        self.assertNotIn('IDADE INFORMADA', corpo_html)
+
+        # 2. Mesmos títulos nas duas tabelas
+        self.assertEqual(corpo_html.count('>Cliente (Alias)<'), 2)
+        self.assertEqual(corpo_html.count('>Situação<'), 2)
+        self.assertEqual(corpo_html.count('>Dias de Atraso<'), 2)
+        self.assertEqual(corpo_html.count('>Último Backup<'), 2)
+
+        # 3. Clientes atrasados antes dos em dia no HTML e no texto
+        pos_atrasados_html = corpo_html.find('Clientes com Backup em Atraso')
+        pos_ok_html = corpo_html.find('Clientes com Backup em Dia')
+        self.assertTrue(pos_atrasados_html < pos_ok_html)
+
+        pos_atrasados_txt = corpo_texto.find('1. CLIENTES COM BACKUP EM ATRASO')
+        pos_ok_txt = corpo_texto.find('2. CLIENTES COM BACKUP EM DIA')
+        self.assertTrue(pos_atrasados_txt < pos_ok_txt)
+
+        # 4. Sem ícone de alerta no alias dentro de mark para evitar quebra de linha
+        self.assertNotIn('⚠️ loja-critica', corpo_html)
+        self.assertIn('>loja-critica</mark>', corpo_html)
 
     def test_enviar_email_alerta_backups_chama_smtp_com_destinatario_correto(self):
         with patch('backups.smtplib.SMTP') as mock_smtp:

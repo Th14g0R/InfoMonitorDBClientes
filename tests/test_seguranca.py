@@ -732,13 +732,13 @@ class SegurancaTest(unittest.TestCase):
             response = self.client.get('/backups-ftp?filtro=sem_arquivo')
             self.assertNotIn(b'loja-teste', response.data)
 
-    def test_job_alerta_backups_agendado_as_14h(self):
+    def test_job_alerta_backups_agendado_as_09h(self):
         job = self.bancos.scheduler.get_job('alerta_backups_diario')
         self.assertIsNotNone(job)
         self.assertEqual(str(job.trigger.timezone), 'America/Fortaleza')
-        # Verifica campos de hora=14 e minuto=0
+        # Verifica campos de hora=9 e minuto=0
         campos = {f.name: str(f) for f in job.trigger.fields}
-        self.assertEqual(campos.get('hour'), '14')
+        self.assertEqual(campos.get('hour'), '9')
         self.assertEqual(campos.get('minute'), '0')
 
     def test_backups_ftp_pagina_renderiza_marcador_e_historico(self):
