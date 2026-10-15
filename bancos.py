@@ -366,14 +366,31 @@ def carregar_lojas_clientes():
     except Exception:
         return {}
 
+def loja_incompleta(loja):
+    """Retorna True se faltar CodInfo, Situação ou LojCód."""
+    cod = (loja.get('cod_info') or '').strip()
+    sit = (loja.get('cli_situacao') or '').strip()
+    loj = (loja.get('loj_codigo') or '').strip()
+    return not cod or not sit or not loj
+
+
 def aplicar_lojas_clientes(lista_bancos, cache_lojas=None):
-    """Anexa a lista de lojas (CodInfo/LojCód./Fantasia/Razão/CNPJ/Situação) a cada banco da lista."""
+    """Anexa a lista de lojas (CodInfo/LojCód./Fantasia/Razão/CNPJ/Situação) a cada banco da lista e sinaliza pendências."""
     if not lista_bancos:
         return lista_bancos
     lojas_por_alias = cache_lojas if cache_lojas is not None else carregar_lojas_clientes()
 
     for banco in lista_bancos:
-        banco['lojas'] = lojas_por_alias.get(banco.get('alias'), [])
+        lojas = lojas_por_alias.get(banco.get('alias'), [])
+        incompletas = 0
+        for l in lojas:
+            is_inc = loja_incompleta(l)
+            l['incompleta'] = is_inc
+            if is_inc:
+                incompletas += 1
+        banco['lojas'] = lojas
+        banco['tem_lojas_incompletas'] = (incompletas > 0)
+        banco['total_lojas_incompletas'] = incompletas
     return lista_bancos
 
 # --- RECURSO 3: DISPARO DE EMAIL SOLICITANDO CNAME ---
@@ -1709,6 +1726,11 @@ HTML_LAYOUT = """
         .sem-lojas { color: var(--cor-texto-suave); font-style: italic; margin: 8px 0; }
         .acoes-loja { white-space: nowrap; }
         .linha-loja input.form-control-sm { font-size: 0.85em; padding: 2px 5px; width: 100%; min-width: 90px; }
+        .linha-loja.loja-incompleta-destaque { background-color: rgba(220, 38, 38, 0.05) !important; }
+        .valor-pendente { color: var(--cor-perigo, #dc2626) !important; font-weight: 700; }
+        .tag-pendente { display: inline-block; padding: 1px 7px; background: #fee2e2; color: #b91c1c; border-radius: 4px; font-weight: 700; font-size: 0.9em; }
+        [data-theme="dark"] .linha-loja.loja-incompleta-destaque { background-color: rgba(220, 38, 38, 0.15) !important; }
+        [data-theme="dark"] .tag-pendente { background: #450a0a; color: #fca5a5; }
 
         /* Separador visual entre grupos de botões do menu (unifica visualmente sem precisar de fundo colorido) */
         .separador-menu { width: 1px; align-self: stretch; background: var(--cor-borda); margin: 2px 4px; }
@@ -1761,7 +1783,8 @@ HTML_LAYOUT = """
                     <a href="/backups-ftp">Backups FTP</a>
                     <a href="/certificados">Certificados</a>
                     <a href="/cnpj">Consulta CNPJ</a>
-                    <a href="/todos?filtro=sem_lojas">Clientes sem lojas cadastradas</a>
+                    <a href="/todos?filtro=sem_lojas" {% if filtro_status == 'sem_lojas' %}aria-current="page"{% endif %}>Clientes sem lojas cadastradas</a>
+                    <a href="/todos?filtro=lojas_incompletas" {% if filtro_status == 'lojas_incompletas' %}aria-current="page"{% endif %}>Clientes com lojas incompletas</a>
                 </div>
             </details>
             {% if session.get('logged_in') %}
@@ -1817,6 +1840,10 @@ HTML_LAYOUT = """
                 <h3>📈 Histórico Diário de Consumo de Disco (Gravado Diariamente às 04:00 AM)</h3>
             {% elif modo_orfaos %}
                 <h3>⚠️ Arquivos no diretório <span class="text-danger">../infobrasil/*</span> Não Listados no databases.conf</h3>
+            {% elif filtro_status == 'sem_lojas' %}
+                <h3>Databases em: <span class="text-primary">{{ 'TODOS OS SERVIDORES' if modo_todos else servidor_atual }}</span> <span class="badge bg-warning text-dark" style="font-size:0.65em; vertical-align: middle;">📭 Sem lojas cadastradas</span> <a href="{% if modo_todos %}/todos{% else %}/servidor/{{ servidor_atual }}{% endif %}{% if busca_termo %}?busca={{ busca_termo }}{% endif %}" class="btn-clear" style="display:inline-flex; font-size:0.5em; vertical-align: middle; margin-left: 8px;">✖ Limpar Filtro</a></h3>
+            {% elif filtro_status == 'lojas_incompletas' %}
+                <h3>Databases em: <span class="text-primary">{{ 'TODOS OS SERVIDORES' if modo_todos else servidor_atual }}</span> <span class="badge bg-danger text-white" style="font-size:0.65em; vertical-align: middle;">⚠️ Lojas com dados incompletos</span> <a href="{% if modo_todos %}/todos{% else %}/servidor/{{ servidor_atual }}{% endif %}{% if busca_termo %}?busca={{ busca_termo }}{% endif %}" class="btn-clear" style="display:inline-flex; font-size:0.5em; vertical-align: middle; margin-left: 8px;">✖ Limpar Filtro</a></h3>
             {% elif busca_termo %}
                 <h3>🔍 Busca por: <span class="text-success">"{{ busca_termo }}"</span> em todos os servidores</h3>
             {% elif modo_inativos %}
@@ -2097,11 +2124,13 @@ HTML_LAYOUT = """
                                 {% endif %}
                                 <td>
                                     {% if banco.eh_inativo %}<span class="badge-inativo-tag">INATIVO</span>{% endif %}
-                                    <button type="button" class="alias-clicavel" onclick="toggleDetalhes(this)" aria-expanded="false" title="Clique para ver os detalhes do cliente">
-                                        {{ banco.alias }} <span class="seta-detalhes">▸</span>
+                                    <button type="button" class="alias-clicavel" onclick="toggleDetalhes(this)" aria-expanded="{% if filtro_status == 'lojas_incompletas' %}true{% else %}false{% endif %}" title="Clique para ver os detalhes do cliente">
+                                        {{ banco.alias }} <span class="seta-detalhes">{% if filtro_status == 'lojas_incompletas' %}▾{% else %}▸{% endif %}</span>
                                     </button>
                                     {% if not banco.lojas and not banco.eh_inativo %}
                                         <span class="badge bg-warning text-dark" style="font-size:0.7em;" title="Nenhuma loja cadastrada para este alias">📭 sem loja</span>
+                                    {% elif banco.tem_lojas_incompletas and not banco.eh_inativo %}
+                                        <span class="badge bg-danger text-white" style="font-size:0.7em;" title="{{ banco.total_lojas_incompletas }} loja(s) com dados incompletos (CodInfo ou Situação pendente)">⚠️ {{ banco.total_lojas_incompletas }} incompleta(s)</span>
                                     {% endif %}
                                 </td>
                                 <td>
@@ -2143,7 +2172,7 @@ HTML_LAYOUT = """
                                     {% endif %}
                                 </td>
                             </tr>
-                            <tr class="linha-detalhes d-none">
+                            <tr class="linha-detalhes {% if filtro_status != 'lojas_incompletas' %}d-none{% endif %}">
                                 <td colspan="{{ 7 if (busca_termo or modo_todos or modo_inativos) else 6 }}">
                                     <div class="painel-lojas" data-alias="{{ banco.alias }}">
                                         {% if banco.lojas %}
@@ -2156,13 +2185,17 @@ HTML_LAYOUT = """
                                             </thead>
                                             <tbody>
                                                 {% for loja in banco.lojas %}
-                                                <tr class="linha-loja" data-id="{{ loja.id }}">
-                                                    <td class="valor-loja" data-campo="cod_info">{{ loja.cod_info or '-' }}</td>
-                                                    <td class="valor-loja" data-campo="loj_codigo">{{ loja.loj_codigo or '-' }}</td>
+                                                <tr class="linha-loja {% if loja.incompleta %}loja-incompleta-destaque{% endif %}" data-id="{{ loja.id }}">
+                                                    <td class="valor-loja {% if not loja.cod_info %}valor-pendente{% endif %}" data-campo="cod_info">
+                                                        {% if loja.cod_info %}{{ loja.cod_info }}{% else %}<span class="tag-pendente" title="CodInfo pendente">-</span>{% endif %}
+                                                    </td>
+                                                    <td class="valor-loja {% if not loja.loj_codigo %}valor-pendente{% endif %}" data-campo="loj_codigo">{{ loja.loj_codigo or '-' }}</td>
                                                     <td class="valor-loja" data-campo="loj_fantasia">{{ loja.loj_fantasia or '-' }}</td>
                                                     <td class="valor-loja" data-campo="loj_nome">{{ loja.loj_nome or '-' }}</td>
                                                     <td class="valor-loja" data-campo="loj_cnpj">{{ loja.loj_cnpj or '-' }}</td>
-                                                    <td class="valor-loja" data-campo="cli_situacao">{{ loja.cli_situacao or '-' }}</td>
+                                                    <td class="valor-loja {% if not loja.cli_situacao %}valor-pendente{% endif %}" data-campo="cli_situacao">
+                                                        {% if loja.cli_situacao %}{{ loja.cli_situacao }}{% else %}<span class="tag-pendente" title="Situação pendente">-</span>{% endif %}
+                                                    </td>
                                                     {% if tem_permissao('perm_servidores') %}
                                                     <td class="acoes-loja">
                                                         <button class="btn-icon btn-icon-warning" onclick="editarLoja(this)" aria-label="Editar loja"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></button>
@@ -5811,6 +5844,17 @@ def exibir_servidor(nome_servidor='DB01'):
     bancos = aplicar_cnames_customizados(bancos)
     bancos = aplicar_lojas_clientes(bancos)
 
+    if filtro_status == 'sem_lojas':
+        bancos = [b for b in bancos if not b.get('lojas')]
+        total_calculado = formatar_tamanho(sum(b['tamanho_bytes'] for b in bancos))
+        total_tamanho = ('Indisponível' if any(b.get('erro') for b in bancos_brutos)
+                         else total_calculado)
+    elif filtro_status == 'lojas_incompletas':
+        bancos = [b for b in bancos if b.get('tem_lojas_incompletas')]
+        total_calculado = formatar_tamanho(sum(b['tamanho_bytes'] for b in bancos))
+        total_tamanho = ('Indisponível' if any(b.get('erro') for b in bancos_brutos)
+                         else total_calculado)
+
     return render_template_string(
         HTML_LAYOUT, servidores=SERVIDORES, servidor_atual=nome_servidor, bancos=bancos,
         total_tamanho=total_tamanho, total_atencao=total_atencao, total_critico=total_critico,
@@ -5855,9 +5899,14 @@ def exibir_todos():
     bancos = aplicar_cnames_customizados(bancos)
     bancos = aplicar_lojas_clientes(bancos)
 
-    # FIX: filtro "sem_lojas" precisa ser aplicado depois de anexar as lojas, já que depende desse dado
+    # FIX: filtros baseados em lojas precisam ser aplicados depois de anexar as lojas
     if filtro_status == 'sem_lojas':
         bancos = [b for b in bancos if not b.get('lojas')]
+        total_calculado = formatar_tamanho(sum(b['tamanho_bytes'] for b in bancos))
+        total_tamanho = (f'Parcial: {total_calculado}' if any(b.get('erro') for b in bancos_brutos)
+                         else total_calculado)
+    elif filtro_status == 'lojas_incompletas':
+        bancos = [b for b in bancos if b.get('tem_lojas_incompletas')]
         total_calculado = formatar_tamanho(sum(b['tamanho_bytes'] for b in bancos))
         total_tamanho = (f'Parcial: {total_calculado}' if any(b.get('erro') for b in bancos_brutos)
                          else total_calculado)

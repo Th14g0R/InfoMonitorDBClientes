@@ -6,7 +6,7 @@ import shlex
 import sqlite3
 import threading
 from contextlib import closing, ExitStack
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import os
 from pathlib import Path
 import tempfile
@@ -757,23 +757,27 @@ O cliente loja-critica esta a mais de 1 dia sem bkp - status ERRO 2026-10-09 10:
             self.assertIn(b'Hist\xc3\xb3rico de Alertas de Backup Enviados', response.data)
 
     def test_executar_rotina_alerta_backups_limite_diario_e_criterio(self):
+        agora = datetime.now(self.bancos.FUSO_LOCAL)
+        hoje_teste = agora.strftime('%Y-%m-%d')
+        ontem_str = (agora - timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S')
+        quatro_dias_str = (agora - timedelta(days=4)).strftime('%Y-%m-%d %H:%M:%S')
+
         status_sem_criticos = {
             'clientes': [
-                {'alias': 'ok1', 'status': 'OK', 'idade': 'menos de 1 dia', 'timestamp': '2026-10-12 20:00:00'},
-                {'alias': 'atrasado1', 'status': 'ATRASADO', 'idade': 'a mais de 1 dia', 'timestamp': '2026-10-12 10:00:00'},
+                {'alias': 'ok1', 'status': 'OK', 'idade': 'menos de 1 dia', 'timestamp': ontem_str},
+                {'alias': 'atrasado1', 'status': 'ATRASADO', 'idade': 'a mais de 1 dia', 'timestamp': ontem_str},
             ],
-            'total_ok': 1, 'total_atrasado': 1, 'total_erro': 0, 'ultima_atualizacao': '2026-10-13 08:00:00'
+            'total_ok': 1, 'total_atrasado': 1, 'total_erro': 0, 'ultima_atualizacao': agora.strftime('%Y-%m-%d %H:%M:%S')
         }
         status_com_criticos = {
             'clientes': [
-                {'alias': 'ok1', 'status': 'OK', 'idade': 'menos de 1 dia', 'timestamp': '2026-10-12 20:00:00'},
-                {'alias': 'critico1', 'status': 'ATRASADO', 'idade': 'a mais de 1 dia', 'timestamp': '2026-10-09 10:00:00'},
+                {'alias': 'ok1', 'status': 'OK', 'idade': 'menos de 1 dia', 'timestamp': ontem_str},
+                {'alias': 'critico1', 'status': 'ATRASADO', 'idade': 'a mais de 1 dia', 'timestamp': quatro_dias_str},
             ],
-            'total_ok': 1, 'total_atrasado': 1, 'total_erro': 0, 'ultima_atualizacao': '2026-10-13 08:00:00'
+            'total_ok': 1, 'total_atrasado': 1, 'total_erro': 0, 'ultima_atualizacao': agora.strftime('%Y-%m-%d %H:%M:%S')
         }
 
         # Limpa envios anteriores do dia de teste no banco
-        hoje_teste = '2026-10-13'
         with closing(self.bancos.get_db_connection()) as conn, conn:
             conn.execute("DELETE FROM backups_alertas_emails WHERE data_referencia = ?", (hoje_teste,))
 
@@ -830,6 +834,38 @@ O cliente loja-critica esta a mais de 1 dia sem bkp - status ERRO 2026-10-09 10:
             self.assertEqual(resp_logado.status_code, 302)
             self.assertIn('/backups-ftp', resp_logado.headers['Location'])
             self.assertIn('msg_sucesso=Enviado', resp_logado.headers['Location'])
+
+    def test_lojas_incompletas_helper_e_filtro(self):
+        # 1. Helper
+        self.assertTrue(self.bancos.loja_incompleta({'cod_info': '', 'cli_situacao': 'A', 'loj_codigo': '1'}))
+        self.assertTrue(self.bancos.loja_incompleta({'cod_info': '123', 'cli_situacao': '', 'loj_codigo': '1'}))
+        self.assertTrue(self.bancos.loja_incompleta({'cod_info': '123', 'cli_situacao': 'A', 'loj_codigo': ''}))
+        self.assertFalse(self.bancos.loja_incompleta({'cod_info': '123', 'cli_situacao': 'A', 'loj_codigo': '1'}))
+
+        # 2. Rota /todos?filtro=lojas_incompletas
+        with patch.object(self.bancos, 'buscar_em_todos_servidores', return_value=([
+            {'alias': 'cli_completo', 'arquivo_existe': True, 'tamanho_bytes': 1000, 'timestamp': 100, 'cname_string': '', 'status_inatividade': {'status': 'ok'}},
+            {'alias': 'cli_incompleto', 'arquivo_existe': True, 'tamanho_bytes': 2000, 'timestamp': 200, 'cname_string': '', 'status_inatividade': {'status': 'ok'}},
+            {'alias': 'cli_sem_loja', 'arquivo_existe': True, 'tamanho_bytes': 3000, 'timestamp': 300, 'cname_string': '', 'status_inatividade': {'status': 'ok'}},
+        ], 6000, [])):
+            with patch.object(self.bancos, 'carregar_lojas_clientes', return_value={
+                'cli_completo': [{'id': 1, 'cod_info': '10', 'cli_situacao': 'A', 'loj_codigo': '1', 'loj_fantasia': 'F1', 'loj_nome': 'N1', 'loj_cnpj': '000'}],
+                'cli_incompleto': [
+                    {'id': 2, 'cod_info': '11', 'cli_situacao': 'A', 'loj_codigo': '1', 'loj_fantasia': 'F2', 'loj_nome': 'N2', 'loj_cnpj': '111'},
+                    {'id': 3, 'cod_info': '', 'cli_situacao': '', 'loj_codigo': '2', 'loj_fantasia': 'F3', 'loj_nome': 'N3', 'loj_cnpj': '222'}
+                ],
+                'cli_sem_loja': []
+            }):
+                resp = self.client.get('/todos?filtro=lojas_incompletas')
+                self.assertEqual(resp.status_code, 200)
+                html = resp.data.decode('utf-8')
+                self.assertIn('data-alias="cli_incompleto"', html)
+                self.assertNotIn('data-alias="cli_completo"', html)
+                self.assertNotIn('data-alias="cli_sem_loja"', html)
+                self.assertIn('Lojas com dados incompletos', html)
+                self.assertIn('1 incompleta(s)', html)
+                self.assertIn('tag-pendente', html)
+
 
 
     def test_paths(self):
