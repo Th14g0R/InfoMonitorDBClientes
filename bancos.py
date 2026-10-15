@@ -1775,8 +1775,10 @@ HTML_LAYOUT = """
                     {% endif %}
                     {% if tem_permissao('perm_servidores') %}
                         <a href="/admin/importar-lojas">Importar lojas</a>
+                        <a href="/admin/atualizar-lojas-info">Atualizar CodInfo / Situação</a>
                     {% else %}
                         <button type="button" onclick="return avisarSemPermissao('Importação de Lojas')">Importar lojas</button>
+                        <button type="button" onclick="return avisarSemPermissao('Atualização de Lojas')">Atualizar CodInfo / Situação</button>
                     {% endif %}
                     <a href="http://{{ request.host.split(':')[0] }}:8501" target="_blank" rel="noopener noreferrer">🎧 Transcritor Call Center</a>
                 </div>
@@ -4791,6 +4793,10 @@ HTML_IMPORTAR_LOJAS = r"""
             <a href="/admin/importar-lojas/modelo" class="btn btn-outline-secondary">⬇ Baixar Modelo</a>
             <a href="/" class="btn btn-link text-muted">⬅ Voltar ao Painel</a>
         </form>
+        <div class="mt-4 pt-3 border-top d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <span class="text-muted small">Já cadastrou as lojas e só quer preencher <strong>CodInfo</strong> e <strong>Situação</strong>?</span>
+            <a href="/admin/atualizar-lojas-info" class="btn btn-sm btn-outline-primary fw-bold">🔄 Atualizar CodInfo / Situação (.xlsx)</a>
+        </div>
     </div>
 
     <script>
@@ -4872,6 +4878,18 @@ def importar_lojas():
             erro=f"Coluna obrigatória não encontrada na planilha ({e}). Colunas esperadas: {colunas_str}"
         )
 
+    idx_cod_info = None
+    for cand in ('CodInfo', 'CODINFO', 'COD_INFO', 'cod_info'):
+        if cand in cabecalho:
+            idx_cod_info = cabecalho.index(cand)
+            break
+
+    idx_cli_situacao = None
+    for cand in ('Situação', 'Situacao', 'SITUACAO', 'cli_situacao', 'Status'):
+        if cand in cabecalho:
+            idx_cli_situacao = cabecalho.index(cand)
+            break
+
     conn = get_db_connection()
 
     # Limpa a lista de duplicatas pendentes da importação anterior (cada importação gera sua própria lista para revisão)
@@ -4907,6 +4925,11 @@ def importar_lojas():
         loj_nome = str(linha[idx_loj_nome]).strip() if idx_loj_nome < len(linha) and linha[idx_loj_nome] else ''
         loj_cnpj = str(linha[idx_loj_cnpj]).strip() if idx_loj_cnpj < len(linha) and linha[idx_loj_cnpj] else ''
 
+        cod_info = str(linha[idx_cod_info]).strip() if idx_cod_info is not None and idx_cod_info < len(linha) and linha[idx_cod_info] is not None else ''
+        if cod_info.endswith('.0') and cod_info[:-2].isdigit():
+            cod_info = cod_info[:-2]
+        cli_situacao = str(linha[idx_cli_situacao]).strip() if idx_cli_situacao is not None and idx_cli_situacao < len(linha) and linha[idx_cli_situacao] is not None else ''
+
         aliases_processados.add(alias)
 
         # Evita duplicar: CNPJ já cadastrado para este alias -> ignora (mas registra para revisão).
@@ -4926,8 +4949,8 @@ def importar_lojas():
             continue
 
         conn.execute(
-            "INSERT INTO clientes_lojas (alias, loj_codigo, loj_fantasia, loj_nome, loj_cnpj) VALUES (?, ?, ?, ?, ?)",
-            (alias, loj_codigo, loj_fantasia, loj_nome, loj_cnpj)
+            "INSERT INTO clientes_lojas (alias, loj_codigo, loj_fantasia, loj_nome, loj_cnpj, cod_info, cli_situacao) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (alias, loj_codigo, loj_fantasia, loj_nome, loj_cnpj, cod_info, cli_situacao)
         )
         if loj_cnpj:
             cnpjs_existentes.setdefault(alias, set()).add(loj_cnpj)
@@ -5032,6 +5055,295 @@ def modelo_importar_lojas():
     buffer.seek(0)
     return send_file(
         buffer, as_attachment=True, download_name='modelo_importacao_lojas.xlsx',
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+
+
+# --- ATUALIZAÇÃO EM LOTE DE CODINFO E SITUAÇÃO VIA PLANILHA .XLSX ---
+HTML_ATUALIZAR_LOJAS_INFO = r"""
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8"><title>Atualizar CodInfo e Situação</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        :root {
+            --cor-primaria: #2563eb; --cor-primaria-escura: #1d4ed8;
+            --cor-texto: #1e293b; --cor-texto-suave: #64748b;
+            --cor-fundo: #f8fafc; --cor-superficie: #ffffff; --cor-borda: #e2e8f0;
+            --cor-sucesso: #16a34a; --cor-aviso: #d97706; --cor-perigo: #dc2626; --raio: 8px;
+        }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--cor-fundo); padding: 30px; }
+        .card-atualizar { background: var(--cor-superficie); border: 1px solid var(--cor-borda); padding: 30px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.06); max-width: 900px; margin: 0 auto; }
+        table.tabela-resumo { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 0.9em; }
+        table.tabela-resumo th, table.tabela-resumo td { border: 1px solid var(--cor-borda); padding: 6px 10px; text-align: left; }
+        table.tabela-resumo th { background: #f8fafc; }
+        .btn-success { background-color: var(--cor-primaria) !important; border-color: var(--cor-primaria) !important; color: #fff !important; }
+        .btn-success:hover { background-color: var(--cor-primaria-escura) !important; border-color: var(--cor-primaria-escura) !important; }
+        .btn-outline-secondary { color: var(--cor-texto-suave) !important; border-color: var(--cor-borda) !important; }
+        .badge-alias { background: #e0f2fe; color: #0369a1; font-weight: 600; padding: 2px 6px; border-radius: 4px; }
+    </style>
+<meta name="csrf-token" content="{{ csrf_token() }}">
+<script src="{{ url_for('static', filename='csrf.js') }}"></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
+<script src="{{ url_for('static', filename='ui.js') }}" defer></script>
+</head>
+<body>
+    <div class="card-atualizar">
+        <h3 class="mb-1">🔄 Atualizar CodInfo e Situação (.xlsx)</h3>
+        <p class="text-muted small">
+            Envie uma planilha com as colunas <code>CODINFO</code>, <code>CNPJ</code> e <code>Situação</code>.
+            O sistema localizará as lojas já cadastradas através do CNPJ/CPF (com ou sem pontuação) e preencherá automaticamente as colunas <strong>CodInfo</strong> e <strong>Situação</strong> correspondentes.
+        </p>
+
+        {% if erro %}<div class="alert alert-danger">{{ erro }}</div>{% endif %}
+
+        {% if resultado %}
+            <div class="alert alert-success">
+                <h5 class="alert-heading mb-2">✅ Atualização concluída com sucesso!</h5>
+                <div><strong>{{ resultado.atualizadas }}</strong> loja(s) atualizada(s) no sistema em <strong>{{ resultado.aliases_afetados }}</strong> alias(es) distintos.</div>
+                <div class="text-muted small mt-1">Linhas processadas da planilha: {{ resultado.linhas_processadas }} | CNPJs da planilha não encontrados no site: {{ resultado.nao_encontrados|length }}</div>
+            </div>
+
+            {% if resultado.amostra %}
+                <div class="mt-3">
+                    <p class="fw-bold mb-1">📋 Amostra de Lojas Atualizadas (primeiras {{ resultado.amostra|length }}):</p>
+                    <div style="max-height: 250px; overflow-y: auto;">
+                        <table class="tabela-resumo">
+                            <thead>
+                                <tr><th>Alias</th><th>LojCód.</th><th>Fantasia</th><th>CNPJ</th><th>CodInfo</th><th>Situação</th></tr>
+                            </thead>
+                            <tbody>
+                                {% for a in resultado.amostra %}
+                                <tr>
+                                    <td><span class="badge-alias">{{ a.alias }}</span></td>
+                                    <td>{{ a.loj_codigo }}</td>
+                                    <td>{{ a.loj_fantasia }}</td>
+                                    <td>{{ a.loj_cnpj }}</td>
+                                    <td><strong>{{ a.cod_info }}</strong></td>
+                                    <td><strong>{{ a.cli_situacao }}</strong></td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            {% endif %}
+
+            {% if resultado.nao_encontrados %}
+                <details class="mt-3 p-3 bg-light border rounded">
+                    <summary class="fw-bold text-secondary" style="cursor: pointer;">
+                        ⚠️ Ver {{ resultado.nao_encontrados|length }} CNPJ(s) da planilha que não foram encontrados nas lojas do site
+                    </summary>
+                    <div style="max-height: 250px; overflow-y: auto; margin-top: 10px;">
+                        <table class="tabela-resumo">
+                            <thead>
+                                <tr><th>Linha Planilha</th><th>CNPJ na Planilha</th><th>CodInfo</th><th>Situação</th></tr>
+                            </thead>
+                            <tbody>
+                                {% for ne in resultado.nao_encontrados %}
+                                <tr>
+                                    <td>{{ ne.linha }}</td>
+                                    <td><code>{{ ne.cnpj }}</code></td>
+                                    <td>{{ ne.cod_info }}</td>
+                                    <td>{{ ne.situacao }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </details>
+            {% endif %}
+        {% endif %}
+
+        <form method="POST" enctype="multipart/form-data" class="mt-3">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="mb-3">
+                <label class="form-label fw-bold">Arquivo .xlsx com CodInfo, CNPJ e Situação:</label>
+                <input type="file" name="arquivo" accept=".xlsx" class="form-control" required>
+            </div>
+            <div class="d-flex gap-2 align-items-center flex-wrap">
+                <button type="submit" class="btn btn-success fw-bold">Atualizar Lojas</button>
+                <a href="/admin/atualizar-lojas-info/modelo" class="btn btn-outline-secondary">⬇ Baixar Planilha Modelo</a>
+                <a href="/" class="btn btn-link text-muted">⬅ Voltar ao Painel</a>
+            </div>
+        </form>
+
+        <div class="mt-4 pt-3 border-top d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <span class="text-muted small">Precisa cadastrar novas lojas inteiras?</span>
+            <a href="/admin/importar-lojas" class="btn btn-sm btn-outline-primary fw-bold">📥 Importar Novas Lojas (.xlsx)</a>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+@bancos_bp.route('/admin/atualizar-lojas-info', methods=['GET', 'POST'])
+def atualizar_lojas_info():
+    if not session.get('logged_in'):
+        return redirect('/admin/login')
+    if not tem_permissao('perm_servidores'):
+        return "Você não tem permissão para atualizar dados de lojas. Fale com o administrador Master. <a href='/'>Voltar</a>", 403
+
+    if request.method == 'GET':
+        return render_template_string(HTML_ATUALIZAR_LOJAS_INFO)
+
+    arquivo = request.files.get('arquivo')
+    if not arquivo or not arquivo.filename.lower().endswith('.xlsx'):
+        return render_template_string(HTML_ATUALIZAR_LOJAS_INFO, erro="Envie um arquivo .xlsx válido.")
+
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(arquivo, read_only=True, data_only=True)
+    except Exception as e:
+        return render_template_string(HTML_ATUALIZAR_LOJAS_INFO, erro=f"Não foi possível ler o arquivo: {e}")
+
+    aba = wb.active
+    linhas = list(aba.iter_rows(values_only=True))
+    if not linhas:
+        return render_template_string(HTML_ATUALIZAR_LOJAS_INFO, erro="A planilha está vazia.")
+
+    # Detecção flexível e inteligente de cabeçalhos
+    cabecalho = [str(c).strip().lstrip('\ufeff') if c is not None else '' for c in linhas[0]]
+    idx_cod, idx_cnpj, idx_sit = None, None, None
+    for i, col in enumerate(cabecalho):
+        raw = str(col).strip()
+        norm = unicodedata.normalize('NFKD', raw).encode('ascii', 'ignore').decode('utf-8').upper()
+        norm_clean = re.sub(r'[^A-Z0-9]', '', norm)
+        if idx_cod is None and ('CODINFO' in norm_clean or norm_clean in ('COD', 'CODIGO', 'CODCLIENTE', 'COD_INFO', 'COD_CLIENTE')):
+            idx_cod = i
+        elif idx_cnpj is None and ('CNPJ' in norm_clean or 'CPF' in norm_clean or 'DOCUMENTO' in norm_clean):
+            idx_cnpj = i
+        elif idx_sit is None and ('SITUAC' in norm_clean or 'STATUS' in norm_clean or 'SIT' in norm_clean or 'SITUA' in raw.upper()):
+            idx_sit = i
+
+    if idx_cnpj is None or (idx_cod is None and idx_sit is None):
+        return render_template_string(
+            HTML_ATUALIZAR_LOJAS_INFO,
+            erro="Não foi possível identificar as colunas necessárias na planilha. "
+                 "Certifique-se de que a planilha contenha ao menos as colunas 'CNPJ' e 'CodInfo' (ou 'Situação')."
+        )
+
+    conn = get_db_connection()
+    todas_lojas = [dict(l) for l in conn.execute("SELECT id, alias, loj_codigo, loj_fantasia, loj_nome, loj_cnpj, cod_info, cli_situacao FROM clientes_lojas")]
+
+    # Mapeia lojas existentes por CNPJ normalizado (somente dígitos)
+    lojas_por_cnpj = {}
+    for l in todas_lojas:
+        raw_cnpj = l.get('loj_cnpj') or ''
+        digs = re.sub(r'\D', '', str(raw_cnpj))
+        if digs:
+            lojas_por_cnpj.setdefault(digs, []).append(l)
+            if len(digs) == 13:
+                lojas_por_cnpj.setdefault(digs.zfill(14), []).append(l)
+            elif len(digs) == 10:
+                lojas_por_cnpj.setdefault(digs.zfill(11), []).append(l)
+
+    aliases_afetados = set()
+    amostra = []
+    nao_encontrados = []
+    linhas_processadas = 0
+    updates = []
+    ids_atualizados = set()
+
+    for num_linha, linha in enumerate(linhas[1:], start=2):
+        if linha is None or all(c is None for c in linha):
+            continue
+
+        raw_cnpj = str(linha[idx_cnpj]).strip() if idx_cnpj < len(linha) and linha[idx_cnpj] is not None else ''
+        cnpj_digs = re.sub(r'\D', '', raw_cnpj)
+        if not cnpj_digs:
+            continue
+
+        linhas_processadas += 1
+
+        cod_val = str(linha[idx_cod]).strip() if idx_cod is not None and idx_cod < len(linha) and linha[idx_cod] is not None else ''
+        if cod_val.endswith('.0') and cod_val[:-2].isdigit():
+            cod_val = cod_val[:-2]
+
+        sit_val = str(linha[idx_sit]).strip() if idx_sit is not None and idx_sit < len(linha) and linha[idx_sit] is not None else ''
+
+        lojas_alvo = lojas_por_cnpj.get(cnpj_digs)
+        if not lojas_alvo:
+            if len(cnpj_digs) == 13:
+                lojas_alvo = lojas_por_cnpj.get(cnpj_digs.zfill(14))
+            elif len(cnpj_digs) == 10:
+                lojas_alvo = lojas_por_cnpj.get(cnpj_digs.zfill(11))
+
+        if not lojas_alvo:
+            nao_encontrados.append({
+                "linha": num_linha,
+                "cnpj": raw_cnpj,
+                "cod_info": cod_val,
+                "situacao": sit_val
+            })
+            continue
+
+        for loja in lojas_alvo:
+            novo_cod = cod_val if cod_val != '' else (loja['cod_info'] or '')
+            nova_sit = sit_val if sit_val != '' else (loja['cli_situacao'] or '')
+
+            updates.append((novo_cod, nova_sit, loja['id']))
+            aliases_afetados.add(loja['alias'])
+
+            if loja['id'] not in ids_atualizados:
+                ids_atualizados.add(loja['id'])
+                if len(amostra) < 25:
+                    amostra.append({
+                        "alias": loja['alias'],
+                        "loj_codigo": loja['loj_codigo'],
+                        "loj_fantasia": loja['loj_fantasia'],
+                        "loj_cnpj": loja['loj_cnpj'],
+                        "cod_info": novo_cod,
+                        "cli_situacao": nova_sit
+                    })
+
+    if updates:
+        conn.executemany("UPDATE clientes_lojas SET cod_info = ?, cli_situacao = ? WHERE id = ?", updates)
+        conn.commit()
+
+    conn.close()
+
+    resultado = {
+        "atualizadas": len(ids_atualizados),
+        "aliases_afetados": len(aliases_afetados),
+        "linhas_processadas": linhas_processadas,
+        "amostra": amostra,
+        "nao_encontrados": nao_encontrados
+    }
+
+    return render_template_string(HTML_ATUALIZAR_LOJAS_INFO, resultado=resultado)
+
+
+@bancos_bp.route('/admin/atualizar-lojas-info/modelo')
+def modelo_atualizar_lojas_info():
+    if not session.get('logged_in'):
+        return redirect('/admin/login')
+    if not tem_permissao('perm_servidores'):
+        return "Você não tem permissão para esta ação. <a href='/'>Voltar</a>", 403
+
+    try:
+        import openpyxl
+        from io import BytesIO
+        from flask import send_file
+    except ImportError:
+        return render_template_string(
+            HTML_ATUALIZAR_LOJAS_INFO,
+            erro="A biblioteca 'openpyxl' não está instalada no servidor."
+        )
+
+    wb = openpyxl.Workbook()
+    aba = wb.active
+    aba.title = "ATUALIZAR_LOJAS"
+    aba.append(['CODINFO', 'CNPJ', 'Situação'])
+    aba.append(['1', '12345678000199', 'A'])
+    aba.append(['2', '98765432000188', 'I'])
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return send_file(
+        buffer, as_attachment=True, download_name='modelo_atualizacao_codinfo_situacao.xlsx',
         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     )
 

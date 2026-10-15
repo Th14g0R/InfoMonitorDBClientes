@@ -1386,7 +1386,8 @@ O cliente loja-critica esta a mais de 1 dia sem bkp - status ERRO 2026-10-09 10:
         client.get('/horarios')
         with client.session_transaction() as session:
             token = session['_csrf_token']
-        for path in ('/admin', '/admin/importar-lojas', '/admin/importar-lojas/modelo', '/admin/pastas-destino'):
+        for path in ('/admin', '/admin/importar-lojas', '/admin/importar-lojas/modelo',
+                     '/admin/atualizar-lojas-info', '/admin/atualizar-lojas-info/modelo', '/admin/pastas-destino'):
             with self.subTest(path=path):
                 response = client.get(path)
                 self.assertEqual(response.status_code, 302)
@@ -1509,6 +1510,62 @@ O cliente loja-critica esta a mais de 1 dia sem bkp - status ERRO 2026-10-09 10:
             self.assertIsNone(item)
             conn.execute("DELETE FROM funcionarios WHERE id = ?", (func_id,))
 
+    def test_atualizar_lojas_info_fluxo_completo(self):
+        # 1. Download de modelo
+        resp_modelo = self.client.get('/admin/atualizar-lojas-info/modelo')
+        self.assertEqual(resp_modelo.status_code, 200)
+        self.assertIn('application/vnd.openxmlformats', resp_modelo.content_type)
+
+        # 2. GET na tela
+        resp_get = self.client.get('/admin/atualizar-lojas-info')
+        self.assertEqual(resp_get.status_code, 200)
+        self.assertIn('Atualizar CodInfo e Situação', resp_get.text)
+
+        # 3. Prepara uma loja de teste no banco
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            conn.execute("DELETE FROM clientes_lojas WHERE alias = 'teste_upd_alias'")
+            loja_id = conn.execute(
+                "INSERT INTO clientes_lojas (alias, loj_codigo, loj_fantasia, loj_nome, loj_cnpj, cod_info, cli_situacao) "
+                "VALUES ('teste_upd_alias', '1', 'Fantasia Teste', 'Razao Teste', '99887766000155', '', '')"
+            ).lastrowid
+
+        try:
+            # 4. Gera planilha em memória com openpyxl
+            import openpyxl
+            from io import BytesIO
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.append(['CODINFO', 'CNPJ', 'Situação'])
+            # Testa com CNPJ formatado com pontos e barras
+            ws.append(['999', '99.887.766/0001-55', 'A'])
+            buf = BytesIO()
+            wb.save(buf)
+            buf.seek(0)
+
+            # 5. POST com o arquivo
+            data = {
+                'csrf_token': self.token,
+                'arquivo': (buf, 'teste_atualizacao.xlsx')
+            }
+            resp_post = self.client.post(
+                '/admin/atualizar-lojas-info',
+                data=data,
+                content_type='multipart/form-data'
+            )
+            self.assertEqual(resp_post.status_code, 200)
+            self.assertIn('Atualização concluída com sucesso', resp_post.text)
+
+            # 6. Verifica no banco se os campos foram atualizados
+            with closing(self.bancos.get_db_connection()) as conn:
+                loja = conn.execute("SELECT cod_info, cli_situacao FROM clientes_lojas WHERE id = ?", (loja_id,)).fetchone()
+                self.assertIsNotNone(loja)
+                self.assertEqual(loja['cod_info'], '999')
+                self.assertEqual(loja['cli_situacao'], 'A')
+        finally:
+            with closing(self.bancos.get_db_connection()) as conn, conn:
+                conn.execute("DELETE FROM clientes_lojas WHERE alias = 'teste_upd_alias'")
+
 
 if __name__ == '__main__':
     unittest.main()
+
