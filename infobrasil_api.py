@@ -4,6 +4,7 @@ import json
 import base64
 import ssl
 import logging
+import sqlite3
 import urllib.request
 import urllib.error
 from datetime import datetime
@@ -29,32 +30,36 @@ def obter_caminho_env():
 
 def salvar_variaveis_env(novas_variaveis):
     """Atualiza ou insere variáveis de ambiente no arquivo .env e no os.environ em runtime."""
-    caminho_env = obter_caminho_env()
-    chaves_restantes = dict(novas_variaveis)
-    novas_linhas = []
+    try:
+        caminho_env = obter_caminho_env()
+        chaves_restantes = dict(novas_variaveis)
+        novas_linhas = []
 
-    if os.path.exists(caminho_env):
-        with open(caminho_env, 'r', encoding='utf-8') as f:
-            for line in f:
-                linha_limpa = line.strip()
-                if linha_limpa and not linha_limpa.startswith('#') and '=' in linha_limpa:
-                    chave = linha_limpa.split('=', 1)[0].strip()
-                    if chave in chaves_restantes:
-                        valor = chaves_restantes.pop(chave)
-                        novas_linhas.append(f"{chave}={valor}\n")
-                        continue
-                novas_linhas.append(line if line.endswith('\n') else line + '\n')
+        if os.path.exists(caminho_env):
+            with open(caminho_env, 'r', encoding='utf-8') as f:
+                for line in f:
+                    linha_limpa = line.strip()
+                    if linha_limpa and not linha_limpa.startswith('#') and '=' in linha_limpa:
+                        chave = linha_limpa.split('=', 1)[0].strip()
+                        if chave in chaves_restantes:
+                            valor = chaves_restantes.pop(chave)
+                            novas_linhas.append(f"{chave}={valor}\n")
+                            continue
+                    novas_linhas.append(line if line.endswith('\n') else line + '\n')
 
-    for chave, valor in chaves_restantes.items():
-        novas_linhas.append(f"{chave}={valor}\n")
+        for chave, valor in chaves_restantes.items():
+            novas_linhas.append(f"{chave}={valor}\n")
 
-    with open(caminho_env, 'w', encoding='utf-8') as f:
-        f.writelines(novas_linhas)
+        with open(caminho_env, 'w', encoding='utf-8') as f:
+            f.writelines(novas_linhas)
 
-    for chave, valor in novas_variaveis.items():
-        os.environ[chave] = str(valor)
+        for chave, valor in novas_variaveis.items():
+            os.environ[chave] = str(valor)
 
-    return True
+        return True, "Credenciais salvas no arquivo .env com sucesso!"
+    except Exception as e:
+        LOGGER.exception("Erro ao salvar variáveis no .env: %s", e)
+        return False, f"Falha ao gravar arquivo .env: {str(e)}"
 
 
 def obter_configuracao_api():
@@ -96,8 +101,13 @@ def obter_configuracao_api():
     }
 
 
-def autenticar_api(url=None, user=None, password=None, timeout=12):
+def autenticar_api(url=None, user=None, password=None, timeout=12, usuario=None, senha=None):
     """Realiza autenticação Basic Auth na API InfoBrasil e retorna (access_token, user_info, erro)."""
+    if usuario is not None and user is None:
+        user = usuario
+    if senha is not None and password is None:
+        password = senha
+
     cfg = obter_configuracao_api()
     api_url = (url or cfg['url']).strip().rstrip('/')
     api_user = (user if user is not None else cfg['user']).strip()
@@ -143,11 +153,18 @@ def autenticar_api(url=None, user=None, password=None, timeout=12):
         return None, None, f"Erro inesperado ao autenticar: {str(e)}"
 
 
-def testar_conexao_api(url=None, user=None, password=None, timeout=12):
-    """Testa a conectividade e autenticação com a API InfoBrasil, validando o acesso ao endpoint de clientes."""
+def testar_conexao_api(url=None, user=None, password=None, timeout=12, usuario=None, senha=None):
+    """Testa a conectividade e autenticação com a API InfoBrasil, validando o acesso ao endpoint de clientes.
+    Retorna um dicionário {'sucesso': bool, 'mensagem': str, 'user_info': dict}
+    """
+    if usuario is not None and user is None:
+        user = usuario
+    if senha is not None and password is None:
+        password = senha
+
     token, user_info, erro = autenticar_api(url=url, user=user, password=password, timeout=timeout)
     if erro:
-        return False, erro, None
+        return {'sucesso': False, 'mensagem': erro, 'user_info': None}
 
     cfg = obter_configuracao_api()
     api_url = (url or cfg['url']).strip().rstrip('/')
@@ -167,11 +184,23 @@ def testar_conexao_api(url=None, user=None, password=None, timeout=12):
         with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
             if resp.status == 200:
                 nome_usuario = (user_info or {}).get('username') or 'usuário autenticado'
-                return True, f"Conexão com a API InfoBrasil OK! Autenticado como '{nome_usuario}'.", user_info
-            return False, f"API retornou status HTTP {resp.status} na consulta de clientes.", user_info
+                return {
+                    'sucesso': True,
+                    'mensagem': f"Conexão com a API InfoBrasil OK! Autenticado como '{nome_usuario}'.",
+                    'user_info': user_info
+                }
+            return {
+                'sucesso': False,
+                'mensagem': f"API retornou status HTTP {resp.status} na consulta de clientes.",
+                'user_info': user_info
+            }
     except Exception as e:
         LOGGER.warning("Erro ao validar endpoint de clientes da API: %s", e)
-        return False, f"Login efetuado com sucesso, mas falhou ao consultar clientes: {str(e)}", user_info
+        return {
+            'sucesso': False,
+            'mensagem': f"Login efetuado com sucesso, mas falhou ao consultar clientes: {str(e)}",
+            'user_info': user_info
+        }
 
 
 def buscar_todos_clientes_api(token, api_url, page_size=1000, timeout=20):

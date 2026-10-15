@@ -3764,18 +3764,22 @@ HTML_ADMIN = r"""
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url, usuario, senha })
         })
-        .then(r => r.json())
-        .then(data => {
+        .then(async r => {
+            const data = await r.json().catch(() => ({}));
+            return { ok: r.ok, status: r.status, data };
+        })
+        .then(({ ok, status, data }) => {
             if (btn) btn.disabled = false;
-            if (data.sucesso) {
-                mostrarFeedbackApi('Configurações salvas no arquivo .env com sucesso!', 'success');
+            const msg = data.mensagem || data.erro || data.error || (ok ? 'Configurações salvas no arquivo .env com sucesso!' : `Erro no servidor (${status})`);
+            if (ok && data.sucesso !== false) {
+                mostrarFeedbackApi(msg, 'success');
             } else {
-                mostrarFeedbackApi('Erro ao salvar no .env: ' + (data.mensagem || 'verifique os dados.'), 'danger');
+                mostrarFeedbackApi('Erro ao salvar no .env: ' + msg, 'danger');
             }
         })
         .catch(err => {
             if (btn) btn.disabled = false;
-            mostrarFeedbackApi('Erro de comunicação ao salvar: ' + err.message, 'danger');
+            mostrarFeedbackApi('Erro de comunicação ao salvar: ' + (err.message || err), 'danger');
         });
         return false;
     }
@@ -3793,18 +3797,22 @@ HTML_ADMIN = r"""
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url, usuario, senha })
         })
-        .then(r => r.json())
-        .then(data => {
+        .then(async r => {
+            const data = await r.json().catch(() => ({}));
+            return { ok: r.ok, status: r.status, data };
+        })
+        .then(({ ok, status, data }) => {
             if (btn) btn.disabled = false;
-            if (data.sucesso) {
-                mostrarFeedbackApi('✅ ' + data.mensagem, 'success');
+            const msg = data.mensagem || data.erro || data.error || (ok ? 'Conexão testada com sucesso!' : `Erro no servidor (${status})`);
+            if (ok && data.sucesso) {
+                mostrarFeedbackApi('✅ ' + msg, 'success');
             } else {
-                mostrarFeedbackApi('❌ Falha no teste: ' + data.mensagem, 'danger');
+                mostrarFeedbackApi('❌ Falha no teste: ' + msg, 'danger');
             }
         })
         .catch(err => {
             if (btn) btn.disabled = false;
-            mostrarFeedbackApi('❌ Erro de requisição: ' + err.message, 'danger');
+            mostrarFeedbackApi('❌ Erro de requisição: ' + (err.message || err), 'danger');
         });
     }
 
@@ -3818,22 +3826,26 @@ HTML_ADMIN = r"""
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }
         })
-        .then(r => r.json())
-        .then(data => {
+        .then(async r => {
+            const data = await r.json().catch(() => ({}));
+            return { ok: r.ok, status: r.status, data };
+        })
+        .then(({ ok, status, data }) => {
             if (btn) btn.disabled = false;
-            if (data.sucesso) {
-                mostrarFeedbackApi('✅ ' + data.mensagem, 'success');
+            const msg = data.mensagem || data.erro || data.error || (ok ? 'Sincronização concluída!' : `Erro no servidor (${status})`);
+            if (ok && data.sucesso) {
+                mostrarFeedbackApi('✅ ' + msg, 'success');
                 const statusDiv = document.getElementById('statusExecucaoApi');
                 if (statusDiv) {
-                    statusDiv.innerHTML = `<span class="badge bg-success me-1">SUCESSO</span> Atualizado agora (${data.atualizados} lojas)`;
+                    statusDiv.innerHTML = `<span class="badge bg-success me-1">SUCESSO</span> Atualizado agora (${data.atualizados ?? 0} lojas)`;
                 }
             } else {
-                mostrarFeedbackApi('❌ Falha na sincronização: ' + data.mensagem, 'danger');
+                mostrarFeedbackApi('❌ Falha na sincronização: ' + msg, 'danger');
             }
         })
         .catch(err => {
             if (btn) btn.disabled = false;
-            mostrarFeedbackApi('❌ Erro durante sincronização: ' + err.message, 'danger');
+            mostrarFeedbackApi('❌ Erro durante sincronização: ' + (err.message || err), 'danger');
         });
     }
 
@@ -5054,11 +5066,21 @@ def salvar_configuracao_api():
     if not url or not usuario:
         return jsonify({"sucesso": False, "mensagem": "A URL base e o usuário da API são obrigatórios."}), 400
 
-    sucesso, msg = salvar_variaveis_env({
-        'INFOBRASIL_API_URL': url,
-        'INFOBRASIL_API_USER': usuario,
-        'INFOBRASIL_API_PASS': senha,
-    })
+    try:
+        retorno = salvar_variaveis_env({
+            'INFOBRASIL_API_URL': url,
+            'INFOBRASIL_API_USER': usuario,
+            'INFOBRASIL_API_PASS': senha,
+        })
+        if isinstance(retorno, tuple):
+            sucesso, msg = retorno
+        elif isinstance(retorno, bool):
+            sucesso, msg = retorno, ("Credenciais salvas no arquivo .env com sucesso!" if retorno else "Falha ao gravar arquivo .env")
+        else:
+            sucesso, msg = True, "Credenciais salvas no arquivo .env com sucesso!"
+    except Exception as e:
+        LOGGER.exception("Erro ao salvar configuração da API: %s", e)
+        return jsonify({"sucesso": False, "mensagem": f"Erro interno ao salvar .env: {str(e)}"}), 500
 
     if sucesso:
         registrar_acao_admin('config_api_infobrasil', {
@@ -5083,8 +5105,17 @@ def rota_testar_conexao_api():
     usuario = (dados.get('usuario') or '').strip() or None
     senha = (dados.get('senha') or '').strip() or None
 
-    resultado = testar_conexao_api(url=url, usuario=usuario, senha=senha)
-    return jsonify(resultado)
+    try:
+        resultado = testar_conexao_api(url=url, user=usuario, password=senha, usuario=usuario, senha=senha)
+        if isinstance(resultado, tuple):
+            sucesso = bool(resultado[0])
+            mensagem = str(resultado[1]) if len(resultado) > 1 else ''
+            user_info = resultado[2] if len(resultado) > 2 else None
+            resultado = {"sucesso": sucesso, "mensagem": mensagem, "user_info": user_info}
+        return jsonify(resultado)
+    except Exception as e:
+        LOGGER.exception("Erro ao testar conexão com API: %s", e)
+        return jsonify({"sucesso": False, "mensagem": f"Erro interno ao testar conexão: {str(e)}"}), 500
 
 
 @bancos_bp.route('/admin/config-api/sincronizar', methods=['POST'])
