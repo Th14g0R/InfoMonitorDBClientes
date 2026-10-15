@@ -254,10 +254,15 @@ def init_db_sistema():
             loj_nome TEXT,
             loj_cnpj TEXT,
             cod_info TEXT,
-            cli_situacao TEXT
+            cli_situacao TEXT,
+            ignorar_incompleto INTEGER DEFAULT 0
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_clientes_lojas_alias ON clientes_lojas (alias)')
+    try:
+        cursor.execute("ALTER TABLE clientes_lojas ADD COLUMN ignorar_incompleto INTEGER DEFAULT 0;")
+    except sqlite3.OperationalError:
+        pass
 
     # Tabela de Histórico e Marcadores de Alertas de Backups por E-mail
     cursor.execute('''
@@ -367,7 +372,9 @@ def carregar_lojas_clientes():
         return {}
 
 def loja_incompleta(loja):
-    """Retorna True se faltar CodInfo, Situação ou LojCód."""
+    """Retorna True se faltar CodInfo, Situação ou LojCód., a menos que a loja esteja marcada para ignorar."""
+    if loja.get('ignorar_incompleto') in (1, '1', True):
+        return False
     cod = (loja.get('cod_info') or '').strip()
     sit = (loja.get('cli_situacao') or '').strip()
     loj = (loja.get('loj_codigo') or '').strip()
@@ -1726,11 +1733,8 @@ HTML_LAYOUT = """
         .sem-lojas { color: var(--cor-texto-suave); font-style: italic; margin: 8px 0; }
         .acoes-loja { white-space: nowrap; }
         .linha-loja input.form-control-sm { font-size: 0.85em; padding: 2px 5px; width: 100%; min-width: 90px; }
-        .linha-loja.loja-incompleta-destaque { background-color: rgba(220, 38, 38, 0.05) !important; }
-        .valor-pendente { color: var(--cor-perigo, #dc2626) !important; font-weight: 700; }
-        .tag-pendente { display: inline-block; padding: 1px 7px; background: #fee2e2; color: #b91c1c; border-radius: 4px; font-weight: 700; font-size: 0.9em; }
-        [data-theme="dark"] .linha-loja.loja-incompleta-destaque { background-color: rgba(220, 38, 38, 0.15) !important; }
-        [data-theme="dark"] .tag-pendente { background: #450a0a; color: #fca5a5; }
+        .icone-alerta-incompleto { display: inline-block; margin-left: 5px; font-size: 0.85em; cursor: help; vertical-align: middle; line-height: 1; background: transparent !important; border: none !important; }
+        .tag-ignorado { display: inline-block; font-size: 0.75em; padding: 1px 6px; border-radius: 4px; background: var(--cor-bg-hover, #f1f5f9); color: var(--cor-texto-suave, #64748b); border: 1px solid var(--cor-borda, #cbd5e1); }
 
         /* Separador visual entre grupos de botões do menu (unifica visualmente sem precisar de fundo colorido) */
         .separador-menu { width: 1px; align-self: stretch; background: var(--cor-borda); margin: 2px 4px; }
@@ -1843,7 +1847,7 @@ HTML_LAYOUT = """
             {% elif filtro_status == 'sem_lojas' %}
                 <h3>Databases em: <span class="text-primary">{{ 'TODOS OS SERVIDORES' if modo_todos else servidor_atual }}</span> <span class="badge bg-warning text-dark" style="font-size:0.65em; vertical-align: middle;">📭 Sem lojas cadastradas</span> <a href="{% if modo_todos %}/todos{% else %}/servidor/{{ servidor_atual }}{% endif %}{% if busca_termo %}?busca={{ busca_termo }}{% endif %}" class="btn-clear" style="display:inline-flex; font-size:0.5em; vertical-align: middle; margin-left: 8px;">✖ Limpar Filtro</a></h3>
             {% elif filtro_status == 'lojas_incompletas' %}
-                <h3>Databases em: <span class="text-primary">{{ 'TODOS OS SERVIDORES' if modo_todos else servidor_atual }}</span> <span class="badge bg-danger text-white" style="font-size:0.65em; vertical-align: middle;">⚠️ Lojas com dados incompletos</span> <a href="{% if modo_todos %}/todos{% else %}/servidor/{{ servidor_atual }}{% endif %}{% if busca_termo %}?busca={{ busca_termo }}{% endif %}" class="btn-clear" style="display:inline-flex; font-size:0.5em; vertical-align: middle; margin-left: 8px;">✖ Limpar Filtro</a></h3>
+                <h3>Databases em: <span class="text-primary">{{ 'TODOS OS SERVIDORES' if modo_todos else servidor_atual }}</span> <span class="badge border" style="font-size:0.65em; vertical-align: middle; background: var(--cor-card); color: var(--cor-texto);">⚠️ Lojas com dados incompletos</span> <a href="{% if modo_todos %}/todos{% else %}/servidor/{{ servidor_atual }}{% endif %}{% if busca_termo %}?busca={{ busca_termo }}{% endif %}" class="btn-clear" style="display:inline-flex; font-size:0.5em; vertical-align: middle; margin-left: 8px;">✖ Limpar Filtro</a></h3>
             {% elif busca_termo %}
                 <h3>🔍 Busca por: <span class="text-success">"{{ busca_termo }}"</span> em todos os servidores</h3>
             {% elif modo_inativos %}
@@ -2130,7 +2134,7 @@ HTML_LAYOUT = """
                                     {% if not banco.lojas and not banco.eh_inativo %}
                                         <span class="badge bg-warning text-dark" style="font-size:0.7em;" title="Nenhuma loja cadastrada para este alias">📭 sem loja</span>
                                     {% elif banco.tem_lojas_incompletas and not banco.eh_inativo %}
-                                        <span class="badge bg-danger text-white" style="font-size:0.7em;" title="{{ banco.total_lojas_incompletas }} loja(s) com dados incompletos (CodInfo ou Situação pendente)">⚠️ {{ banco.total_lojas_incompletas }} incompleta(s)</span>
+                                        <span class="icone-alerta-incompleto" title="{{ banco.total_lojas_incompletas }} loja(s) com dados incompletos">⚠️</span>
                                     {% endif %}
                                 </td>
                                 <td>
@@ -2180,21 +2184,25 @@ HTML_LAYOUT = """
                                             <thead>
                                                 <tr>
                                                     <th>CodInfo</th><th>LojCód.</th><th>Fantasia</th><th>Razão/Nome</th><th>CNPJ</th><th>Situação</th>
+                                                    <th style="text-align: center; width: 85px;" title="Ignorar pendências desta loja (ex: sem CNPJ)">Ignorar?</th>
                                                     {% if tem_permissao('perm_servidores') %}<th></th>{% endif %}
                                                 </tr>
                                             </thead>
                                             <tbody>
                                                 {% for loja in banco.lojas %}
-                                                <tr class="linha-loja {% if loja.incompleta %}loja-incompleta-destaque{% endif %}" data-id="{{ loja.id }}">
-                                                    <td class="valor-loja {% if not loja.cod_info %}valor-pendente{% endif %}" data-campo="cod_info">
-                                                        {% if loja.cod_info %}{{ loja.cod_info }}{% else %}<span class="tag-pendente" title="CodInfo pendente">-</span>{% endif %}
-                                                    </td>
-                                                    <td class="valor-loja {% if not loja.loj_codigo %}valor-pendente{% endif %}" data-campo="loj_codigo">{{ loja.loj_codigo or '-' }}</td>
+                                                <tr class="linha-loja" data-id="{{ loja.id }}" data-ignorar="{{ 1 if loja.ignorar_incompleto else 0 }}">
+                                                    <td class="valor-loja" data-campo="cod_info">{{ loja.cod_info or '-' }}</td>
+                                                    <td class="valor-loja" data-campo="loj_codigo">{{ loja.loj_codigo or '-' }}</td>
                                                     <td class="valor-loja" data-campo="loj_fantasia">{{ loja.loj_fantasia or '-' }}</td>
                                                     <td class="valor-loja" data-campo="loj_nome">{{ loja.loj_nome or '-' }}</td>
                                                     <td class="valor-loja" data-campo="loj_cnpj">{{ loja.loj_cnpj or '-' }}</td>
-                                                    <td class="valor-loja {% if not loja.cli_situacao %}valor-pendente{% endif %}" data-campo="cli_situacao">
-                                                        {% if loja.cli_situacao %}{{ loja.cli_situacao }}{% else %}<span class="tag-pendente" title="Situação pendente">-</span>{% endif %}
+                                                    <td class="valor-loja" data-campo="cli_situacao">{{ loja.cli_situacao or '-' }}</td>
+                                                    <td class="col-ignorar text-center">
+                                                        {% if loja.ignorar_incompleto %}
+                                                            <span class="tag-ignorado" title="Loja marcada para ignorar pendências de preenchimento">Ignorado</span>
+                                                        {% else %}
+                                                            <span style="color: var(--cor-texto-suave); opacity: 0.5;">-</span>
+                                                        {% endif %}
                                                     </td>
                                                     {% if tem_permissao('perm_servidores') %}
                                                     <td class="acoes-loja">
@@ -2259,6 +2267,16 @@ HTML_LAYOUT = """
                 celula.appendChild(input);
             });
 
+            const celulaIgnorar = linha.querySelector('.col-ignorar');
+            if (celulaIgnorar) {
+                const estaIgnorado = linha.dataset.ignorar === '1';
+                celulaIgnorar.innerHTML = `
+                    <label style="display:inline-flex;align-items:center;gap:4px;font-size:0.8em;cursor:pointer;margin:0;white-space:nowrap;" title="Marcar para ignorar pendências caso a loja não tenha CNPJ/dados">
+                        <input type="checkbox" class="chk-ignorar" ${estaIgnorado ? 'checked' : ''}> Ignorar
+                    </label>
+                `;
+            }
+
             const celulaAcoes = linha.querySelector('.acoes-loja');
             celulaAcoes.innerHTML = '';
             const btnSalvar = document.createElement('button');
@@ -2270,6 +2288,8 @@ HTML_LAYOUT = """
             btnSalvar.onclick = function() {
                 const payload = { id: id, alias: alias };
                 CAMPOS_LOJA_ORDEM.forEach(campo => { payload[campo] = inputs[campo].value.trim(); });
+                const chk = linha.querySelector('.chk-ignorar');
+                payload.ignorar_incompleto = (chk && chk.checked) ? 1 : 0;
                 salvarLoja(payload);
             };
             celulaAcoes.appendChild(btnSalvar);
@@ -2285,7 +2305,7 @@ HTML_LAYOUT = """
                 if (semLojas) semLojas.remove();
                 const wrapperHtml = document.createElement('table');
                 wrapperHtml.className = 'tabela-lojas';
-                wrapperHtml.innerHTML = '<thead><tr><th>CodInfo</th><th>LojCód.</th><th>Fantasia</th><th>Razão/Nome</th><th>CNPJ</th><th>Situação</th><th></th></tr></thead><tbody></tbody>';
+                wrapperHtml.innerHTML = '<thead><tr><th>CodInfo</th><th>LojCód.</th><th>Fantasia</th><th>Razão/Nome</th><th>CNPJ</th><th>Situação</th><th style="text-align: center; width: 85px;" title="Ignorar pendências desta loja">Ignorar?</th><th></th></tr></thead><tbody></tbody>';
                 painel.insertBefore(wrapperHtml, botao);
                 tabela = wrapperHtml.querySelector('tbody');
             }
@@ -2293,6 +2313,7 @@ HTML_LAYOUT = """
             const novaLinha = document.createElement('tr');
             novaLinha.className = 'linha-loja';
             novaLinha.dataset.id = '';
+            novaLinha.dataset.ignorar = '0';
 
             const inputs = {};
             CAMPOS_LOJA_ORDEM.forEach(campo => {
@@ -2305,6 +2326,11 @@ HTML_LAYOUT = """
                 novaLinha.appendChild(td);
             });
 
+            const tdIgnorar = document.createElement('td');
+            tdIgnorar.className = 'col-ignorar text-center';
+            tdIgnorar.innerHTML = '<label style="display:inline-flex;align-items:center;gap:4px;font-size:0.8em;cursor:pointer;margin:0;white-space:nowrap;" title="Ignorar pendências nesta loja"><input type="checkbox" class="chk-ignorar"> Ignorar</label>';
+            novaLinha.appendChild(tdIgnorar);
+
             const tdAcoes = document.createElement('td');
             tdAcoes.className = 'acoes-loja';
             const btnSalvar = document.createElement('button');
@@ -2316,6 +2342,8 @@ HTML_LAYOUT = """
             btnSalvar.onclick = function() {
                 const payload = { id: '', alias: alias };
                 CAMPOS_LOJA_ORDEM.forEach(campo => { payload[campo] = inputs[campo].value.trim(); });
+                const chk = novaLinha.querySelector('.chk-ignorar');
+                payload.ignorar_incompleto = (chk && chk.checked) ? 1 : 0;
                 salvarLoja(payload);
             };
             tdAcoes.appendChild(btnSalvar);
@@ -4673,21 +4701,22 @@ def salvar_cliente_loja():
         return jsonify({"sucesso": False, "mensagem": "Alias não informado."}), 400
 
     valores = {campo: (dados.get(campo) or '').strip() for campo in CAMPOS_LOJA}
+    ignorar_incompleto = 1 if dados.get('ignorar_incompleto') in (1, '1', True, 'true', 'on') else 0
 
     conn = get_db_connection()
     if loja_id:
         conn.execute(
-            "UPDATE clientes_lojas SET loj_codigo=?, loj_fantasia=?, loj_nome=?, loj_cnpj=?, cod_info=?, cli_situacao=? "
+            "UPDATE clientes_lojas SET loj_codigo=?, loj_fantasia=?, loj_nome=?, loj_cnpj=?, cod_info=?, cli_situacao=?, ignorar_incompleto=? "
             "WHERE id=? AND alias=?",
             (valores['loj_codigo'], valores['loj_fantasia'], valores['loj_nome'], valores['loj_cnpj'],
-             valores['cod_info'], valores['cli_situacao'], loja_id, alias)
+             valores['cod_info'], valores['cli_situacao'], ignorar_incompleto, loja_id, alias)
         )
     else:
         conn.execute(
-            "INSERT INTO clientes_lojas (alias, loj_codigo, loj_fantasia, loj_nome, loj_cnpj, cod_info, cli_situacao) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO clientes_lojas (alias, loj_codigo, loj_fantasia, loj_nome, loj_cnpj, cod_info, cli_situacao, ignorar_incompleto) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (alias, valores['loj_codigo'], valores['loj_fantasia'], valores['loj_nome'], valores['loj_cnpj'],
-             valores['cod_info'], valores['cli_situacao'])
+             valores['cod_info'], valores['cli_situacao'], ignorar_incompleto)
         )
     conn.commit()
     conn.close()

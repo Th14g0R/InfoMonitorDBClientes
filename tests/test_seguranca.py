@@ -841,6 +841,9 @@ O cliente loja-critica esta a mais de 1 dia sem bkp - status ERRO 2026-10-09 10:
         self.assertTrue(self.bancos.loja_incompleta({'cod_info': '123', 'cli_situacao': '', 'loj_codigo': '1'}))
         self.assertTrue(self.bancos.loja_incompleta({'cod_info': '123', 'cli_situacao': 'A', 'loj_codigo': ''}))
         self.assertFalse(self.bancos.loja_incompleta({'cod_info': '123', 'cli_situacao': 'A', 'loj_codigo': '1'}))
+        # Se marcada para ignorar, não é considerada incompleta
+        self.assertFalse(self.bancos.loja_incompleta({'cod_info': '', 'cli_situacao': '', 'loj_codigo': '1', 'ignorar_incompleto': 1}))
+        self.assertFalse(self.bancos.loja_incompleta({'cod_info': '', 'cli_situacao': '', 'loj_codigo': '1', 'ignorar_incompleto': '1'}))
 
         # 2. Rota /todos?filtro=lojas_incompletas
         with patch.object(self.bancos, 'buscar_em_todos_servidores', return_value=([
@@ -849,10 +852,10 @@ O cliente loja-critica esta a mais de 1 dia sem bkp - status ERRO 2026-10-09 10:
             {'alias': 'cli_sem_loja', 'arquivo_existe': True, 'tamanho_bytes': 3000, 'timestamp': 300, 'cname_string': '', 'status_inatividade': {'status': 'ok'}},
         ], 6000, [])):
             with patch.object(self.bancos, 'carregar_lojas_clientes', return_value={
-                'cli_completo': [{'id': 1, 'cod_info': '10', 'cli_situacao': 'A', 'loj_codigo': '1', 'loj_fantasia': 'F1', 'loj_nome': 'N1', 'loj_cnpj': '000'}],
+                'cli_completo': [{'id': 1, 'cod_info': '10', 'cli_situacao': 'A', 'loj_codigo': '1', 'loj_fantasia': 'F1', 'loj_nome': 'N1', 'loj_cnpj': '000', 'ignorar_incompleto': 0}],
                 'cli_incompleto': [
-                    {'id': 2, 'cod_info': '11', 'cli_situacao': 'A', 'loj_codigo': '1', 'loj_fantasia': 'F2', 'loj_nome': 'N2', 'loj_cnpj': '111'},
-                    {'id': 3, 'cod_info': '', 'cli_situacao': '', 'loj_codigo': '2', 'loj_fantasia': 'F3', 'loj_nome': 'N3', 'loj_cnpj': '222'}
+                    {'id': 2, 'cod_info': '11', 'cli_situacao': 'A', 'loj_codigo': '1', 'loj_fantasia': 'F2', 'loj_nome': 'N2', 'loj_cnpj': '111', 'ignorar_incompleto': 0},
+                    {'id': 3, 'cod_info': '', 'cli_situacao': '', 'loj_codigo': '2', 'loj_fantasia': 'F3', 'loj_nome': 'N3', 'loj_cnpj': '222', 'ignorar_incompleto': 0}
                 ],
                 'cli_sem_loja': []
             }):
@@ -863,8 +866,40 @@ O cliente loja-critica esta a mais de 1 dia sem bkp - status ERRO 2026-10-09 10:
                 self.assertNotIn('data-alias="cli_completo"', html)
                 self.assertNotIn('data-alias="cli_sem_loja"', html)
                 self.assertIn('Lojas com dados incompletos', html)
-                self.assertIn('1 incompleta(s)', html)
-                self.assertIn('tag-pendente', html)
+                self.assertIn('icone-alerta-incompleto', html)
+                self.assertNotIn('incompleta(s)</span>', html)
+                self.assertNotIn('tag-pendente', html)
+
+        # 3. Salvar loja marcando ignorar_incompleto
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            conn.execute("DELETE FROM clientes_lojas WHERE alias = 'teste_ignorar_alias'")
+            cursor = conn.execute(
+                "INSERT INTO clientes_lojas (alias, loj_codigo, loj_fantasia, loj_nome, loj_cnpj, cod_info, cli_situacao, ignorar_incompleto) "
+                "VALUES ('teste_ignorar_alias', '1', 'Loja Teste', 'Razao', '', '', '', 0)"
+            )
+            loja_id = cursor.lastrowid
+
+        # Salva marcando para ignorar via rota autenticada
+        resp_salvar = self.client.post('/admin/cliente-loja/salvar', json={
+            'id': str(loja_id),
+            'alias': 'teste_ignorar_alias',
+            'loj_codigo': '1',
+            'loj_fantasia': 'Loja Teste Alterada',
+            'loj_nome': 'Razao',
+            'loj_cnpj': '',
+            'cod_info': '',
+            'cli_situacao': '',
+            'ignorar_incompleto': 1
+        }, headers={'X-CSRF-Token': self.token})
+        self.assertEqual(resp_salvar.status_code, 200)
+
+        with closing(self.bancos.get_db_connection()) as conn:
+            linha = conn.execute("SELECT ignorar_incompleto, loj_fantasia FROM clientes_lojas WHERE id = ?", (loja_id,)).fetchone()
+            self.assertEqual(linha['ignorar_incompleto'], 1)
+            self.assertEqual(linha['loj_fantasia'], 'Loja Teste Alterada')
+
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            conn.execute("DELETE FROM clientes_lojas WHERE alias = 'teste_ignorar_alias'")
 
 
 
