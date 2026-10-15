@@ -88,6 +88,7 @@ PAGINAS_PUBLICAS = {
     'bancos.api_historico', 'bancos.api_testar_cname', 'bancos.api_consulta_cnpj',
     'bancos.admin_login', 'bancos.esqueci_senha', 'bancos.admin_register',
     'bancos.redefinir_senha_token', 'bancos.certificados', 'bancos.consulta_cnpj',
+    'bancos.rota_relatorio_clientes_lojas',
 }
 
 
@@ -399,6 +400,24 @@ def aplicar_lojas_clientes(lista_bancos, cache_lojas=None):
         banco['tem_lojas_incompletas'] = (incompletas > 0)
         banco['total_lojas_incompletas'] = incompletas
     return lista_bancos
+
+
+def marcar_lojas_sem_cnpj_como_ignoradas():
+    """Marca como ignoradas (ignorar_incompleto = 1) todas as lojas sem CNPJ cadastrado.
+    Retorna a quantidade de lojas atualizadas.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE clientes_lojas
+        SET ignorar_incompleto = 1
+        WHERE (loj_cnpj IS NULL OR TRIM(loj_cnpj) = '' OR TRIM(loj_cnpj) = '-')
+          AND (ignorar_incompleto IS NULL OR ignorar_incompleto = 0)
+    """)
+    total_afetadas = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return total_afetadas
 
 # --- RECURSO 3: DISPARO DE EMAIL SOLICITANDO CNAME ---
 def enviar_solicitacao_cname(nome_fantasia, alias, usuario_solicitante):
@@ -1789,6 +1808,7 @@ HTML_LAYOUT = """
                     <a href="/cnpj">Consulta CNPJ</a>
                     <a href="/todos?filtro=sem_lojas" {% if filtro_status == 'sem_lojas' %}aria-current="page"{% endif %}>Clientes sem lojas cadastradas</a>
                     <a href="/todos?filtro=lojas_incompletas" {% if filtro_status == 'lojas_incompletas' %}aria-current="page"{% endif %}>Clientes com lojas incompletas</a>
+                    <a href="/relatorio-clientes-lojas" target="_blank" title="Baixar relatório em Excel com resumo executivo e lista detalhada de clientes e lojas">📊 Relatório Clientes & Lojas (.xlsx)</a>
                 </div>
             </details>
             {% if session.get('logged_in') %}
@@ -1803,9 +1823,13 @@ HTML_LAYOUT = """
                     {% if tem_permissao('perm_servidores') %}
                         <a href="/admin/importar-lojas">Importar lojas</a>
                         <a href="/admin/atualizar-lojas-info">Atualizar CodInfo / Situação</a>
+                        <button type="button" onclick="marcarSemCnpjIgnorados()">Ignorar lojas sem CNPJ</button>
+                        <a href="/relatorio-clientes-lojas" target="_blank">📊 Relatório Clientes & Lojas (.xlsx)</a>
                     {% else %}
                         <button type="button" onclick="return avisarSemPermissao('Importação de Lojas')">Importar lojas</button>
                         <button type="button" onclick="return avisarSemPermissao('Atualização de Lojas')">Atualizar CodInfo / Situação</button>
+                        <button type="button" onclick="return avisarSemPermissao('Editar Lojas')">Ignorar lojas sem CNPJ</button>
+                        <a href="/relatorio-clientes-lojas" target="_blank">📊 Relatório Clientes & Lojas (.xlsx)</a>
                     {% endif %}
                     <a href="http://{{ request.host.split(':')[0] }}:8501" target="_blank" rel="noopener noreferrer">🎧 Transcritor Call Center</a>
                 </div>
@@ -1847,7 +1871,19 @@ HTML_LAYOUT = """
             {% elif filtro_status == 'sem_lojas' %}
                 <h3>Databases em: <span class="text-primary">{{ 'TODOS OS SERVIDORES' if modo_todos else servidor_atual }}</span> <span class="badge bg-warning text-dark" style="font-size:0.65em; vertical-align: middle;">📭 Sem lojas cadastradas</span> <a href="{% if modo_todos %}/todos{% else %}/servidor/{{ servidor_atual }}{% endif %}{% if busca_termo %}?busca={{ busca_termo }}{% endif %}" class="btn-clear" style="display:inline-flex; font-size:0.5em; vertical-align: middle; margin-left: 8px;">✖ Limpar Filtro</a></h3>
             {% elif filtro_status == 'lojas_incompletas' %}
-                <h3>Databases em: <span class="text-primary">{{ 'TODOS OS SERVIDORES' if modo_todos else servidor_atual }}</span> <span class="badge border" style="font-size:0.65em; vertical-align: middle; background: var(--cor-card); color: var(--cor-texto);">⚠️ Lojas com dados incompletos</span> <a href="{% if modo_todos %}/todos{% else %}/servidor/{{ servidor_atual }}{% endif %}{% if busca_termo %}?busca={{ busca_termo }}{% endif %}" class="btn-clear" style="display:inline-flex; font-size:0.5em; vertical-align: middle; margin-left: 8px;">✖ Limpar Filtro</a></h3>
+                <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+                    <h3 style="margin:0;">Databases em: <span class="text-primary">{{ 'TODOS OS SERVIDORES' if modo_todos else servidor_atual }}</span> <span class="badge border" style="font-size:0.65em; vertical-align: middle; background: var(--cor-card); color: var(--cor-texto);">⚠️ Lojas com dados incompletos</span> <a href="{% if modo_todos %}/todos{% else %}/servidor/{{ servidor_atual }}{% endif %}{% if busca_termo %}?busca={{ busca_termo }}{% endif %}" class="btn-clear" style="display:inline-flex; font-size:0.5em; vertical-align: middle; margin-left: 8px;">✖ Limpar Filtro</a></h3>
+                    <div style="display:inline-flex; gap:8px; align-items:center;">
+                        {% if session.get('logged_in') and tem_permissao('perm_servidores') %}
+                        <button type="button" onclick="marcarSemCnpjIgnorados()" class="btn btn-sm" style="font-size:0.8em; padding:5px 10px; border:1px solid var(--cor-borda); background:var(--cor-superficie); color:var(--cor-texto); cursor:pointer;" title="Marcar todas as lojas sem CNPJ como ignoradas">
+                            🚫 Ignorar lojas sem CNPJ
+                        </button>
+                        {% endif %}
+                        <a href="/relatorio-clientes-lojas" class="btn btn-sm" style="font-size:0.8em; padding:5px 10px; border:1px solid var(--cor-borda); background:var(--cor-superficie); color:var(--cor-texto); text-decoration:none;" title="Baixar relatório completo em Excel">
+                            📊 Baixar Relatório (.xlsx)
+                        </a>
+                    </div>
+                </div>
             {% elif busca_termo %}
                 <h3>🔍 Busca por: <span class="text-success">"{{ busca_termo }}"</span> em todos os servidores</h3>
             {% elif modo_inativos %}
@@ -2389,6 +2425,25 @@ HTML_LAYOUT = """
                 }
             })
             .catch(() => alert('Não foi possível excluir. Verifique sua conexão.'));
+        }
+
+        function marcarSemCnpjIgnorados() {
+            if (!confirm('Deseja marcar como IGNORADOS todos os lançamentos de lojas sem CNPJ cadastrado?')) return;
+            csrfFetch('/admin/lojas/ignorar-sem-cnpj', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.sucesso) {
+                    alert(data.mensagem || 'Lojas atualizadas com sucesso!');
+                    location.reload();
+                } else {
+                    alert('Erro: ' + (data.mensagem || 'tente novamente.'));
+                }
+            })
+            .catch(() => alert('Não foi possível concluir a ação. Verifique sua conexão.'));
         }
 
         // --- Edição inline da string de conexão (CNAME) ---
@@ -4755,6 +4810,25 @@ def excluir_cliente_loja():
     return jsonify({"sucesso": True})
 
 
+@bancos_bp.route('/admin/lojas/ignorar-sem-cnpj', methods=['POST'])
+def rota_ignorar_lojas_sem_cnpj():
+    if not session.get('logged_in'):
+        return jsonify({"sucesso": False, "mensagem": "Sessão expirada. Faça login novamente."}), 401
+    if not tem_permissao('perm_servidores'):
+        return jsonify({"sucesso": False, "mensagem": "Você não tem permissão para esta ação."}), 403
+
+    total = marcar_lojas_sem_cnpj_como_ignoradas()
+    registrar_acao_admin('ignorar_lojas_sem_cnpj', {
+        'total_marcadas': total,
+        'usuario': session.get('username') or session.get('user_nome')
+    })
+    return jsonify({
+        "sucesso": True,
+        "mensagem": f"{total} loja(s) sem CNPJ marcada(s) como ignorada(s) com sucesso.",
+        "total": total
+    })
+
+
 # --- IMPORTAÇÃO EM LOTE DE LOJAS VIA PLANILHA .XLSX ---
 COLUNAS_IMPORTACAO_XLSX = ['Servidor', 'Host', 'Porta', 'Alias', 'CNAME', 'LOJ_CODIGO', 'LOJ_FANTASIA', 'LOJ_NOME', 'LOJ_CNPJ']
 
@@ -5406,6 +5480,446 @@ def modelo_atualizar_lojas_info():
     buffer.seek(0)
     return send_file(
         buffer, as_attachment=True, download_name='modelo_atualizacao_codinfo_situacao.xlsx',
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+
+
+# --- RELATÓRIO CONSOLIDADO DE CLIENTES E LOJAS HOSPEDADAS (.XLSX) ---
+def gerar_planilha_relatorio_clientes_lojas(usuario_nome=None):
+    """Gera um documento Excel (.xlsx) contendo:
+    - Aba 1: Resumo Executivo com indicadores de clientes, lojas, CNPJs e distribuição por servidor.
+    - Aba 2: Detalhamento completo de todos os clientes e suas respectivas lojas com auto-filtro.
+    """
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    from io import BytesIO
+
+    bancos_ativos, _, _ = buscar_em_todos_servidores(buscar_inativos=False, forcar_atualizacao=False)
+    bancos_inativos, _, _ = buscar_em_todos_servidores(buscar_inativos=True, forcar_atualizacao=False)
+    lojas_por_alias = carregar_lojas_clientes()
+    bancos_ativos = aplicar_cnames_customizados(bancos_ativos)
+    bancos_ativos = aplicar_lojas_clientes(bancos_ativos, cache_lojas=lojas_por_alias)
+    bancos_inativos = aplicar_lojas_clientes(bancos_inativos, cache_lojas=lojas_por_alias)
+
+    total_clientes_ativos = len(bancos_ativos)
+    total_clientes_inativos = len(bancos_inativos)
+    total_clientes_geral = total_clientes_ativos + total_clientes_inativos
+
+    clientes_sem_lojas = 0
+    clientes_ok = 0
+    clientes_incompletos = 0
+    clientes_ignorados = 0
+
+    for b in bancos_ativos:
+        lojas = b.get('lojas', [])
+        if not lojas:
+            clientes_sem_lojas += 1
+            b['status_relatorio'] = 'Sem Lojas'
+        elif b.get('tem_lojas_incompletas'):
+            clientes_incompletos += 1
+            b['status_relatorio'] = 'Lojas Incompletas'
+        elif any(l.get('ignorar_incompleto') in (1, '1', True) for l in lojas):
+            clientes_ignorados += 1
+            b['status_relatorio'] = 'Lojas Ignoradas'
+        else:
+            clientes_ok += 1
+            b['status_relatorio'] = 'Cadastro OK'
+
+    for b in bancos_inativos:
+        b['status_relatorio'] = 'Inativo'
+
+    conn = get_db_connection()
+    todas_lojas = [dict(r) for r in conn.execute("SELECT * FROM clientes_lojas ORDER BY alias, loj_codigo").fetchall()]
+    conn.close()
+
+    total_lojas = len(todas_lojas)
+    lojas_com_cnpj = sum(1 for l in todas_lojas if (l.get('loj_cnpj') or '').strip() and (l.get('loj_cnpj') or '').strip() != '-')
+    lojas_sem_cnpj = total_lojas - lojas_com_cnpj
+    cnpjs_unicos = len(set(
+        (l.get('loj_cnpj') or '').strip() for l in todas_lojas
+        if (l.get('loj_cnpj') or '').strip() and (l.get('loj_cnpj') or '').strip() != '-'
+    ))
+    lojas_ignoradas = sum(1 for l in todas_lojas if l.get('ignorar_incompleto') in (1, '1', True))
+    lojas_incompletas = sum(1 for l in todas_lojas if loja_incompleta(l))
+    lojas_completas = sum(1 for l in todas_lojas if not loja_incompleta(l) and not l.get('ignorar_incompleto'))
+
+    por_servidor = {}
+    for b in bancos_ativos:
+        srv = b.get('servidor') or 'Desconhecido'
+        if srv not in por_servidor:
+            por_servidor[srv] = {
+                'servidor': srv,
+                'total_clientes': 0,
+                'clientes_ok': 0,
+                'clientes_incompletos': 0,
+                'clientes_ignorados': 0,
+                'clientes_sem_loja': 0,
+                'bytes': 0
+            }
+        info_srv = por_servidor[srv]
+        info_srv['total_clientes'] += 1
+        info_srv['bytes'] += b.get('tamanho_bytes', 0)
+        st = b.get('status_relatorio')
+        if st == 'Cadastro OK':
+            info_srv['clientes_ok'] += 1
+        elif st == 'Lojas Incompletas':
+            info_srv['clientes_incompletos'] += 1
+        elif st == 'Lojas Ignoradas':
+            info_srv['clientes_ignorados'] += 1
+        elif st == 'Sem Lojas':
+            info_srv['clientes_sem_loja'] += 1
+
+    wb = openpyxl.Workbook()
+
+    fonte_titulo = Font(name='Segoe UI', size=13, bold=True, color='FFFFFF')
+    fonte_secao = Font(name='Segoe UI', size=11, bold=True, color='1F4E79')
+    fonte_cabecalho = Font(name='Segoe UI', size=10, bold=True, color='FFFFFF')
+    fonte_dados = Font(name='Segoe UI', size=10, color='1E293B')
+    fonte_dados_bold = Font(name='Segoe UI', size=10, bold=True, color='1E293B')
+    fonte_subtitulo = Font(name='Segoe UI', size=9, italic=True, color='64748B')
+
+    fill_topo = PatternFill(start_color='1F4E79', end_color='1F4E79', fill_type='solid')
+    fill_secao = PatternFill(start_color='D9E1F2', end_color='D9E1F2', fill_type='solid')
+    fill_cabecalho = PatternFill(start_color='2563EB', end_color='2563EB', fill_type='solid')
+    fill_zebra = PatternFill(start_color='F8FAFC', end_color='F8FAFC', fill_type='solid')
+    fill_total = PatternFill(start_color='E2E8F0', end_color='E2E8F0', fill_type='solid')
+
+    borda_fina = Border(
+        left=Side(style='thin', color='CBD5E1'),
+        right=Side(style='thin', color='CBD5E1'),
+        top=Side(style='thin', color='CBD5E1'),
+        bottom=Side(style='thin', color='CBD5E1')
+    )
+
+    alinhamento_centro = Alignment(horizontal='center', vertical='center')
+    alinhamento_esquerda = Alignment(horizontal='left', vertical='center')
+
+    # =========================================================================
+    # ABA 1: RESUMO EXECUTIVO
+    # =========================================================================
+    ws_resumo = wb.active
+    ws_resumo.title = "Resumo Executivo"
+    ws_resumo.views.sheetView[0].showGridLines = True
+
+    ws_resumo.merge_cells('A1:E1')
+    c_titulo = ws_resumo['A1']
+    c_titulo.value = "RELATÓRIO CONSOLIDADO - CLIENTES E LOJAS HOSPEDADAS"
+    c_titulo.font = fonte_titulo
+    c_titulo.fill = fill_topo
+    c_titulo.alignment = Alignment(horizontal='left', vertical='center', indent=1)
+    ws_resumo.row_dimensions[1].height = 32
+
+    ws_resumo.merge_cells('A2:E2')
+    c_sub = ws_resumo['A2']
+    gerado_por = f"Gerado por: {usuario_nome} | " if usuario_nome else ""
+    c_sub.value = f"{gerado_por}Gerado em: {datetime.now().strftime('%d/%m/%Y às %H:%M')} | Sistema InfoMonitor"
+    c_sub.font = fonte_subtitulo
+    c_sub.alignment = Alignment(horizontal='left', vertical='center', indent=1)
+    ws_resumo.row_dimensions[2].height = 20
+
+    pct = lambda n, d: f"{(n / d * 100):.1f}%" if d > 0 else "0.0%"
+
+    # 1. Indicadores de Clientes
+    ws_resumo.merge_cells('A4:E4')
+    c_sec1 = ws_resumo['A4']
+    c_sec1.value = "1. INDICADORES DE CLIENTES HOSPEDADOS"
+    c_sec1.font = fonte_secao
+    c_sec1.fill = fill_secao
+    ws_resumo.row_dimensions[4].height = 24
+
+    cab_cli = ["Métrica", "Quantidade", "% s/ Ativos", "Situação / Conceito", "Ação Recomendada"]
+    for col_idx, texto in enumerate(cab_cli, 1):
+        cell = ws_resumo.cell(row=5, column=col_idx, value=texto)
+        cell.font = fonte_cabecalho
+        cell.fill = fill_cabecalho
+        cell.alignment = alinhamento_centro if col_idx in (2, 3) else alinhamento_esquerda
+        cell.border = borda_fina
+    ws_resumo.row_dimensions[5].height = 22
+
+    linhas_kpi_cli = [
+        ("Clientes c/ Cadastro 100% OK", clientes_ok, pct(clientes_ok, total_clientes_ativos), "Todas as lojas preenchidas e regulares", "Manter atualizado"),
+        ("Clientes c/ Lojas Incompletas", clientes_incompletos, pct(clientes_incompletos, total_clientes_ativos), "Falta CodInfo ou Situação em loja(s)", "Preencher via site ou importar planilha"),
+        ("Clientes c/ Lojas Ignoradas", clientes_ignorados, pct(clientes_ignorados, total_clientes_ativos), "Lojas sem pendências ativas (ignoradas)", "Revisar periodicamente"),
+        ("Clientes Sem Lojas Cadastradas", clientes_sem_lojas, pct(clientes_sem_lojas, total_clientes_ativos), "Nenhuma loja vinculada ao alias", "Cadastrar lojas ou importar planilha"),
+        ("Total de Clientes Ativos Hospedados", total_clientes_ativos, "100.0%", "Bases ativas nos servidores monitorados", "-"),
+        ("Total de Clientes Inativados (#)", total_clientes_inativos, "-", "Bancos com prefixo # no databases.conf", "-"),
+        ("Total Geral de Bases Registradas", total_clientes_geral, "-", "Soma de ativos e inativos", "-"),
+    ]
+
+    for idx, (metrica, qtd, p, desc, acao) in enumerate(linhas_kpi_cli, 6):
+        ws_resumo.cell(row=idx, column=1, value=metrica).font = fonte_dados_bold if "Total" in metrica else fonte_dados
+        ws_resumo.cell(row=idx, column=2, value=qtd).font = fonte_dados_bold if "Total" in metrica else fonte_dados
+        ws_resumo.cell(row=idx, column=3, value=p).font = fonte_dados
+        ws_resumo.cell(row=idx, column=4, value=desc).font = fonte_dados
+        ws_resumo.cell(row=idx, column=5, value=acao).font = fonte_dados
+
+        for c in range(1, 6):
+            cell = ws_resumo.cell(row=idx, column=c)
+            cell.border = borda_fina
+            if "Total" in metrica:
+                cell.fill = fill_total
+            elif idx % 2 == 1:
+                cell.fill = fill_zebra
+            if c in (2, 3):
+                cell.alignment = alinhamento_centro
+        ws_resumo.row_dimensions[idx].height = 20
+
+    # 2. Indicadores de Lojas e CNPJs
+    linha_atual = len(linhas_kpi_cli) + 8
+    ws_resumo.merge_cells(f'A{linha_atual}:E{linha_atual}')
+    c_sec2 = ws_resumo[f'A{linha_atual}']
+    c_sec2.value = "2. INDICADORES DE LOJAS E CNPJS"
+    c_sec2.font = fonte_secao
+    c_sec2.fill = fill_secao
+    ws_resumo.row_dimensions[linha_atual].height = 24
+
+    linha_atual += 1
+    cab_loj = ["Métrica", "Quantidade", "% s/ Total Lojas", "Detalhe / Critério", "Status"]
+    for col_idx, texto in enumerate(cab_loj, 1):
+        cell = ws_resumo.cell(row=linha_atual, column=col_idx, value=texto)
+        cell.font = fonte_cabecalho
+        cell.fill = fill_cabecalho
+        cell.alignment = alinhamento_centro if col_idx in (2, 3) else alinhamento_esquerda
+        cell.border = borda_fina
+    ws_resumo.row_dimensions[linha_atual].height = 22
+
+    linhas_kpi_loj = [
+        ("Total de Lojas Cadastradas", total_lojas, "100.0%", "Registros na tabela clientes_lojas", "Consolidado"),
+        ("Lojas com Cadastro Completo (OK)", lojas_completas, pct(lojas_completas, total_lojas), "CodInfo, LojCód e Situação preenchidos", "Regular"),
+        ("Lojas com Pendências (Incompletas)", lojas_incompletas, pct(lojas_incompletas, total_lojas), "Faltando CodInfo, Situação ou LojCód", "Atenção"),
+        ("Lojas Marcadas como Ignoradas", lojas_ignoradas, pct(lojas_ignoradas, total_lojas), "Desconsideradas de alertas de pendência", "Ignorada"),
+        ("Lojas com CNPJ Preenchido", lojas_com_cnpj, pct(lojas_com_cnpj, total_lojas), "Possuem CNPJ informado", "Identificadas"),
+        ("Lojas sem CNPJ (Identificadas)", lojas_sem_cnpj, pct(lojas_sem_cnpj, total_lojas), "Não possuem CNPJ cadastrado", "Sem CNPJ"),
+        ("Total de CNPJs Únicos Distintos", cnpjs_unicos, "-", "CNPJs únicos distintos no cadastro", "Empresas distintas"),
+    ]
+
+    for item in linhas_kpi_loj:
+        linha_atual += 1
+        metrica, qtd, p, desc, acao = item
+        ws_resumo.cell(row=linha_atual, column=1, value=metrica).font = fonte_dados_bold if "Total" in metrica else fonte_dados
+        ws_resumo.cell(row=linha_atual, column=2, value=qtd).font = fonte_dados_bold if "Total" in metrica else fonte_dados
+        ws_resumo.cell(row=linha_atual, column=3, value=p).font = fonte_dados
+        ws_resumo.cell(row=linha_atual, column=4, value=desc).font = fonte_dados
+        ws_resumo.cell(row=linha_atual, column=5, value=acao).font = fonte_dados
+
+        for c in range(1, 6):
+            cell = ws_resumo.cell(row=linha_atual, column=c)
+            cell.border = borda_fina
+            if "Total" in metrica:
+                cell.fill = fill_total
+            elif linha_atual % 2 == 1:
+                cell.fill = fill_zebra
+            if c in (2, 3):
+                cell.alignment = alinhamento_centro
+        ws_resumo.row_dimensions[linha_atual].height = 20
+
+    # 3. Distribuição por Servidor
+    if por_servidor:
+        linha_atual += 3
+        ws_resumo.merge_cells(f'A{linha_atual}:G{linha_atual}')
+        c_sec3 = ws_resumo[f'A{linha_atual}']
+        c_sec3.value = "3. DISTRIBUIÇÃO POR SERVIDOR HOSPEDADO"
+        c_sec3.font = fonte_secao
+        c_sec3.fill = fill_secao
+        ws_resumo.row_dimensions[linha_atual].height = 24
+
+        linha_atual += 1
+        cab_srv = ["Servidor", "Total Clientes", "Clientes OK", "Incompletos", "Ignorados", "Sem Lojas", "Espaço Ocupado"]
+        for col_idx, texto in enumerate(cab_srv, 1):
+            cell = ws_resumo.cell(row=linha_atual, column=col_idx, value=texto)
+            cell.font = fonte_cabecalho
+            cell.fill = fill_cabecalho
+            cell.alignment = alinhamento_centro if col_idx > 1 else alinhamento_esquerda
+            cell.border = borda_fina
+        ws_resumo.row_dimensions[linha_atual].height = 22
+
+        for srv_nome, srv_data in sorted(por_servidor.items()):
+            linha_atual += 1
+            tam_str = formatar_tamanho(srv_data['bytes'])
+            dados_srv = [
+                srv_nome,
+                srv_data['total_clientes'],
+                srv_data['clientes_ok'],
+                srv_data['clientes_incompletos'],
+                srv_data['clientes_ignorados'],
+                srv_data['clientes_sem_loja'],
+                tam_str
+            ]
+            for c_idx, val in enumerate(dados_srv, 1):
+                cell = ws_resumo.cell(row=linha_atual, column=c_idx, value=val)
+                cell.font = fonte_dados
+                cell.border = borda_fina
+                if c_idx > 1:
+                    cell.alignment = alinhamento_centro
+                if linha_atual % 2 == 1:
+                    cell.fill = fill_zebra
+            ws_resumo.row_dimensions[linha_atual].height = 20
+
+    # Ajuste de largura das colunas no resumo
+    for col in ws_resumo.columns:
+        col_letter = get_column_letter(col[0].column)
+        max_len = 0
+        for cell in col:
+            if cell.coordinate in ['A1', 'A2', 'A4']:
+                continue
+            val = str(cell.value or '')
+            if len(val) > max_len:
+                max_len = len(val)
+        ws_resumo.column_dimensions[col_letter].width = max(max_len + 4, 15)
+
+    # =========================================================================
+    # ABA 2: CLIENTES E LOJAS DETALHADO
+    # =========================================================================
+    ws_detalhe = wb.create_sheet(title="Clientes e Lojas")
+    ws_detalhe.views.sheetView[0].showGridLines = True
+
+    cab_detalhe = [
+        "Servidor", "Alias (Cliente)", "Status Banco", "Tamanho", "Último Acesso", "Data Criação",
+        "Situação Cliente", "CodInfo", "LojCód.", "Nome Fantasia", "Razão Social", "CNPJ", "Situação Loja",
+        "Status Loja", "Ignorada?", "Detalhes da Pendência", "String CNAME"
+    ]
+
+    for col_idx, texto in enumerate(cab_detalhe, 1):
+        cell = ws_detalhe.cell(row=1, column=col_idx, value=texto)
+        cell.font = fonte_cabecalho
+        cell.fill = fill_topo
+        cell.alignment = alinhamento_centro if col_idx in (1, 3, 7, 8, 9, 12, 13, 14, 15) else alinhamento_esquerda
+        cell.border = borda_fina
+    ws_detalhe.row_dimensions[1].height = 25
+
+    linha_det = 1
+    todos_bancos = bancos_ativos + bancos_inativos
+    for b in todos_bancos:
+        lojas = b.get('lojas', [])
+        alias = b.get('alias', '')
+        servidor = b.get('servidor', '')
+        status_banco = 'Inativo' if b.get('eh_inativo') else 'Ativo'
+        tamanho = b.get('tamanho_str', '')
+        ultimo_acesso = b.get('data_str', '')
+        data_criacao = b.get('data_criacao', '')
+        status_cliente = b.get('status_relatorio', '')
+        cname = b.get('cname_string', '')
+
+        if not lojas:
+            linha_det += 1
+            dados_linha = [
+                servidor, alias, status_banco, tamanho, ultimo_acesso, data_criacao,
+                status_cliente, "-", "-", "-", "-", "-", "-",
+                "Sem Loja Cadastrada", "Não", "Nenhuma loja vinculada a este alias", cname
+            ]
+            for col_idx, valor in enumerate(dados_linha, 1):
+                cell = ws_detalhe.cell(row=linha_det, column=col_idx, value=valor)
+                cell.font = fonte_dados
+                cell.border = borda_fina
+                if col_idx in (1, 3, 7, 8, 9, 12, 13, 14, 15):
+                    cell.alignment = alinhamento_centro
+            ws_detalhe.row_dimensions[linha_det].height = 19
+        else:
+            for l in lojas:
+                linha_det += 1
+                cod_info = l.get('cod_info') or '-'
+                loj_codigo = l.get('loj_codigo') or '-'
+                fantasia = l.get('loj_fantasia') or '-'
+                razao = l.get('loj_nome') or '-'
+                cnpj = l.get('loj_cnpj') or '-'
+                situacao = l.get('cli_situacao') or '-'
+                eh_ignorado = l.get('ignorar_incompleto') in (1, '1', True)
+                texto_ignorado = "Sim" if eh_ignorado else "Não"
+
+                if eh_ignorado:
+                    status_loja = "Ignorada"
+                    detalhe_loja = "Marcada para ignorar pendências"
+                elif loja_incompleta(l):
+                    status_loja = "Incompleta"
+                    faltantes = []
+                    if not (l.get('cod_info') or '').strip(): faltantes.append('CodInfo')
+                    if not (l.get('cli_situacao') or '').strip(): faltantes.append('Situação')
+                    if not (l.get('loj_codigo') or '').strip(): faltantes.append('LojCód.')
+                    if not (l.get('loj_cnpj') or '').strip() or (l.get('loj_cnpj') or '').strip() == '-': faltantes.append('Sem CNPJ')
+                    detalhe_loja = "Pendente: " + ", ".join(faltantes)
+                else:
+                    status_loja = "Completa"
+                    detalhe_loja = "Cadastro completo"
+
+                dados_linha = [
+                    servidor, alias, status_banco, tamanho, ultimo_acesso, data_criacao,
+                    status_cliente, cod_info, loj_codigo, fantasia, razao, cnpj, situacao,
+                    status_loja, texto_ignorado, detalhe_loja, cname
+                ]
+                for col_idx, valor in enumerate(dados_linha, 1):
+                    cell = ws_detalhe.cell(row=linha_det, column=col_idx, value=valor)
+                    cell.font = fonte_dados
+                    cell.border = borda_fina
+                    if col_idx in (1, 3, 7, 8, 9, 12, 13, 14, 15):
+                        cell.alignment = alinhamento_centro
+                ws_detalhe.row_dimensions[linha_det].height = 19
+
+    # Inclui lojas cadastradas que não estejam em nenhum alias ativo/inativo
+    aliases_mapeados = set(b.get('alias', '').strip().lower() for b in todos_bancos)
+    for l in todas_lojas:
+        alias_loja = (l.get('alias') or '').strip()
+        if alias_loja.lower() not in aliases_mapeados:
+            linha_det += 1
+            cod_info = l.get('cod_info') or '-'
+            loj_codigo = l.get('loj_codigo') or '-'
+            fantasia = l.get('loj_fantasia') or '-'
+            razao = l.get('loj_nome') or '-'
+            cnpj = l.get('loj_cnpj') or '-'
+            situacao = l.get('cli_situacao') or '-'
+            eh_ignorado = l.get('ignorar_incompleto') in (1, '1', True)
+            texto_ignorado = "Sim" if eh_ignorado else "Não"
+            status_loja = "Ignorada" if eh_ignorado else ("Incompleta" if loja_incompleta(l) else "Completa")
+            dados_linha = [
+                "-", alias_loja, "Sem banco no servidor", "-", "-", "-",
+                "Desconhecido", cod_info, loj_codigo, fantasia, razao, cnpj, situacao,
+                status_loja, texto_ignorado, "Loja cadastrada sem banco correspondente nos servidores", "-"
+            ]
+            for col_idx, valor in enumerate(dados_linha, 1):
+                cell = ws_detalhe.cell(row=linha_det, column=col_idx, value=valor)
+                cell.font = fonte_dados
+                cell.border = borda_fina
+                if col_idx in (1, 3, 7, 8, 9, 12, 13, 14, 15):
+                    cell.alignment = alinhamento_centro
+            ws_detalhe.row_dimensions[linha_det].height = 19
+
+    max_col_letra = get_column_letter(len(cab_detalhe))
+    ws_detalhe.auto_filter.ref = f"A1:{max_col_letra}{linha_det}"
+
+    for col in ws_detalhe.columns:
+        col_letter = get_column_letter(col[0].column)
+        max_len = 0
+        for cell in col:
+            val = str(cell.value or '')
+            if len(val) > max_len:
+                max_len = len(val)
+        ws_detalhe.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 40)
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+@bancos_bp.route('/relatorio-clientes-lojas')
+def rota_relatorio_clientes_lojas():
+    try:
+        from flask import send_file
+    except ImportError:
+        return "Erro: Flask send_file indisponível", 500
+
+    usuario_nome = session.get('user_nome')
+    try:
+        buffer = gerar_planilha_relatorio_clientes_lojas(usuario_nome=usuario_nome)
+    except Exception as e:
+        LOGGER.exception("Erro ao gerar relatório consolidado de clientes e lojas: %s", e)
+        return f"Não foi possível gerar a planilha no momento: {e}", 500
+
+    nome_arquivo = f"relatorio_clientes_lojas_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+    return send_file(
+        buffer,
+        as_attachment=True,
+        download_name=nome_arquivo,
         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     )
 

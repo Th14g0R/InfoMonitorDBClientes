@@ -901,6 +901,102 @@ O cliente loja-critica esta a mais de 1 dia sem bkp - status ERRO 2026-10-09 10:
         with closing(self.bancos.get_db_connection()) as conn, conn:
             conn.execute("DELETE FROM clientes_lojas WHERE alias = 'teste_ignorar_alias'")
 
+    def test_marcar_lojas_sem_cnpj_e_relatorio_clientes_lojas(self):
+        # 1. Teste da função marcar_lojas_sem_cnpj_como_ignoradas()
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            conn.execute("DELETE FROM clientes_lojas WHERE alias LIKE 'teste_marcar_%'")
+            conn.execute(
+                "INSERT INTO clientes_lojas (alias, loj_codigo, loj_fantasia, loj_nome, loj_cnpj, cod_info, cli_situacao, ignorar_incompleto) "
+                "VALUES ('teste_marcar_1', '1', 'F1', 'N1', '', '', '', 0)"
+            )
+            conn.execute(
+                "INSERT INTO clientes_lojas (alias, loj_codigo, loj_fantasia, loj_nome, loj_cnpj, cod_info, cli_situacao, ignorar_incompleto) "
+                "VALUES ('teste_marcar_2', '2', 'F2', 'N2', '   ', '', '', 0)"
+            )
+            conn.execute(
+                "INSERT INTO clientes_lojas (alias, loj_codigo, loj_fantasia, loj_nome, loj_cnpj, cod_info, cli_situacao, ignorar_incompleto) "
+                "VALUES ('teste_marcar_3', '3', 'F3', 'N3', '-', '', '', 0)"
+            )
+            conn.execute(
+                "INSERT INTO clientes_lojas (alias, loj_codigo, loj_fantasia, loj_nome, loj_cnpj, cod_info, cli_situacao, ignorar_incompleto) "
+                "VALUES ('teste_marcar_4', '4', 'F4', 'N4', '12345678000199', '', '', 0)"
+            )
+
+        afetadas = self.bancos.marcar_lojas_sem_cnpj_como_ignoradas()
+        self.assertGreaterEqual(afetadas, 3)
+
+        with closing(self.bancos.get_db_connection()) as conn:
+            r1 = conn.execute("SELECT ignorar_incompleto FROM clientes_lojas WHERE alias = 'teste_marcar_1'").fetchone()
+            r2 = conn.execute("SELECT ignorar_incompleto FROM clientes_lojas WHERE alias = 'teste_marcar_2'").fetchone()
+            r3 = conn.execute("SELECT ignorar_incompleto FROM clientes_lojas WHERE alias = 'teste_marcar_3'").fetchone()
+            r4 = conn.execute("SELECT ignorar_incompleto FROM clientes_lojas WHERE alias = 'teste_marcar_4'").fetchone()
+            self.assertEqual(r1['ignorar_incompleto'], 1)
+            self.assertEqual(r2['ignorar_incompleto'], 1)
+            self.assertEqual(r3['ignorar_incompleto'], 1)
+            self.assertEqual(r4['ignorar_incompleto'], 0)
+
+        # 2. Teste da rota POST /admin/lojas/ignorar-sem-cnpj
+        visitante = self.app.test_client()
+        visitante.get('/admin/login')
+        with visitante.session_transaction() as s:
+            vis_token = s['_csrf_token']
+        resp_unauth = visitante.post('/admin/lojas/ignorar-sem-cnpj', json={}, headers={'X-CSRF-Token': vis_token})
+        self.assertEqual(resp_unauth.status_code, 401)
+
+        # Usuário sem permissão
+        usuario_sem_perm = self.app.test_client()
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            user_sem_perm_id = conn.execute(
+                'INSERT INTO usuarios (nome, email, senha_hash, eh_master, ativo, perm_servidores) VALUES (?, ?, ?, 0, 1, 0)',
+                ('Sem Perm', 'semperm@example.invalid', generate_password_hash(self.password)),
+            ).lastrowid
+        usuario_sem_perm.get('/admin/login')
+        with usuario_sem_perm.session_transaction() as s:
+            s_token = s['_csrf_token']
+            s.update(logged_in=True, user_id=user_sem_perm_id, eh_master=False, perm_servidores=0)
+
+        resp_proibido = usuario_sem_perm.post('/admin/lojas/ignorar-sem-cnpj', json={}, headers={'X-CSRF-Token': s_token})
+        self.assertEqual(resp_proibido.status_code, 403)
+
+        # Com permissão (self.client é master)
+        resp_ok = self.client.post('/admin/lojas/ignorar-sem-cnpj', json={}, headers={'X-CSRF-Token': self.token})
+        self.assertEqual(resp_ok.status_code, 200)
+        dados_json = resp_ok.get_json()
+        self.assertTrue(dados_json['sucesso'])
+        self.assertIn('total', dados_json)
+
+        # Limpeza
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            conn.execute("DELETE FROM clientes_lojas WHERE alias LIKE 'teste_marcar_%'")
+            conn.execute("DELETE FROM usuarios WHERE id = ?", (user_sem_perm_id,))
+
+        # 3. Teste da rota GET /relatorio-clientes-lojas
+        with patch.object(self.bancos, 'buscar_em_todos_servidores', return_value=([
+            {'servidor': 'DB01', 'alias': 'cli_rel_1', 'arquivo_existe': True, 'tamanho_bytes': 1048576, 'tamanho_str': '1.0 MB', 'timestamp': 100, 'data_str': '01/01/2026', 'data_criacao': '01/01/2026', 'cname_string': 'cname1', 'status_inatividade': {'status': 'ok'}},
+        ], 1048576, [])):
+            resp_relatorio = self.client.get('/relatorio-clientes-lojas')
+            self.assertEqual(resp_relatorio.status_code, 200)
+            self.assertEqual(
+                resp_relatorio.content_type,
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            self.assertIn('attachment; filename=relatorio_clientes_lojas_', resp_relatorio.headers.get('Content-Disposition', ''))
+
+            # Validação do arquivo Excel retornado
+            import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(resp_relatorio.data))
+            self.assertIn("Resumo Executivo", wb.sheetnames)
+            self.assertIn("Clientes e Lojas", wb.sheetnames)
+
+            ws_resumo = wb["Resumo Executivo"]
+            self.assertIn("RELATÓRIO CONSOLIDADO", str(ws_resumo['A1'].value))
+            self.assertIn("INDICADORES DE CLIENTES", str(ws_resumo['A4'].value))
+
+            ws_detalhe = wb["Clientes e Lojas"]
+            self.assertEqual(ws_detalhe['A1'].value, "Servidor")
+            self.assertEqual(ws_detalhe['B1'].value, "Alias (Cliente)")
+
+
 
 
     def test_paths(self):
