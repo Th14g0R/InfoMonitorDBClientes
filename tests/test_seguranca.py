@@ -1862,6 +1862,34 @@ O cliente loja-critica esta a mais de 1 dia sem bkp - status ERRO 2026-10-09 10:
             self.assertTrue(resp_sync.get_json()['sucesso'])
             self.assertEqual(resp_sync.get_json()['atualizados'], 12)
 
+    def test_busca_cnpj_com_e_sem_caracteres(self):
+        from bancos import _banco_bate_busca
+        banco = {'alias': 'cliente1'}
+        lojas = {
+            'cliente1': [
+                {
+                    'loj_codigo': '1',
+                    'loj_fantasia': 'LOJA MATRIZ',
+                    'loj_nome': 'EMPRESA MATRIZ LTDA',
+                    'loj_cnpj': '09524393000189',
+                    'cod_info': '1265',
+                    'cli_situacao': 'A'
+                }
+            ]
+        }
+        # Busca com pontuação completa (caracteres)
+        self.assertTrue(_banco_bate_busca(banco, '09.524.393/0001-89', lojas))
+        # Busca somente números
+        self.assertTrue(_banco_bate_busca(banco, '09524393000189', lojas))
+        # Busca raiz com pontuação
+        self.assertTrue(_banco_bate_busca(banco, '09.524.393', lojas))
+        # Busca filial com traço
+        self.assertTrue(_banco_bate_busca(banco, '0001-89', lojas))
+        # Busca com texto e acento
+        self.assertTrue(_banco_bate_busca(banco, 'matriz', lojas))
+        # Termo inexistente
+        self.assertFalse(_banco_bate_busca(banco, '99.999.999/9999-99', lojas))
+
 
 if __name__ == '__main__':
     unittest.main()

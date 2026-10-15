@@ -1087,16 +1087,57 @@ def calcular_status_inatividade(timestamp_mod):
     else:
         return {'status': 'normal', 'dias': dias_sem_uso, 'texto_dias': 'Ativo'}
 
+def remover_acentos(texto):
+    """Remove acentos e converte para minúsculas para busca insensível a acentuação."""
+    if not texto:
+        return ''
+    return unicodedata.normalize('NFKD', str(texto)).encode('ascii', 'ignore').decode('utf-8').lower()
+
+
 def _banco_bate_busca(banco, termo, lojas_por_alias):
-    """Verifica se o termo de busca bate no alias OU em qualquer loja cadastrada (CodInfo/LojCód./Fantasia/Razão/CNPJ/Situação)."""
-    termo_lower = termo.lower()
-    if termo_lower in banco['alias'].lower():
+    """Verifica se o termo de busca bate no alias OU em qualquer loja cadastrada (CodInfo/LojCód./Fantasia/Razão/CNPJ/Situação).
+    Suporta busca por CNPJ com caracteres/pontuação (pesquisando somente os números), além de normalizar acentos.
+    """
+    if not termo:
         return True
-    lojas = lojas_por_alias.get(banco['alias'], [])
+
+    termo_str = str(termo).strip()
+    if not termo_str:
+        return True
+
+    termo_norm = remover_acentos(termo_str)
+    alias_norm = remover_acentos(banco.get('alias', ''))
+
+    if termo_norm in alias_norm:
+        return True
+
+    # Extrai somente dígitos do termo de busca para comparação de CNPJ/CPF/documentos
+    termo_digitos = re.sub(r'\D', '', termo_str)
+
+    # Identifica se a busca pode ser por CNPJ/documento numérico:
+    # 1. Termo composto apenas por dígitos e caracteres típicos de formatação (., /, -, espaços)
+    # 2. Ou possui 6 ou mais dígitos mesmo contendo texto (ex.: 'CNPJ 09.524.393/0001-89')
+    apenas_formato_doc = (re.sub(r'[\d\s./\-]', '', termo_str) == '')
+    busca_doc_numerico = (
+        (apenas_formato_doc and len(termo_digitos) >= 2) or
+        (len(termo_digitos) >= 6)
+    )
+
+    lojas = lojas_por_alias.get(banco.get('alias'), [])
     for loja in lojas:
-        valores = ' '.join(str(v) for v in loja.values() if v)
-        if termo_lower in valores.lower():
+        # 1. Busca textual padrão em todos os campos da loja (com acentos normalizados)
+        valores_texto = ' '.join(str(v) for v in loja.values() if v is not None)
+        valores_norm = remover_acentos(valores_texto)
+        if termo_norm in valores_norm:
             return True
+
+        # 2. Busca por CNPJ considerando SOMENTE os números (ignora pontuação/caracteres especiais)
+        if busca_doc_numerico:
+            cnpj_loja = str(loja.get('loj_cnpj') or '')
+            cnpj_digitos = re.sub(r'\D', '', cnpj_loja)
+            if cnpj_digitos and termo_digitos in cnpj_digitos:
+                return True
+
     return False
 
 def obter_dados_servidor_linux(nome_servidor, info_servidor, busca=None, buscar_inativos=False, modo_busca_unificada=False, varrer_orfaos=False, forcar_atualizacao=False):
@@ -1812,9 +1853,12 @@ HTML_LAYOUT = """
 
             <form action="" method="GET" class="search-box">
                 <input type="text" name="busca" class="search-input" placeholder="Pesquisar cliente (ativos e inativos)..." value="{{ busca_termo }}">
+                {% if filtro_status %}
+                    <input type="hidden" name="filtro" value="{{ filtro_status }}">
+                {% endif %}
                 <button type="submit" class="btn-search">🔍 Buscar</button>
                 {% if busca_termo or filtro_status %}
-                    <a href="{% if modo_inativos %}/inativos{% elif modo_todos %}/todos{% elif modo_orfaos %}/orfaos{% elif modo_historico %}/historico{% else %}/servidor/{{ servidor_atual }}{% endif %}" class="btn-clear">✖ Limpar</a>
+                    <a href="{% if modo_inativos %}/inativos{% elif modo_todos %}/todos{% elif modo_orfaos %}/orfaos{% elif modo_historico %}/historico{% else %}/servidor/{{ servidor_atual }}{% endif %}{% if filtro_status and busca_termo %}?filtro={{ filtro_status|urlencode }}{% endif %}" class="btn-clear" title="{% if busca_termo and filtro_status %}Limpar busca (manter filtro){% else %}Limpar busca e filtros{% endif %}">✖ Limpar</a>
                 {% endif %}
             </form>
         </div>
@@ -1901,10 +1945,10 @@ HTML_LAYOUT = """
             {% elif modo_orfaos %}
                 <h3>⚠️ Arquivos no diretório <span class="text-danger">../infobrasil/*</span> Não Listados no databases.conf</h3>
             {% elif filtro_status == 'sem_lojas' %}
-                <h3>Databases em: <span class="text-primary">{{ 'TODOS OS SERVIDORES' if modo_todos else servidor_atual }}</span> <span class="badge bg-warning text-dark" style="font-size:0.65em; vertical-align: middle;">📭 Sem lojas cadastradas</span> <a href="{% if modo_todos %}/todos{% else %}/servidor/{{ servidor_atual }}{% endif %}{% if busca_termo %}?busca={{ busca_termo }}{% endif %}" class="btn-clear" style="display:inline-flex; font-size:0.5em; vertical-align: middle; margin-left: 8px;">✖ Limpar Filtro</a></h3>
+                <h3>Databases em: <span class="text-primary">{{ 'TODOS OS SERVIDORES' if modo_todos else servidor_atual }}</span> <span class="badge bg-warning text-dark" style="font-size:0.65em; vertical-align: middle;">📭 Sem lojas cadastradas</span> {% if busca_termo %}<span class="badge bg-success text-white ms-1" style="font-size:0.65em; vertical-align: middle;">🔍 "{{ busca_termo }}"</span>{% endif %} <a href="{% if modo_todos %}/todos{% else %}/servidor/{{ servidor_atual }}{% endif %}{% if busca_termo %}?busca={{ busca_termo }}{% endif %}" class="btn-clear" style="display:inline-flex; font-size:0.5em; vertical-align: middle; margin-left: 8px;">✖ Limpar Filtro</a></h3>
             {% elif filtro_status == 'lojas_incompletas' %}
                 <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
-                    <h3 style="margin:0;">Databases em: <span class="text-primary">{{ 'TODOS OS SERVIDORES' if modo_todos else servidor_atual }}</span> <span class="badge border" style="font-size:0.65em; vertical-align: middle; background: var(--cor-card); color: var(--cor-texto);">⚠️ Lojas com dados incompletos</span> <a href="{% if modo_todos %}/todos{% else %}/servidor/{{ servidor_atual }}{% endif %}{% if busca_termo %}?busca={{ busca_termo }}{% endif %}" class="btn-clear" style="display:inline-flex; font-size:0.5em; vertical-align: middle; margin-left: 8px;">✖ Limpar Filtro</a></h3>
+                    <h3 style="margin:0;">Databases em: <span class="text-primary">{{ 'TODOS OS SERVIDORES' if modo_todos else servidor_atual }}</span> <span class="badge border" style="font-size:0.65em; vertical-align: middle; background: var(--cor-card); color: var(--cor-texto);">⚠️ Lojas com dados incompletos</span> {% if busca_termo %}<span class="badge bg-success text-white ms-1" style="font-size:0.65em; vertical-align: middle;">🔍 "{{ busca_termo }}"</span>{% endif %} <a href="{% if modo_todos %}/todos{% else %}/servidor/{{ servidor_atual }}{% endif %}{% if busca_termo %}?busca={{ busca_termo }}{% endif %}" class="btn-clear" style="display:inline-flex; font-size:0.5em; vertical-align: middle; margin-left: 8px;">✖ Limpar Filtro</a></h3>
                     <div style="display:inline-flex; gap:8px; align-items:center;">
                         {% if session.get('logged_in') and tem_permissao('perm_servidores') %}
                         <button type="button" onclick="marcarSemCnpjIgnorados()" class="btn btn-sm" style="font-size:0.8em; padding:5px 10px; border:1px solid var(--cor-borda); background:var(--cor-superficie); color:var(--cor-texto); cursor:pointer;" title="Marcar todas as lojas sem CNPJ como ignoradas">
