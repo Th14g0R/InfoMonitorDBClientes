@@ -46,6 +46,13 @@ from seguranca import (
     regenerar_session_id, registrar_login_sucesso, registrar_login_falha,
     registrar_logout, registrar_acao_admin,
 )
+from infobrasil_api import (
+    obter_configuracao_api,
+    salvar_variaveis_env,
+    testar_conexao_api,
+    sincronizar_lojas_com_api,
+    obter_ultimo_status_sincronizacao,
+)
 
 # Configuração do Blueprint e Banco
 bancos_bp = Blueprint('bancos', __name__, template_folder='templates')
@@ -957,9 +964,34 @@ def executar_rotina_alerta_backups(forcar=False, usuario_solicitante=None):
         conn.close()
 
 
-# --- AGENDADORES FIXOS: 04:00 (HISTÓRICO) E 09:00 (ALERTA DE BACKUPS) ---
+def rotina_diaria_sincronizacao_api():
+    """Rotina diária que consulta a API InfoBrasil e atualiza CodInfo e Situação das lojas."""
+    LOGGER.info("[API InfoBrasil] Iniciando rotina diária agendada de sincronização de lojas...")
+    try:
+        resultado = sincronizar_lojas_com_api(get_db_connection)
+        if resultado.get('sucesso'):
+            LOGGER.info("[API InfoBrasil] Sincronização diária concluída: %s loja(s) atualizada(s) de %s retornada(s) pela API.",
+                        resultado.get('atualizados', 0), resultado.get('total_api', 0))
+        else:
+            LOGGER.warning("[API InfoBrasil] Falha na sincronização diária agendada: %s", resultado.get('mensagem'))
+    except Exception as e:
+        LOGGER.exception("[API InfoBrasil] Exceção durante sincronização diária agendada: %s", e)
+
+
+# --- AGENDADORES FIXOS: 04:00 (HISTÓRICO), 05:00 (API INFOBRASIL) E 09:00 (ALERTA DE BACKUPS) ---
 scheduler = BackgroundScheduler(daemon=True)
 scheduler.add_job(salvar_historico_diario, 'cron', hour=4, minute=0)
+scheduler.add_job(
+    rotina_diaria_sincronizacao_api,
+    'cron',
+    hour=5,
+    minute=0,
+    timezone='America/Fortaleza',
+    id='sincronizacao_api_infobrasil',
+    replace_existing=True,
+    max_instances=1,
+    coalesce=True
+)
 scheduler.add_job(
     executar_rotina_alerta_backups,
     'cron',
@@ -2220,7 +2252,9 @@ HTML_LAYOUT = """
                                             <thead>
                                                 <tr>
                                                     <th>CodInfo</th><th>LojCód.</th><th>Fantasia</th><th>Razão/Nome</th><th>CNPJ</th><th>Situação</th>
+                                                    {% if tem_permissao('perm_servidores') %}
                                                     <th style="text-align: center; width: 85px;" title="Ignorar pendências desta loja (ex: sem CNPJ)">Ignorar?</th>
+                                                    {% endif %}
                                                     {% if tem_permissao('perm_servidores') %}<th></th>{% endif %}
                                                 </tr>
                                             </thead>
@@ -2233,6 +2267,7 @@ HTML_LAYOUT = """
                                                     <td class="valor-loja" data-campo="loj_nome">{{ loja.loj_nome or '-' }}</td>
                                                     <td class="valor-loja" data-campo="loj_cnpj">{{ loja.loj_cnpj or '-' }}</td>
                                                     <td class="valor-loja" data-campo="cli_situacao">{{ loja.cli_situacao or '-' }}</td>
+                                                    {% if tem_permissao('perm_servidores') %}
                                                     <td class="col-ignorar text-center">
                                                         {% if loja.ignorar_incompleto %}
                                                             <span class="tag-ignorado" title="Loja marcada para ignorar pendências de preenchimento">Ignorado</span>
@@ -2240,6 +2275,7 @@ HTML_LAYOUT = """
                                                             <span style="color: var(--cor-texto-suave); opacity: 0.5;">-</span>
                                                         {% endif %}
                                                     </td>
+                                                    {% endif %}
                                                     {% if tem_permissao('perm_servidores') %}
                                                     <td class="acoes-loja">
                                                         <button class="btn-icon btn-icon-warning" onclick="editarLoja(this)" aria-label="Editar loja"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></button>
@@ -2281,6 +2317,7 @@ HTML_LAYOUT = """
             if (seta) seta.textContent = abrindo ? '▾' : '▸';
         }
 
+        {% if tem_permissao('perm_servidores') %}
         // --- Edição inline de uma loja já existente ---
         const CAMPOS_LOJA_ORDEM = ['cod_info', 'loj_codigo', 'loj_fantasia', 'loj_nome', 'loj_cnpj', 'cli_situacao'];
 
@@ -2445,6 +2482,7 @@ HTML_LAYOUT = """
             })
             .catch(() => alert('Não foi possível concluir a ação. Verifique sua conexão.'));
         }
+        {% endif %}
 
         // --- Edição inline da string de conexão (CNAME) ---
         function editarCname(botao) {
@@ -3078,6 +3116,64 @@ HTML_ADMIN = r"""
             {% endfor %}
         </div>
     </div>
+
+    <!-- INTEGRAÇÃO COM API INFOBRASIL (APENAS MASTER) -->
+    <div class="card admin-api-card shadow-sm mb-4">
+        <div class="admin-section-header d-flex justify-content-between align-items-center">
+            <span><i class="fa-solid fa-cloud-arrow-down me-2"></i>Integração API InfoBrasil (Sincronização de Lojas)</span>
+            <span class="badge bg-primary">Master</span>
+        </div>
+        <div class="admin-card-body" style="padding: 20px;">
+            <p class="text-muted small mb-3">
+                Configure as credenciais de acesso da API InfoBrasil para enriquecimento diário automático dos dados de lojas (CodInfo e Situação) via CNPJ. As credenciais são salvas de forma segura no arquivo <code>.env</code>.
+            </p>
+            <form id="formConfigApi" onsubmit="return salvarConfigApi(event)">
+                <div class="row g-3">
+                    <div class="col-md-5">
+                        <label class="form-label fw-bold small">URL Base da API</label>
+                        <input type="url" id="api_url" class="form-control form-control-sm" value="{{ api_config.url if api_config else 'https://info-api.infobrasilsistemas.com.br' }}" placeholder="https://info-api.infobrasilsistemas.com.br" required>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label fw-bold small">Usuário (Username)</label>
+                        <input type="text" id="api_usuario" class="form-control form-control-sm" value="{{ api_config.usuario if api_config else '' }}" placeholder="ex: infobrasil" required autocomplete="off">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label fw-bold small">Senha (Password)</label>
+                        <div class="input-group input-group-sm">
+                            <input type="password" id="api_senha" class="form-control" value="{{ api_config.senha if api_config else '' }}" placeholder="Digite a senha" required autocomplete="off">
+                            <button class="btn btn-outline-secondary" type="button" onclick="toggleSenhaApi()" title="Mostrar/Ocultar Senha">
+                                <i class="fa-solid fa-eye" id="iconeSenhaApi"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between mt-3 pt-2 border-top">
+                    <div class="d-flex gap-2">
+                        <button type="submit" class="btn btn-primary btn-sm" id="btnSalvarApi">
+                            <i class="fa-solid fa-floppy-disk me-1"></i> Gravar no .env
+                        </button>
+                        <button type="button" class="btn btn-outline-secondary btn-sm" id="btnTestarApi" onclick="testarConexaoApi()">
+                            <i class="fa-solid fa-plug me-1"></i> Testar Conexão
+                        </button>
+                        <button type="button" class="btn btn-outline-success btn-sm" id="btnSincronizarApi" onclick="sincronizarApiAgora()">
+                            <i class="fa-solid fa-arrows-rotate me-1"></i> Sincronizar Agora
+                        </button>
+                    </div>
+                    <div id="statusExecucaoApi" class="small text-muted">
+                        {% if api_ultimo_status %}
+                            <span class="badge {% if api_ultimo_status.status == 'sucesso' %}bg-success{% else %}bg-danger{% endif %} me-1">
+                                {{ api_ultimo_status.status|upper }}
+                            </span>
+                            Última execução: <strong>{{ api_ultimo_status.data_hora }}</strong> ({{ api_ultimo_status.detalhes }})
+                        {% else %}
+                            Nenhuma sincronização registrada ainda.
+                        {% endif %}
+                    </div>
+                </div>
+            </form>
+            <div id="feedbackApi" class="alert d-none mt-3 mb-0 small py-2" role="alert"></div>
+        </div>
+    </div>
     {% endif %}
 
 
@@ -3632,6 +3728,113 @@ HTML_ADMIN = r"""
         .catch(() => alert('Não foi possível salvar. Verifique sua conexão.'));
 
         return false;
+    }
+
+    function toggleSenhaApi() {
+        const input = document.getElementById('api_senha');
+        const icone = document.getElementById('iconeSenhaApi');
+        if (!input || !icone) return;
+        if (input.type === 'password') {
+            input.type = 'text';
+            icone.className = 'fa-solid fa-eye-slash';
+        } else {
+            input.type = 'password';
+            icone.className = 'fa-solid fa-eye';
+        }
+    }
+
+    function mostrarFeedbackApi(mensagem, tipo = 'info') {
+        const div = document.getElementById('feedbackApi');
+        if (!div) return;
+        div.className = `alert alert-${tipo} mt-3 mb-0 small py-2`;
+        div.textContent = mensagem;
+        div.classList.remove('d-none');
+    }
+
+    function salvarConfigApi(e) {
+        if (e) e.preventDefault();
+        const url = (document.getElementById('api_url')?.value || '').trim();
+        const usuario = (document.getElementById('api_usuario')?.value || '').trim();
+        const senha = (document.getElementById('api_senha')?.value || '').trim();
+        const btn = document.getElementById('btnSalvarApi');
+        if (btn) btn.disabled = true;
+
+        csrfFetch('/admin/config-api', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url, usuario, senha })
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (btn) btn.disabled = false;
+            if (data.sucesso) {
+                mostrarFeedbackApi('Configurações salvas no arquivo .env com sucesso!', 'success');
+            } else {
+                mostrarFeedbackApi('Erro ao salvar no .env: ' + (data.mensagem || 'verifique os dados.'), 'danger');
+            }
+        })
+        .catch(err => {
+            if (btn) btn.disabled = false;
+            mostrarFeedbackApi('Erro de comunicação ao salvar: ' + err.message, 'danger');
+        });
+        return false;
+    }
+
+    function testarConexaoApi() {
+        const url = (document.getElementById('api_url')?.value || '').trim();
+        const usuario = (document.getElementById('api_usuario')?.value || '').trim();
+        const senha = (document.getElementById('api_senha')?.value || '').trim();
+        const btn = document.getElementById('btnTestarApi');
+        if (btn) btn.disabled = true;
+        mostrarFeedbackApi('Testando autenticação e consulta de dados na API InfoBrasil...', 'info');
+
+        csrfFetch('/admin/config-api/testar', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url, usuario, senha })
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (btn) btn.disabled = false;
+            if (data.sucesso) {
+                mostrarFeedbackApi('✅ ' + data.mensagem, 'success');
+            } else {
+                mostrarFeedbackApi('❌ Falha no teste: ' + data.mensagem, 'danger');
+            }
+        })
+        .catch(err => {
+            if (btn) btn.disabled = false;
+            mostrarFeedbackApi('❌ Erro de requisição: ' + err.message, 'danger');
+        });
+    }
+
+    function sincronizarApiAgora() {
+        if (!confirm('Deseja iniciar a sincronização de lojas com a API InfoBrasil agora?')) return;
+        const btn = document.getElementById('btnSincronizarApi');
+        if (btn) btn.disabled = true;
+        mostrarFeedbackApi('Sincronização em andamento... Buscando clientes na API e atualizando base local...', 'info');
+
+        csrfFetch('/admin/config-api/sincronizar', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (btn) btn.disabled = false;
+            if (data.sucesso) {
+                mostrarFeedbackApi('✅ ' + data.mensagem, 'success');
+                const statusDiv = document.getElementById('statusExecucaoApi');
+                if (statusDiv) {
+                    statusDiv.innerHTML = `<span class="badge bg-success me-1">SUCESSO</span> Atualizado agora (${data.atualizados} lojas)`;
+                }
+            } else {
+                mostrarFeedbackApi('❌ Falha na sincronização: ' + data.mensagem, 'danger');
+            }
+        })
+        .catch(err => {
+            if (btn) btn.disabled = false;
+            mostrarFeedbackApi('❌ Erro durante sincronização: ' + err.message, 'danger');
+        });
     }
 
     const veioDeReset = {{ 'true' if veio_de_reset else 'false' }};
@@ -4320,10 +4523,14 @@ def admin_painel():
 
     # Busca a lista de usuários caso seja Master
     usuarios_lista = []
+    api_config = {}
+    api_ultimo_status = None
     if session.get('eh_master'):
         conn = get_db_connection()
         usuarios_lista = conn.execute("SELECT id, nome, email, eh_master, ativo, perm_servidores, perm_gestao_bancos, perm_horarios, perm_certificados FROM usuarios").fetchall()
         conn.close()
+        api_config = obter_configuracao_api()
+        api_ultimo_status = obter_ultimo_status_sincronizacao(get_db_connection)
 
     leitura_raw = ler_databases_conf_remoto_estruturado(srv_atual)
     conteudo_raw = (leitura_raw['conteudo'] if leitura_raw['ok'] else
@@ -4337,7 +4544,8 @@ def admin_painel():
         hash_conteudo_raw=hash_conteudo_raw,
         msg_sucesso=msg_sucesso, msg_erro=msg_erro, usuarios_lista=usuarios_lista,
         usuario_nome=usuario_nome, usuario_email=usuario_email,
-        veio_de_reset=session.get('reset_senha_pendente', False)
+        veio_de_reset=session.get('reset_senha_pendente', False),
+        api_config=api_config, api_ultimo_status=api_ultimo_status
     )
 
 @bancos_bp.route('/editar-perfil', methods=['POST'])
@@ -4827,6 +5035,73 @@ def rota_ignorar_lojas_sem_cnpj():
         "mensagem": f"{total} loja(s) sem CNPJ marcada(s) como ignorada(s) com sucesso.",
         "total": total
     })
+
+
+# --- ROTAS DA API INFOBRASIL (ACESSO EXCLUSIVO MASTER) ---
+
+@bancos_bp.route('/admin/config-api', methods=['POST'])
+def salvar_configuracao_api():
+    if not session.get('logged_in'):
+        return jsonify({"sucesso": False, "mensagem": "Sessão expirada. Faça login novamente."}), 401
+    if not session.get('eh_master') and not (g.get('usuario_atual') and g.usuario_atual['eh_master']):
+        return jsonify({"sucesso": False, "mensagem": "Apenas o usuário Master tem permissão para alterar as configurações da API."}), 403
+
+    dados = request.get_json(silent=True) or {}
+    url = (dados.get('url') or '').strip()
+    usuario = (dados.get('usuario') or '').strip()
+    senha = (dados.get('senha') or '').strip()
+
+    if not url or not usuario:
+        return jsonify({"sucesso": False, "mensagem": "A URL base e o usuário da API são obrigatórios."}), 400
+
+    sucesso, msg = salvar_variaveis_env({
+        'INFOBRASIL_API_URL': url,
+        'INFOBRASIL_API_USER': usuario,
+        'INFOBRASIL_API_PASS': senha,
+    })
+
+    if sucesso:
+        registrar_acao_admin('config_api_infobrasil', {
+            'usuario': session.get('username') or session.get('user_nome'),
+            'api_url': url,
+            'api_user': usuario
+        })
+        return jsonify({"sucesso": True, "mensagem": "Credenciais salvas no arquivo .env com sucesso!"})
+    else:
+        return jsonify({"sucesso": False, "mensagem": msg}), 500
+
+
+@bancos_bp.route('/admin/config-api/testar', methods=['POST'])
+def rota_testar_conexao_api():
+    if not session.get('logged_in'):
+        return jsonify({"sucesso": False, "mensagem": "Sessão expirada. Faça login novamente."}), 401
+    if not session.get('eh_master') and not (g.get('usuario_atual') and g.usuario_atual['eh_master']):
+        return jsonify({"sucesso": False, "mensagem": "Apenas o usuário Master tem permissão para testar a API."}), 403
+
+    dados = request.get_json(silent=True) or {}
+    url = (dados.get('url') or '').strip() or None
+    usuario = (dados.get('usuario') or '').strip() or None
+    senha = (dados.get('senha') or '').strip() or None
+
+    resultado = testar_conexao_api(url=url, usuario=usuario, senha=senha)
+    return jsonify(resultado)
+
+
+@bancos_bp.route('/admin/config-api/sincronizar', methods=['POST'])
+def rota_sincronizar_api():
+    if not session.get('logged_in'):
+        return jsonify({"sucesso": False, "mensagem": "Sessão expirada. Faça login novamente."}), 401
+    if not session.get('eh_master') and not (g.get('usuario_atual') and g.usuario_atual['eh_master']):
+        return jsonify({"sucesso": False, "mensagem": "Apenas o usuário Master tem permissão para executar a sincronização da API."}), 403
+
+    resultado = sincronizar_lojas_com_api(get_db_connection, usuario_solicitante=session.get('user_nome'))
+    if resultado.get('sucesso'):
+        registrar_acao_admin('sincronizar_api_infobrasil', {
+            'usuario': session.get('username') or session.get('user_nome'),
+            'atualizados': resultado.get('atualizados', 0),
+            'total_api': resultado.get('total_api', 0)
+        })
+    return jsonify(resultado)
 
 
 # --- IMPORTAÇÃO EM LOTE DE LOJAS VIA PLANILHA .XLSX ---

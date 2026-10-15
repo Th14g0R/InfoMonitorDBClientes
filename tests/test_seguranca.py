@@ -1732,6 +1732,136 @@ O cliente loja-critica esta a mais de 1 dia sem bkp - status ERRO 2026-10-09 10:
             with closing(self.bancos.get_db_connection()) as conn, conn:
                 conn.execute("DELETE FROM clientes_lojas WHERE alias = 'teste_upd_alias'")
 
+    def test_coluna_ignorar_lojas_apenas_para_editores(self):
+        # Cria banco falso e loja
+        loja_mock = [{
+            'alias': 'teste_alias_ign',
+            'caminho': '/dados/banco.fdb',
+            'tamanho_bytes': 1000,
+            'tamanho_str': '1.0 KB',
+            'data_str': '15/10/2026',
+            'data_criacao': '15/10/2026',
+            'arquivo_existe': True,
+            'cname_string': '',
+            'status_inatividade': {'status': 'ok'},
+            'lojas': [{
+                'id': 9999,
+                'cod_info': '123',
+                'loj_codigo': '1',
+                'loj_fantasia': 'Loja Teste',
+                'loj_nome': 'Razao Teste',
+                'loj_cnpj': '00000000000191',
+                'cli_situacao': 'A',
+                'ignorar_incompleto': 0
+            }]
+        }]
+
+        # 1. Usuário anônimo / sem permissão: NÃO deve ver a coluna Ignorar
+        anonimo = self.app.test_client()
+        with patch.object(self.bancos, 'obter_dados_servidor_linux', return_value=(loja_mock, 0, [])):
+            with patch.dict(self.bancos.SERVIDORES, {'DB01': {'host': '127.0.0.1', 'user': 'u', 'port': 22, 'db_path': '/d'}}):
+                resp_anonimo = anonimo.get('/servidor/DB01')
+                self.assertEqual(resp_anonimo.status_code, 200)
+                self.assertNotIn('Ignorar?', resp_anonimo.text)
+                self.assertNotIn('col-ignorar', resp_anonimo.text)
+
+        # 2. Usuário Master (self.client): DEVE ver a coluna Ignorar
+        with patch.object(self.bancos, 'obter_dados_servidor_linux', return_value=(loja_mock, 0, [])):
+            with patch.dict(self.bancos.SERVIDORES, {'DB01': {'host': '127.0.0.1', 'user': 'u', 'port': 22, 'db_path': '/d'}}):
+                resp_master = self.client.get('/servidor/DB01')
+                self.assertEqual(resp_master.status_code, 200)
+                self.assertIn('Ignorar?', resp_master.text)
+                self.assertIn('col-ignorar', resp_master.text)
+
+    def test_rotas_config_api_infobrasil(self):
+        # 1. Requisição não autenticada deve retornar 401
+        anonimo = self.app.test_client()
+        anonimo.get('/admin/login')
+        with anonimo.session_transaction() as s:
+            anon_token = s['_csrf_token']
+        for rota in ['/admin/config-api', '/admin/config-api/testar', '/admin/config-api/sincronizar']:
+            resp = anonimo.post(rota, json={}, headers={'X-CSRF-Token': anon_token})
+            self.assertEqual(resp.status_code, 401, f"Falha na rota {rota} sem login")
+
+        # 2. Usuário autenticado sem perfil Master deve retornar 403
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            user_regular_id = conn.execute(
+                'INSERT INTO usuarios (nome, email, senha_hash, eh_master, ativo, perm_gestao_bancos) VALUES (?, ?, ?, 0, 1, 1)',
+                ('Regular', 'regular_api@example.invalid', generate_password_hash(self.password)),
+            ).lastrowid
+
+        usuario_regular = self.app.test_client()
+        usuario_regular.get('/admin/login')
+        with usuario_regular.session_transaction() as s:
+            reg_token = s['_csrf_token']
+            s.update(logged_in=True, user_id=user_regular_id, eh_master=False, perm_gestao_bancos=1)
+
+        try:
+            for rota in ['/admin/config-api', '/admin/config-api/testar', '/admin/config-api/sincronizar']:
+                resp = usuario_regular.post(rota, json={}, headers={'X-CSRF-Token': reg_token})
+                self.assertEqual(resp.status_code, 403, f"Falha na rota {rota} com usuário regular")
+
+            # Verifica também que no painel admin do usuário regular o card da API NÃO é renderizado
+            with patch.dict(self.bancos.SERVIDORES, {'DB01': {'host': '127.0.0.1'}}):
+                with patch.object(self.bancos, 'obter_dados_servidor_linux', return_value=([], 0, [])):
+                    with patch.object(self.bancos, 'ler_databases_conf_remoto_estruturado', return_value={'ok': True, 'conteudo': ''}):
+                        resp_admin_reg = usuario_regular.get('/admin')
+                        self.assertEqual(resp_admin_reg.status_code, 200)
+                        self.assertNotIn('admin-api-card', resp_admin_reg.text)
+        finally:
+            with closing(self.bancos.get_db_connection()) as conn, conn:
+                conn.execute('DELETE FROM usuarios WHERE id = ?', (user_regular_id,))
+
+        # 3. Usuário Master (self.client): Acesso e operações autorizadas
+        with patch.dict(self.bancos.SERVIDORES, {'DB01': {'host': '127.0.0.1'}}):
+            with patch.object(self.bancos, 'obter_dados_servidor_linux', return_value=([], 0, [])):
+                with patch.object(self.bancos, 'ler_databases_conf_remoto_estruturado', return_value={'ok': True, 'conteudo': ''}):
+                    resp_admin_master = self.client.get('/admin')
+                    self.assertEqual(resp_admin_master.status_code, 200)
+                    self.assertIn('admin-api-card', resp_admin_master.text)
+                    self.assertIn('api_url', resp_admin_master.text)
+                    self.assertIn('api_usuario', resp_admin_master.text)
+                    self.assertIn('api_senha', resp_admin_master.text)
+
+        # Teste de gravação de config no .env
+        with patch('bancos.salvar_variaveis_env', return_value=(True, 'Salvo')):
+            resp_save = self.client.post(
+                '/admin/config-api',
+                json={'url': 'https://api.teste.com', 'usuario': 'usr_teste', 'senha': 'pwd_teste'},
+                headers={'X-CSRF-Token': self.token}
+            )
+            self.assertEqual(resp_save.status_code, 200)
+            self.assertTrue(resp_save.get_json()['sucesso'])
+
+        # Teste de validação de dados obrigatórios
+        resp_invalid = self.client.post(
+            '/admin/config-api',
+            json={'url': '', 'usuario': '', 'senha': ''},
+            headers={'X-CSRF-Token': self.token}
+        )
+        self.assertEqual(resp_invalid.status_code, 400)
+
+        # Teste de comunicação (mock testar_conexao_api)
+        with patch('bancos.testar_conexao_api', return_value={'sucesso': True, 'mensagem': 'Conectado com sucesso'}):
+            resp_test = self.client.post(
+                '/admin/config-api/testar',
+                json={'url': 'https://api.teste.com', 'usuario': 'usr', 'senha': 'pwd'},
+                headers={'X-CSRF-Token': self.token}
+            )
+            self.assertEqual(resp_test.status_code, 200)
+            self.assertTrue(resp_test.get_json()['sucesso'])
+
+        # Teste de sincronização (mock sincronizar_lojas_com_api)
+        with patch('bancos.sincronizar_lojas_com_api', return_value={'sucesso': True, 'atualizados': 12, 'total_api': 100, 'mensagem': '12 atualizados'}):
+            resp_sync = self.client.post(
+                '/admin/config-api/sincronizar',
+                json={},
+                headers={'X-CSRF-Token': self.token}
+            )
+            self.assertEqual(resp_sync.status_code, 200)
+            self.assertTrue(resp_sync.get_json()['sucesso'])
+            self.assertEqual(resp_sync.get_json()['atualizados'], 12)
+
 
 if __name__ == '__main__':
     unittest.main()
