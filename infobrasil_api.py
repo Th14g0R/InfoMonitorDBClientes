@@ -58,14 +58,40 @@ def salvar_variaveis_env(novas_variaveis):
 
 
 def obter_configuracao_api():
-    """Retorna a configuração atual da API InfoBrasil a partir do ambiente."""
-    url = (os.getenv('INFOBRASIL_API_URL') or URL_API_PADRAO).strip().rstrip('/')
+    """Retorna a configuração atual da API InfoBrasil a partir do ambiente ou do arquivo .env."""
+    url = (os.getenv('INFOBRASIL_API_URL') or '').strip()
     user = (os.getenv('INFOBRASIL_API_USER') or '').strip()
     senha = (os.getenv('INFOBRASIL_API_PASS') or '').strip()
+
+    if not user or not senha:
+        caminho_env = obter_caminho_env()
+        if os.path.exists(caminho_env):
+            try:
+                with open(caminho_env, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith('#') or '=' not in line:
+                            continue
+                        k, v = line.split('=', 1)
+                        k, v = k.strip(), v.strip().strip("'\"")
+                        if k == 'INFOBRASIL_API_URL' and not url:
+                            url = v
+                        elif k == 'INFOBRASIL_API_USER' and not user:
+                            user = v
+                        elif k == 'INFOBRASIL_API_PASS' and not senha:
+                            senha = v
+            except Exception:
+                pass
+
+    if not url:
+        url = URL_API_PADRAO
+
     return {
-        'url': url,
+        'url': url.rstrip('/'),
         'user': user,
         'pass': senha,
+        'usuario': user,
+        'senha': senha,
         'configurado': bool(user and senha)
     }
 
@@ -188,6 +214,42 @@ def buscar_todos_clientes_api(token, api_url, page_size=1000, timeout=20):
             page += 1
 
     return mapa_cnpj, total_lidos
+
+
+def consultar_cliente_por_id_api(cli_id, token=None, url=None, timeout=12):
+    """Consulta os dados detalhados de um cliente específico via GET /api/v1/clients/{id}.
+    Retorna o dicionário com os campos do cliente (CLI_CODIGO, CLI_SITUACAO, CLI_CPF_CNPJ, etc.) ou (None, erro).
+    """
+    if not cli_id:
+        return None, "ID do cliente não informado."
+
+    cfg = obter_configuracao_api()
+    api_url = (url or cfg['url']).strip().rstrip('/')
+
+    if not token:
+        token, _, erro = autenticar_api(url=api_url)
+        if erro:
+            return None, erro
+
+    ctx = ssl.create_default_context()
+    url_req = f"{api_url}/api/v1/clients/{cli_id}"
+    req = urllib.request.Request(
+        url_req,
+        headers={
+            'Authorization': f'Bearer {token}',
+            'User-Agent': 'InfoMonitor/1.0',
+            'Accept': 'application/json'
+        }
+    )
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            return data, None
+    except urllib.error.HTTPError as e:
+        corpo = e.read().decode('utf-8', errors='ignore')
+        return None, f"HTTP {e.code}: {corpo or e.reason}"
+    except Exception as e:
+        return None, f"Falha na requisição: {str(e)}"
 
 
 def _obter_conexao_padrao():
