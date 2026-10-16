@@ -57,8 +57,27 @@ def pode_editar_horarios():
     """Checa Master ou perm_horarios sempre com os dados atuais do banco."""
     return usuario_tem_permissao('perm_horarios')
 
+
+def eh_usuario_master():
+    """Valida se o usuário autenticado atual é Master."""
+    if not session.get('logged_in') or not session.get('user_id'):
+        return False
+    try:
+        conn = get_db()
+        usuario = conn.execute(
+            "SELECT eh_master, ativo FROM usuarios WHERE id = ?",
+            (session['user_id'],)
+        ).fetchone()
+        conn.close()
+        if usuario and usuario['ativo']:
+            return bool(usuario['eh_master'])
+    except Exception:
+        pass
+    return bool(session.get('eh_master', False))
+
 horarios_bp.add_app_template_global(pode_editar_horarios, name='pode_editar_horarios')
 horarios_bp.add_app_template_global(usuario_tem_permissao, name='usuario_tem_permissao')
+horarios_bp.add_app_template_global(eh_usuario_master, name='eh_usuario_master')
 
 @horarios_bp.context_processor
 def opcoes_funcionario():
@@ -428,8 +447,11 @@ HTML_INTERFACE = """
         
         /* Cores de equipe (Verde/Amarela) mantidas intencionalmente: identificam a equipe real do técnico, não são decorativas. */
         .card-tec { background: var(--cor-superficie); border: 1px solid var(--cor-borda); border-left: 4px solid var(--cor-primaria); border-radius: var(--raio-md); padding: var(--space-2); margin-bottom: var(--space-2); box-shadow: var(--shadow-sm); display: flex; align-items: center; gap: var(--space-2); }
-        .card-tec[draggable="true"] { cursor: grab; }
+        .card-tec[draggable="true"] { cursor: grab; user-select: none; }
         .card-tec[draggable="true"]:active { cursor: grabbing; opacity: 0.6; }
+        .card-tec.is-dragging { opacity: 0.35; transform: scale(0.97); }
+        .coluna-turno { transition: background-color 0.2s ease, border-color 0.2s ease; }
+        .coluna-turno.drag-over { background: rgba(52, 152, 219, 0.15) !important; border: 2px dashed #2980b9 !important; }
         .card-tec.eq-Verde { border-left-color: #005b41; }
         .card-tec.eq-Amarela { border-left-color: #f3c716; }
         .card-avatar { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; background: var(--cor-borda); flex-shrink: 0; transition: transform var(--transition-fast) ease; }
@@ -550,11 +572,13 @@ HTML_INTERFACE = """
     <div style="background: var(--cor-superficie); border-bottom: 1px solid var(--cor-borda); padding: 8px 16px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
         <span style="font-weight: 600; font-size: 0.85rem; color: var(--cor-texto-suave);">Seções:</span>
         <a href="#secao-escala-sabado" class="btn btn-secondary btn-sm" style="padding: 4px 10px; font-size: 0.82rem;">📅 Sábados</a>
-        <a href="#secao-escala-domingo" class="btn btn-secondary btn-sm" style="padding: 4px 10px; font-size: 0.82rem; border-color: #f39c12; color: #b7791f; font-weight: 600;">📱 Domingos (TEF)</a>
         <a href="#secao-cobertura" class="btn btn-secondary btn-sm" style="padding: 4px 10px; font-size: 0.82rem;">📊 Cobertura</a>
+        <a href="#secao-escala-domingo" class="btn btn-secondary btn-sm" style="padding: 4px 10px; font-size: 0.82rem; border-color: #f39c12; color: #b7791f; font-weight: 600;">📱 Domingos</a>
         <a href="#secao-ausencias" class="btn btn-secondary btn-sm" style="padding: 4px 10px; font-size: 0.82rem;">🏖️ Ausências</a>
-        <a href="#secao-equipe" class="btn btn-secondary btn-sm" style="padding: 4px 10px; font-size: 0.82rem;">👥 Equipe</a>
+        <a href="#secao-eventos" class="btn btn-secondary btn-sm" style="padding: 4px 10px; font-size: 0.82rem;">📌 Eventos</a>
+        <a href="#secao-equipe" class="btn btn-secondary btn-sm" style="padding: 4px 10px; font-size: 0.82rem;">👥 Equipes</a>
         <a href="#secao-trocas" class="btn btn-secondary btn-sm" style="padding: 4px 10px; font-size: 0.82rem;">🔄 Trocas</a>
+        {% if pode_editar_horarios() %}<a href="#secao-cargos-jornadas" class="btn btn-secondary btn-sm" style="padding: 4px 10px; font-size: 0.82rem;">💼 Cargos e Jornadas</a>{% endif %}
     </div>
 
     <div id="conteudo-principal" class="pagina-equipe-{{ cor_equipe_dia|lower }}" role="main">
@@ -671,11 +695,11 @@ HTML_INTERFACE = """
             <div class="grid-escala">
                 {% set faixas = ["07:30 - 11:30", "08:00 - 12:00", "09:00 - 13:00", "10:00 - 14:00", "13:00 - 17:00", "14:00 - 18:00"] %}
                 {% for faixa in faixas %}
-                    <div class="coluna-turno" data-horario="{{ faixa }}" ondragover="allowDrop(event)" ondrop="drop(event)">
+                    <div class="coluna-turno" data-horario="{{ faixa }}" ondragover="allowDrop(event)" ondragleave="dragLeave(event)" ondrop="drop(event)">
                         <div class="coluna-turno-header">⏰ {{ faixa }}</div>
                         {% for e in escala_sabados %}
                             {% if e[4] == faixa and 'Apoio Fixo' not in (e[5] or '') %}
-                                <div class="card-tec eq-{{ e[6] }}" id="card-escala-{{ e[0] }}" {% if pode_editar_horarios() %}draggable="true"{% endif %} ondragstart="drag(event)" data-id="{{ e[0] }}">
+                                <div class="card-tec eq-{{ e[6] }}" id="card-escala-{{ e[0] }}" {% if pode_editar_horarios() %}draggable="true"{% endif %} ondragstart="drag(event)" ondragend="dragEnd(event)" data-id="{{ e[0] }}">
                                     <img src="{{ e[7] or '/static/avatar-padrao.svg' }}" class="card-avatar">
                                     <div class="card-info">
                                         <div class="card-nome">{{ e[3] }}</div>
@@ -700,10 +724,10 @@ HTML_INTERFACE = """
                 <div class="grid-sobreaviso-apoio">
                     <div class="subcoluna-box">
                         <div class="subcoluna-title" style="color: #c0392b;">🚨 SOBREAVISO</div>
-                        <div class="coluna-turno" data-horario="Sobreaviso" ondragover="allowDrop(event)" ondrop="drop(event)" style="min-height: 100px;">
+                        <div class="coluna-turno" data-horario="Sobreaviso" ondragover="allowDrop(event)" ondragleave="dragLeave(event)" ondrop="drop(event)" style="min-height: 100px;">
                             {% for e in escala_sabados %}
                                 {% if e[4] == 'Sobreaviso' or 'Sobreaviso' in (e[5] or '') %}
-                                    <div class="card-tec eq-{{ e[6] }}" id="card-escala-{{ e[0] }}" {% if pode_editar_horarios() %}draggable="true"{% endif %} ondragstart="drag(event)" data-id="{{ e[0] }}">
+                                    <div class="card-tec eq-{{ e[6] }}" id="card-escala-{{ e[0] }}" {% if pode_editar_horarios() %}draggable="true"{% endif %} ondragstart="drag(event)" ondragend="dragEnd(event)" data-id="{{ e[0] }}">
                                         <img src="{{ e[7] or '/static/avatar-padrao.svg' }}" class="card-avatar">
                                         <div class="card-info">
                                             <div class="card-nome">{{ e[3] }}</div>
@@ -723,10 +747,10 @@ HTML_INTERFACE = """
 
                     <div class="subcoluna-box">
                         <div class="subcoluna-title" style="color: #27ae60;">🛠️ APOIO FIXO (DEV/COM/FIN)</div>
-                        <div class="coluna-turno" data-horario="08:00 - 12:00" ondragover="allowDrop(event)" ondrop="drop(event)" style="min-height: 100px;">
+                        <div class="coluna-turno" data-horario="08:00 - 12:00" ondragover="allowDrop(event)" ondragleave="dragLeave(event)" ondrop="drop(event)" style="min-height: 100px;">
                             {% for e in escala_sabados %}
                                 {% if 'Apoio Fixo' in (e[5] or '') %}
-                                    <div class="card-tec eq-{{ e[6] }}" id="card-escala-{{ e[0] }}" {% if pode_editar_horarios() %}draggable="true"{% endif %} ondragstart="drag(event)" data-id="{{ e[0] }}">
+                                    <div class="card-tec eq-{{ e[6] }}" id="card-escala-{{ e[0] }}" {% if pode_editar_horarios() %}draggable="true"{% endif %} ondragstart="drag(event)" ondragend="dragEnd(event)" data-id="{{ e[0] }}">
                                         <img src="{{ e[7] or '/static/avatar-padrao.svg' }}" class="card-avatar">
                                         <div class="card-info">
                                             <div class="card-nome">{{ e[3] }}</div>
@@ -749,7 +773,61 @@ HTML_INTERFACE = """
 
     </div>
 
-    <!-- ESCALA DE SOBREAVISO AOS DOMINGOS (TEF) -->
+    <!-- 2. COBERTURA DE ATENDIMENTO -->
+    <div class="card" id="secao-cobertura">
+        <div class="section-header">
+            <h3>📊 Cobertura de Atendimento</h3>
+            <form action="/horarios#secao-cobertura" method="GET" class="d-flex gap-2 items-center">
+                {% if data_filtro_sabado %}<input type="hidden" name="data_filtro_sabado" value="{{ data_filtro_sabado }}">{% endif %}
+                <label>📅 <strong>Consultar dia:</strong></label>
+                <input type="date" name="data_cobertura" value="{{ data_cobertura or '' }}" onchange="this.form.submit()" class="form-control" style="width: auto;">
+                {% if data_cobertura %}
+                    <a href="/horarios#secao-cobertura" class="btn btn-danger btn-sm">Limpar</a>
+                {% endif %}
+            </form>
+        </div>
+
+        {% if feriado_cobertura %}
+            {% if feriado_cobertura.tipo == 'feriado_sem_expediente' %}
+                <div class="info-box info-box-primary" style="margin-bottom: 10px; background-color: #f0fdf4; border: 1px solid #86efac; color: #166534;">
+                    🏖️ <strong>Feriado (Sem Expediente):</strong> {{ feriado_cobertura.nome }} ({{ data_cobertura_formatada }}). Toda a equipe está de folga hoje.
+                </div>
+            {% elif feriado_cobertura.tipo == 'feriado_escala_reduzida' %}
+                <div class="info-box info-box-primary" style="margin-bottom: 10px; background-color: #fefce8; border: 1px solid #fde047; color: #854d0e;">
+                    ⚡ <strong>Feriado em Escala Reduzida (Plantão):</strong> {{ feriado_cobertura.nome }} ({{ data_cobertura_formatada }}){% if feriado_cobertura.hora_inicio %} — Plantão das {{ feriado_cobertura.hora_inicio }} às {{ feriado_cobertura.hora_fim }}{% endif %}. Apenas os colaboradores escalados no evento participam do atendimento.
+                </div>
+            {% endif %}
+        {% elif data_cobertura %}
+            <div class="info-box info-box-primary" style="margin-bottom: 10px;">
+                ℹ️ Exibindo cobertura para o dia <strong>{{ data_cobertura_formatada }}</strong>.
+            </div>
+        {% endif %}
+
+        <div class="grid-cobertura">
+            {% for c in cobertura %}
+                <div class="card-cobertura-slot cov-{{ c.alerta }}">
+                    <div class="slot-hora">{{ c.faixa }}</div>
+                    <div class="slot-qtd">{{ c.quantidade }} presente(s)</div>
+                    <div class="avatars-container">
+                        {% if c.atendentes %}
+                            {% for at in c.atendentes %}
+                                <button type="button" class="avatar-item foto-cobertura{% if at.aniversariante %} aniversariante{% endif %}" title="{{ at.nome }}{% if at.aniversariante %} — Aniversariante do dia! 🎂{% endif %}" aria-label="Ampliar foto de {{ at.nome }}{% if at.aniversariante %}, aniversariante do dia{% endif %}">
+                                    <img src="{{ at.foto }}" class="avatar-img" alt="{{ at.nome }}">
+                                    {% if at.aniversariante %}<span class="aniversario-icone" aria-hidden="true">🎂</span>{% endif %}
+                                </button>
+                            {% endfor %}
+                        {% elif c.sem_expediente %}
+                            <span style="color: #64748b; font-size:0.7em; font-weight: bold;">🏖️ FOLGA</span>
+                        {% else %}
+                            <span style="color: #78281f; font-size:0.7em; font-weight: bold;">⚠️ VAZIO</span>
+                        {% endif %}
+                    </div>
+                </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- 3. ESCALA DE SOBREAVISO AOS DOMINGOS (TEF) -->
     <div class="card" id="secao-escala-domingo">
         <div class="section-header d-flex justify-between items-center flex-wrap gap-2">
             <h3>📱 Escala de Sobreaviso aos Domingos (Plantão TEF)</h3>
@@ -812,7 +890,7 @@ HTML_INTERFACE = """
                                     <option value="">Selecione...</option>
                                     <optgroup label="📱 Participam do Sobreaviso TEF">
                                         {% for f in funcionarios if f[11] == 1 and f[14] == 1 %}
-                                            <option value="{{ f[0] }}">{{ f[1] }}</option>
+                                             <option value="{{ f[0] }}">{{ f[1] }}</option>
                                         {% endfor %}
                                     </optgroup>
                                     <optgroup label="Outros Colaboradores Ativos">
@@ -883,60 +961,6 @@ HTML_INTERFACE = """
                 {% endif %}
             </div>
         {% endif %}
-    </div>
-
-    <!-- 2. COBERTURA DE ATENDIMENTO -->
-    <div class="card" id="secao-cobertura">
-        <div class="section-header">
-            <h3>📊 Cobertura de Atendimento</h3>
-            <form action="/horarios#secao-cobertura" method="GET" class="d-flex gap-2 items-center">
-                {% if data_filtro_sabado %}<input type="hidden" name="data_filtro_sabado" value="{{ data_filtro_sabado }}">{% endif %}
-                <label>📅 <strong>Consultar dia:</strong></label>
-                <input type="date" name="data_cobertura" value="{{ data_cobertura or '' }}" onchange="this.form.submit()" class="form-control" style="width: auto;">
-                {% if data_cobertura %}
-                    <a href="/horarios#secao-cobertura" class="btn btn-danger btn-sm">Limpar</a>
-                {% endif %}
-            </form>
-        </div>
-
-        {% if feriado_cobertura %}
-            {% if feriado_cobertura.tipo == 'feriado_sem_expediente' %}
-                <div class="info-box info-box-primary" style="margin-bottom: 10px; background-color: #f0fdf4; border: 1px solid #86efac; color: #166534;">
-                    🏖️ <strong>Feriado (Sem Expediente):</strong> {{ feriado_cobertura.nome }} ({{ data_cobertura_formatada }}). Toda a equipe está de folga hoje.
-                </div>
-            {% elif feriado_cobertura.tipo == 'feriado_escala_reduzida' %}
-                <div class="info-box info-box-primary" style="margin-bottom: 10px; background-color: #fefce8; border: 1px solid #fde047; color: #854d0e;">
-                    ⚡ <strong>Feriado em Escala Reduzida (Plantão):</strong> {{ feriado_cobertura.nome }} ({{ data_cobertura_formatada }}){% if feriado_cobertura.hora_inicio %} — Plantão das {{ feriado_cobertura.hora_inicio }} às {{ feriado_cobertura.hora_fim }}{% endif %}. Apenas os colaboradores escalados no evento participam do atendimento.
-                </div>
-            {% endif %}
-        {% elif data_cobertura %}
-            <div class="info-box info-box-primary" style="margin-bottom: 10px;">
-                ℹ️ Exibindo cobertura para o dia <strong>{{ data_cobertura_formatada }}</strong>.
-            </div>
-        {% endif %}
-
-        <div class="grid-cobertura">
-            {% for c in cobertura %}
-                <div class="card-cobertura-slot cov-{{ c.alerta }}">
-                    <div class="slot-hora">{{ c.faixa }}</div>
-                    <div class="slot-qtd">{{ c.quantidade }} presente(s)</div>
-                    <div class="avatars-container">
-                        {% if c.atendentes %}
-                            {% for at in c.atendentes %}
-                                <button type="button" class="avatar-item foto-cobertura{% if at.aniversariante %} aniversariante{% endif %}" title="{{ at.nome }}{% if at.aniversariante %} — Aniversariante do dia! 🎂{% endif %}" aria-label="Ampliar foto de {{ at.nome }}{% if at.aniversariante %}, aniversariante do dia{% endif %}">
-                                    <img src="{{ at.foto }}" class="avatar-img" alt="{{ at.nome }}">
-                                    {% if at.aniversariante %}<span class="aniversario-icone" aria-hidden="true">🎂</span>{% endif %}
-                                </button>
-                            {% endfor %}
-                        {% elif c.sem_expediente %}
-                            <span style="color: #64748b; font-size:0.7em; font-weight: bold;">🏖️ FOLGA</span>
-                        {% else %}
-                            <span style="color: #78281f; font-size:0.7em; font-weight: bold;">⚠️ VAZIO</span>
-                        {% endif %}
-                    </div>
-                </div>
-            {% endfor %}
-        </div>
     </div>
 
     <!-- 3. AUSÊNCIAS, FÉRIAS E LICENÇAS -->
@@ -1046,7 +1070,7 @@ HTML_INTERFACE = """
                 </tr>
             </thead>
             <tbody>
-                {% for f in funcionarios %}
+                {% for f in funcionarios if f[11] == 1 or eh_usuario_master() %}
                 <tr class="{% if f[11] == 0 %}tr-inativo{% endif %}">
                     <td>
                         {% if f[11] == 1 %}
@@ -1330,43 +1354,80 @@ HTML_INTERFACE = """
         const isAdmin = {{ 'true' if pode_editar_horarios() else 'false' }};
 
         function allowDrop(ev) {
-            if (isAdmin) ev.preventDefault();
+            if (!isAdmin) return;
+            ev.preventDefault();
+            if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+            const col = ev.target.closest('.coluna-turno');
+            if (col) col.classList.add('drag-over');
+        }
+
+        function dragLeave(ev) {
+            if (!isAdmin) return;
+            const col = ev.target.closest('.coluna-turno');
+            if (col && (!ev.relatedTarget || !col.contains(ev.relatedTarget))) {
+                col.classList.remove('drag-over');
+            }
         }
 
         function drag(ev) {
-            if (isAdmin) {
-                ev.dataTransfer.setData("text", ev.target.id);
-            }
+            if (!isAdmin) return;
+            const card = ev.target.closest('.card-tec');
+            if (!card) return;
+            ev.dataTransfer.setData("text/plain", card.id);
+            ev.dataTransfer.setData("escalaId", card.getAttribute('data-id') || '');
+            ev.dataTransfer.effectAllowed = "move";
+            card.classList.add('is-dragging');
+        }
+
+        function dragEnd(ev) {
+            const card = ev.target.closest('.card-tec') || document.querySelector('.card-tec.is-dragging');
+            if (card) card.classList.remove('is-dragging');
+            document.querySelectorAll('.coluna-turno').forEach(col => col.classList.remove('drag-over'));
         }
 
         function drop(ev) {
             if (!isAdmin) return;
             ev.preventDefault();
-            var data = ev.dataTransfer.getData("text");
-            var card = document.getElementById(data);
-            var colunaDestino = ev.currentTarget;
-            
-            if (colunaDestino.classList.contains('coluna-turno')) {
-                
-                var escalaId = card.getAttribute('data-id');
-                var novoHorario = colunaDestino.getAttribute('data-horario');
-                
-                csrfFetch('/horarios/atualizar_horario_escala', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ id: escalaId, horario: novoHorario })
-                }).then(res => res.json()).then(data => {
-                    if (!data.success) {
-                        alert(data.erro || 'Não foi possível mover o funcionário.');
-                        return;
-                    }
-                    const destino = new URL(window.location.href);
-                    destino.searchParams.set('data_cobertura', data.data);
-                    destino.searchParams.set('data_filtro_sabado', data.data);
-                    destino.hash = 'secao-escala-sabado';
-                    window.location.assign(destino);
-                }).catch(() => alert('Falha de conexão. Recarregue a página para conferir a escala.'));
-            }
+            document.querySelectorAll('.coluna-turno').forEach(col => col.classList.remove('drag-over'));
+
+            const colunaDestino = ev.target.closest('.coluna-turno');
+            if (!colunaDestino) return;
+
+            const cardId = ev.dataTransfer.getData("text/plain");
+            const card = (cardId ? document.getElementById(cardId) : null) || document.querySelector('.card-tec.is-dragging');
+            if (!card) return;
+
+            card.classList.remove('is-dragging');
+
+            const escalaId = card.getAttribute('data-id') || ev.dataTransfer.getData("escalaId");
+            const novoHorario = colunaDestino.getAttribute('data-horario');
+            const colunaOrigem = card.parentElement;
+
+            if (colunaOrigem === colunaDestino) return;
+
+            // Movimento imediato no DOM
+            colunaDestino.appendChild(card);
+            card.style.opacity = '0.5';
+
+            csrfFetch('/horarios/atualizar_horario_escala', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: escalaId, horario: novoHorario })
+            }).then(res => res.json()).then(data => {
+                card.style.opacity = '1';
+                if (!data.success) {
+                    colunaOrigem.appendChild(card);
+                    alert(data.erro || 'Não foi possível mover o funcionário.');
+                    return;
+                }
+                card.style.transition = 'all 0.3s ease';
+                card.style.boxShadow = '0 0 0 3px #27ae60';
+                setTimeout(() => { card.style.boxShadow = ''; }, 1200);
+            }).catch(() => {
+                card.style.opacity = '1';
+                colunaOrigem.appendChild(card);
+                alert('Falha de conexão. A alteração foi revertida.');
+            });
         }
 
         function exportarEscalaPDF() {
@@ -1478,6 +1539,8 @@ def ver_horarios():
             ORDER BY f.ativo DESC, f.nome ASC
         """)
         funcionarios = cursor.fetchall()
+        if not eh_usuario_master():
+            funcionarios = [f for f in funcionarios if f[11] == 1]
 
         if filtro_ausencias:
             limite_inicio = ausencia_inicio or '0001-01-01'

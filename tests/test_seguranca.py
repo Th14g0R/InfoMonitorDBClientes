@@ -1964,6 +1964,44 @@ O cliente loja-critica esta a mais de 1 dia sem bkp - status ERRO 2026-10-09 10:
         self.assertEqual(res_filtro.status_code, 200)
         self.assertIn('2026-10-18'.encode('utf-8'), res_filtro.data)
 
+    def test_horarios_ordem_secoes_e_ocultacao_inativos_para_usuario_final(self):
+        # Inserir um funcionário inativo
+        nome_inativo = "Funcionario Inativo Teste Spec"
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            conn.execute("""
+                INSERT INTO funcionarios (nome, prioridade, equipe_sabado, ativo, nao_trabalha_sabado)
+                VALUES (?, 'P1', 'Amarela', 0, 0)
+            """, (nome_inativo,))
+
+        # Usuário final (não master)
+        client_final = self.app.test_client()
+        resp_final = client_final.get('/horarios')
+        self.assertEqual(resp_final.status_code, 200)
+        html_final = resp_final.get_data(as_text=True)
+
+        # Verificar ordem das seções
+        pos_sabados = html_final.find('id="secao-escala-sabado"')
+        pos_cobertura = html_final.find('id="secao-cobertura"')
+        pos_domingos = html_final.find('id="secao-escala-domingo"')
+        pos_ausencias = html_final.find('id="secao-ausencias"')
+        pos_eventos = html_final.find('id="secao-eventos"')
+        pos_equipe = html_final.find('id="secao-equipe"')
+        pos_trocas = html_final.find('id="secao-trocas"')
+
+        self.assertTrue(0 <= pos_sabados < pos_cobertura < pos_domingos < pos_ausencias < pos_eventos < pos_equipe < pos_trocas)
+
+        # Não deve mostrar o funcionário inativo para usuário final
+        self.assertNotIn(nome_inativo, html_final)
+
+        # Usuário Master deve ver o funcionário inativo
+        resp_master = self.client.get('/horarios')
+        self.assertEqual(resp_master.status_code, 200)
+        html_master = resp_master.get_data(as_text=True)
+        pos_cargos = html_master.find('id="secao-cargos-jornadas"')
+        self.assertTrue(pos_trocas < pos_cargos)
+        self.assertIn(nome_inativo, html_master)
+        self.assertIn('INATIVO', html_master)
+
 
 if __name__ == '__main__':
     unittest.main()
