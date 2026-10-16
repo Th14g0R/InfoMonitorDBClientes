@@ -2240,8 +2240,8 @@ HTML_LAYOUT = """
                                 {% endif %}
                                 <td>
                                     {% if banco.eh_inativo %}<span class="badge-inativo-tag">INATIVO</span>{% endif %}
-                                    <button type="button" class="alias-clicavel" onclick="toggleDetalhes(this)" aria-expanded="{% if filtro_status == 'lojas_incompletas' %}true{% else %}false{% endif %}" title="Clique para ver os detalhes do cliente">
-                                        {{ banco.alias }} <span class="seta-detalhes">{% if filtro_status == 'lojas_incompletas' %}▾{% else %}▸{% endif %}</span>
+                                    <button type="button" class="alias-clicavel" data-alias="{{ banco.alias }}" onclick="toggleDetalhes(this)" aria-expanded="false" title="Clique para ver os detalhes do cliente">
+                                        {{ banco.alias }} <span class="seta-detalhes">▸</span>
                                     </button>
                                     {% if not banco.lojas and not banco.eh_inativo %}
                                         <span class="badge bg-warning text-dark" style="font-size:0.7em;" title="Nenhuma loja cadastrada para este alias">📭 sem loja</span>
@@ -2288,7 +2288,7 @@ HTML_LAYOUT = """
                                     {% endif %}
                                 </td>
                             </tr>
-                            <tr class="linha-detalhes {% if filtro_status != 'lojas_incompletas' %}d-none{% endif %}">
+                            <tr class="linha-detalhes d-none" data-alias="{{ banco.alias }}">
                                 <td colspan="{{ 7 if (busca_termo or modo_todos or modo_inativos) else 6 }}">
                                     <div class="painel-lojas" data-alias="{{ banco.alias }}">
                                         {% if banco.lojas %}
@@ -2352,18 +2352,91 @@ HTML_LAYOUT = """
     <script>
         // --- Expande/recolhe o card de detalhes do cliente (CodInfo, LojCód., CNPJ, Razão, Fantasia) ---
         function toggleDetalhes(elemento) {
-            const linha = elemento.closest('tr').nextElementSibling;
+            const trPrincipal = elemento.closest('tr');
+            const linha = trPrincipal ? trPrincipal.nextElementSibling : null;
             const seta = elemento.querySelector('.seta-detalhes');
             if (!linha) return;
             const abrindo = linha.classList.contains('d-none');
             linha.classList.toggle('d-none', !abrindo);
             elemento.setAttribute('aria-expanded', abrindo ? 'true' : 'false');
             if (seta) seta.textContent = abrindo ? '▾' : '▸';
+
+            const alias = elemento.dataset.alias || (linha.querySelector('.painel-lojas')?.dataset.alias);
+            atualizarStorageDetalhes(alias, abrindo);
         }
+
+        function atualizarStorageDetalhes(alias, aberto) {
+            if (!alias) return;
+            try {
+                let abertos = JSON.parse(sessionStorage.getItem('monitor_aliases_abertos') || '[]');
+                if (!Array.isArray(abertos)) abertos = [];
+                if (aberto) {
+                    if (!abertos.includes(alias)) abertos.push(alias);
+                } else {
+                    abertos = abertos.filter(a => a !== alias);
+                }
+                sessionStorage.setItem('monitor_aliases_abertos', JSON.stringify(abertos));
+            } catch (e) {}
+        }
+
+        function restaurarStorageDetalhes() {
+            try {
+                const abertos = JSON.parse(sessionStorage.getItem('monitor_aliases_abertos') || '[]');
+                if (!Array.isArray(abertos) || abertos.length === 0) return;
+                document.querySelectorAll('.painel-lojas').forEach(painel => {
+                    const alias = painel.dataset.alias;
+                    if (alias && abertos.includes(alias)) {
+                        const trDetalhes = painel.closest('.linha-detalhes');
+                        if (trDetalhes) {
+                            trDetalhes.classList.remove('d-none');
+                            const trPrincipal = trDetalhes.previousElementSibling;
+                            if (trPrincipal) {
+                                const btn = trPrincipal.querySelector('.alias-clicavel');
+                                if (btn) {
+                                    btn.setAttribute('aria-expanded', 'true');
+                                    const seta = btn.querySelector('.seta-detalhes');
+                                    if (seta) seta.textContent = '▾';
+                                }
+                            }
+                        }
+                    }
+                });
+            } catch (e) {}
+        }
+        window.addEventListener('DOMContentLoaded', restaurarStorageDetalhes);
 
         {% if tem_permissao('perm_servidores') %}
         // --- Edição inline de uma loja já existente ---
         const CAMPOS_LOJA_ORDEM = ['cod_info', 'loj_codigo', 'loj_fantasia', 'loj_nome', 'loj_cnpj', 'cli_situacao'];
+
+        function renderizarLinhaLojaVisualizacao(linha, valores, estaIgnorado, id) {
+            if (id) linha.dataset.id = id;
+            linha.dataset.ignorar = estaIgnorado ? '1' : '0';
+
+            linha.querySelectorAll('.valor-loja').forEach(celula => {
+                const campo = celula.dataset.campo;
+                const val = (valores[campo] !== undefined && valores[campo] !== null) ? String(valores[campo]).trim() : '';
+                celula.innerHTML = '';
+                celula.textContent = val || '-';
+            });
+
+            const colIgnorar = linha.querySelector('.col-ignorar');
+            if (colIgnorar) {
+                if (estaIgnorado) {
+                    colIgnorar.innerHTML = '<span class="tag-ignorado" title="Loja marcada para ignorar pendências de preenchimento">Ignorado</span>';
+                } else {
+                    colIgnorar.innerHTML = '<span style="color: var(--cor-texto-suave); opacity: 0.5;">-</span>';
+                }
+            }
+
+            const colAcoes = linha.querySelector('.acoes-loja');
+            if (colAcoes) {
+                colAcoes.innerHTML = `
+                    <button class="btn-icon btn-icon-warning" onclick="editarLoja(this)" aria-label="Editar loja"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></button>
+                    <button class="btn-icon btn-icon-danger" onclick="excluirLoja(this)" aria-label="Excluir loja"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg></button>
+                `;
+            }
+        }
 
         function editarLoja(botao) {
             const linha = botao.closest('.linha-loja');
@@ -2371,10 +2444,12 @@ HTML_LAYOUT = """
             const id = linha.dataset.id;
             const celulas = linha.querySelectorAll('.valor-loja');
             const inputs = {};
+            const valoresOriginais = {};
 
             celulas.forEach(celula => {
                 const campo = celula.dataset.campo;
                 const valorAtual = celula.textContent.trim() === '-' ? '' : celula.textContent.trim();
+                valoresOriginais[campo] = valorAtual;
                 const input = document.createElement('input');
                 input.type = 'text';
                 input.value = valorAtual;
@@ -2396,20 +2471,30 @@ HTML_LAYOUT = """
 
             const celulaAcoes = linha.querySelector('.acoes-loja');
             celulaAcoes.innerHTML = '';
+            
             const btnSalvar = document.createElement('button');
-            btnSalvar.className = 'btn-copy';
-            btnSalvar.style.background = '#e8f8f0';
-            btnSalvar.style.color = '#1e8449';
+            btnSalvar.className = 'btn-icon btn-icon-success';
             btnSalvar.textContent = '💾';
-            btnSalvar.title = 'Salvar';
+            btnSalvar.title = 'Salvar alterações';
             btnSalvar.onclick = function() {
                 const payload = { id: id, alias: alias };
                 CAMPOS_LOJA_ORDEM.forEach(campo => { payload[campo] = inputs[campo].value.trim(); });
                 const chk = linha.querySelector('.chk-ignorar');
                 payload.ignorar_incompleto = (chk && chk.checked) ? 1 : 0;
-                salvarLoja(payload);
+                salvarLoja(payload, linha);
             };
+
+            const btnCancelar = document.createElement('button');
+            btnCancelar.className = 'btn-icon btn-icon-secondary';
+            btnCancelar.textContent = '✖';
+            btnCancelar.title = 'Cancelar edição';
+            btnCancelar.style.marginLeft = '4px';
+            btnCancelar.onclick = function() {
+                renderizarLinhaLojaVisualizacao(linha, valoresOriginais, linha.dataset.ignorar === '1', id);
+            };
+
             celulaAcoes.appendChild(btnSalvar);
+            celulaAcoes.appendChild(btnCancelar);
         }
 
         // --- Adiciona uma nova loja (linha em branco editável) para o alias ---
@@ -2435,6 +2520,8 @@ HTML_LAYOUT = """
             const inputs = {};
             CAMPOS_LOJA_ORDEM.forEach(campo => {
                 const td = document.createElement('td');
+                td.className = 'valor-loja';
+                td.dataset.campo = campo;
                 const input = document.createElement('input');
                 input.type = 'text';
                 input.className = 'form-control form-control-sm';
@@ -2450,27 +2537,47 @@ HTML_LAYOUT = """
 
             const tdAcoes = document.createElement('td');
             tdAcoes.className = 'acoes-loja';
+            
             const btnSalvar = document.createElement('button');
-            btnSalvar.className = 'btn-copy';
-            btnSalvar.style.background = '#e8f8f0';
-            btnSalvar.style.color = '#1e8449';
+            btnSalvar.className = 'btn-icon btn-icon-success';
             btnSalvar.textContent = '💾';
-            btnSalvar.title = 'Salvar';
+            btnSalvar.title = 'Salvar Loja';
             btnSalvar.onclick = function() {
                 const payload = { id: '', alias: alias };
                 CAMPOS_LOJA_ORDEM.forEach(campo => { payload[campo] = inputs[campo].value.trim(); });
                 const chk = novaLinha.querySelector('.chk-ignorar');
                 payload.ignorar_incompleto = (chk && chk.checked) ? 1 : 0;
-                salvarLoja(payload);
+                salvarLoja(payload, novaLinha);
             };
+
+            const btnCancelar = document.createElement('button');
+            btnCancelar.className = 'btn-icon btn-icon-secondary';
+            btnCancelar.textContent = '✖';
+            btnCancelar.title = 'Cancelar adição';
+            btnCancelar.style.marginLeft = '4px';
+            btnCancelar.onclick = function() {
+                novaLinha.remove();
+                if (tabela.children.length === 0) {
+                    const wrapperTabela = painel.querySelector('.tabela-lojas');
+                    if (wrapperTabela) wrapperTabela.remove();
+                    if (!painel.querySelector('.sem-lojas')) {
+                        const p = document.createElement('p');
+                        p.className = 'sem-lojas';
+                        p.textContent = 'Nenhuma loja cadastrada para este alias ainda.';
+                        painel.insertBefore(p, botao);
+                    }
+                }
+            };
+
             tdAcoes.appendChild(btnSalvar);
+            tdAcoes.appendChild(btnCancelar);
             novaLinha.appendChild(tdAcoes);
 
             tabela.appendChild(novaLinha);
             inputs['cod_info'].focus();
         }
 
-        function salvarLoja(payload) {
+        function salvarLoja(payload, linhaElemento) {
             csrfFetch('/admin/cliente-loja/salvar', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -2479,7 +2586,28 @@ HTML_LAYOUT = """
             .then(r => r.json())
             .then(data => {
                 if (data.sucesso) {
-                    location.reload();
+                    const novoId = data.id || payload.id;
+                    const estaIgnorado = payload.ignorar_incompleto === 1;
+                    if (linhaElemento) {
+                        renderizarLinhaLojaVisualizacao(linhaElemento, payload, estaIgnorado, novoId);
+
+                        // Se o cliente possuía o badge "sem loja", remove-o da linha principal
+                        const painel = linhaElemento.closest('.painel-lojas');
+                        if (painel) {
+                            const trDetalhes = painel.closest('.linha-detalhes');
+                            if (trDetalhes && trDetalhes.previousElementSibling) {
+                                const badgeSemLoja = trDetalhes.previousElementSibling.querySelector('.badge.bg-warning');
+                                if (badgeSemLoja) badgeSemLoja.remove();
+                            }
+                        }
+
+                        // Feedback visual suave de sucesso
+                        linhaElemento.style.transition = 'background-color 0.4s ease';
+                        linhaElemento.style.backgroundColor = '#d4edda';
+                        setTimeout(() => { linhaElemento.style.backgroundColor = ''; }, 900);
+                    } else {
+                        location.reload();
+                    }
                 } else {
                     alert('Erro ao salvar: ' + (data.mensagem || 'tente novamente.'));
                 }
@@ -2490,6 +2618,7 @@ HTML_LAYOUT = """
         function excluirLoja(botao) {
             if (!confirm('Excluir esta loja do cadastro?')) return;
             const linha = botao.closest('.linha-loja');
+            const painel = linha.closest('.painel-lojas');
             const id = linha.dataset.id;
 
             csrfFetch('/admin/cliente-loja/excluir', {
@@ -2500,7 +2629,33 @@ HTML_LAYOUT = """
             .then(r => r.json())
             .then(data => {
                 if (data.sucesso) {
-                    location.reload();
+                    const tabela = linha.closest('tbody');
+                    linha.remove();
+                    if (tabela && tabela.children.length === 0) {
+                        const wrapper = painel.querySelector('.tabela-lojas');
+                        if (wrapper) wrapper.remove();
+                        const btnAdd = painel.querySelector('button');
+                        if (!painel.querySelector('.sem-lojas')) {
+                            const p = document.createElement('p');
+                            p.className = 'sem-lojas';
+                            p.textContent = 'Nenhuma loja cadastrada para este alias ainda.';
+                            painel.insertBefore(p, btnAdd);
+                        }
+
+                        // Recoloca o badge "sem loja" se todas foram excluídas
+                        const trDetalhes = painel.closest('.linha-detalhes');
+                        if (trDetalhes && trDetalhes.previousElementSibling) {
+                            const celulaAlias = trDetalhes.previousElementSibling.querySelectorAll('td')[1];
+                            if (celulaAlias && !celulaAlias.querySelector('.badge.bg-warning')) {
+                                const span = document.createElement('span');
+                                span.className = 'badge bg-warning text-dark';
+                                span.style.fontSize = '0.7em';
+                                span.title = 'Nenhuma loja cadastrada para este alias';
+                                span.textContent = '📭 sem loja';
+                                celulaAlias.appendChild(span);
+                            }
+                        }
+                    }
                 } else {
                     alert('Erro ao excluir: ' + (data.mensagem || 'tente novamente.'));
                 }
@@ -2532,6 +2687,7 @@ HTML_LAYOUT = """
         function editarCname(botao) {
             const celula = botao.closest('.cname-cell');
             const span = celula.querySelector('.cname-texto');
+            const btnCopy = celula.querySelector('.btn-copy');
             const alias = celula.dataset.alias;
             const valorAtual = span.textContent;
 
@@ -2540,23 +2696,47 @@ HTML_LAYOUT = """
             input.value = valorAtual;
             input.className = 'form-control form-control-sm';
             input.style.display = 'inline-block';
-            input.style.width = '260px';
+            input.style.width = '240px';
 
             const btnSalvar = document.createElement('button');
             btnSalvar.className = 'btn-copy';
             btnSalvar.style.background = '#e8f8f0';
             btnSalvar.style.color = '#1e8449';
             btnSalvar.textContent = '💾 Salvar';
+
+            const btnCancelar = document.createElement('button');
+            btnCancelar.className = 'btn-copy';
+            btnCancelar.style.background = '#fde8e8';
+            btnCancelar.style.color = '#c0392b';
+            btnCancelar.textContent = '✖';
+            btnCancelar.title = 'Cancelar';
+
+            function finalizarEdicao(val) {
+                span.textContent = val;
+                input.replaceWith(span);
+                btnSalvar.replaceWith(botao);
+                if (btnCancelar.parentNode) btnCancelar.remove();
+                if (btnCopy) {
+                    btnCopy.dataset.cname = val;
+                    btnCopy.title = val + ' — clique para copiar';
+                }
+                celula.dataset.host = val;
+            }
+
             btnSalvar.onclick = function() {
+                const novoCname = input.value.trim();
                 csrfFetch('/admin/cname/salvar', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ alias: alias, cname: input.value.trim() })
+                    body: JSON.stringify({ alias: alias, cname: novoCname })
                 })
                 .then(r => r.json())
                 .then(data => {
                     if (data.sucesso) {
-                        location.reload();
+                        finalizarEdicao(novoCname);
+                        celula.style.transition = 'background-color 0.4s ease';
+                        celula.style.backgroundColor = '#d4edda';
+                        setTimeout(() => { celula.style.backgroundColor = ''; }, 900);
                     } else {
                         alert('Erro ao salvar: ' + (data.mensagem || 'tente novamente.'));
                     }
@@ -2564,8 +2744,15 @@ HTML_LAYOUT = """
                 .catch(() => alert('Não foi possível salvar. Verifique sua conexão.'));
             };
 
+            btnCancelar.onclick = function() {
+                input.replaceWith(span);
+                btnSalvar.replaceWith(botao);
+                btnCancelar.remove();
+            };
+
             span.replaceWith(input);
             botao.replaceWith(btnSalvar);
+            btnSalvar.after(btnCancelar);
             input.focus();
         }
 
@@ -5031,15 +5218,16 @@ def salvar_cliente_loja():
              valores['cod_info'], valores['cli_situacao'], ignorar_incompleto, loja_id, alias)
         )
     else:
-        conn.execute(
+        cursor = conn.execute(
             "INSERT INTO clientes_lojas (alias, loj_codigo, loj_fantasia, loj_nome, loj_cnpj, cod_info, cli_situacao, ignorar_incompleto) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (alias, valores['loj_codigo'], valores['loj_fantasia'], valores['loj_nome'], valores['loj_cnpj'],
              valores['cod_info'], valores['cli_situacao'], ignorar_incompleto)
         )
+        loja_id = cursor.lastrowid
     conn.commit()
     conn.close()
-    return jsonify({"sucesso": True})
+    return jsonify({"sucesso": True, "id": loja_id})
 
 
 @bancos_bp.route('/admin/cliente-loja/excluir', methods=['POST'])

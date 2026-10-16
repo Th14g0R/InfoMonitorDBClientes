@@ -9,7 +9,8 @@ from werkzeug.utils import secure_filename
 from seguranca import csrf_token, registrar_acao_admin
 from escalas import (EQUIPES, TIPOS_SABADO, FAIXAS_SABADO, preservar_banco_antes_migracao,
                      migrar_horarios, validar_data, aplicar_troca, intervalos_cobertura,
-                     validar_participante_sabado, ajustar_escala, registrar_substituicao)
+                     validar_participante_sabado, ajustar_escala, registrar_substituicao,
+                     obter_proximo_domingo, gerar_rodizio_domingo)
 
 horarios_bp = Blueprint('horarios', __name__, template_folder='templates')
 DATA_DIR = os.path.abspath(os.getenv('DATA_DIR', '.'))
@@ -546,6 +547,16 @@ HTML_INTERFACE = """
         </div>
     </div>
 
+    <div style="background: var(--cor-superficie); border-bottom: 1px solid var(--cor-borda); padding: 8px 16px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+        <span style="font-weight: 600; font-size: 0.85rem; color: var(--cor-texto-suave);">Seções:</span>
+        <a href="#secao-escala-sabado" class="btn btn-secondary btn-sm" style="padding: 4px 10px; font-size: 0.82rem;">📅 Sábados</a>
+        <a href="#secao-escala-domingo" class="btn btn-secondary btn-sm" style="padding: 4px 10px; font-size: 0.82rem; border-color: #f39c12; color: #b7791f; font-weight: 600;">📱 Domingos (TEF)</a>
+        <a href="#secao-cobertura" class="btn btn-secondary btn-sm" style="padding: 4px 10px; font-size: 0.82rem;">📊 Cobertura</a>
+        <a href="#secao-ausencias" class="btn btn-secondary btn-sm" style="padding: 4px 10px; font-size: 0.82rem;">🏖️ Ausências</a>
+        <a href="#secao-equipe" class="btn btn-secondary btn-sm" style="padding: 4px 10px; font-size: 0.82rem;">👥 Equipe</a>
+        <a href="#secao-trocas" class="btn btn-secondary btn-sm" style="padding: 4px 10px; font-size: 0.82rem;">🔄 Trocas</a>
+    </div>
+
     <div id="conteudo-principal" class="pagina-equipe-{{ cor_equipe_dia|lower }}" role="main">
 
     {% with messages = get_flashed_messages() %}
@@ -738,6 +749,142 @@ HTML_INTERFACE = """
 
     </div>
 
+    <!-- ESCALA DE SOBREAVISO AOS DOMINGOS (TEF) -->
+    <div class="card" id="secao-escala-domingo">
+        <div class="section-header d-flex justify-between items-center flex-wrap gap-2">
+            <h3>📱 Escala de Sobreaviso aos Domingos (Plantão TEF)</h3>
+            <button onclick="window.print()" class="btn btn-export btn-sm">🖨️ Imprimir Escala</button>
+        </div>
+
+        <div class="info-box info-box-primary d-flex flex-wrap justify-between items-center gap-3">
+            <form action="/horarios#secao-escala-domingo" method="GET" class="d-flex gap-2 items-center flex-wrap">
+                <label>🔍 <strong>Filtrar Período:</strong></label>
+                <input type="date" name="data_inicio_domingo" value="{{ data_inicio_domingo }}" class="form-control" style="width: auto;" title="Data inicial">
+                <span>até</span>
+                <input type="date" name="data_fim_domingo" value="{{ data_fim_domingo }}" class="form-control" style="width: auto;" title="Data final">
+                <button type="submit" class="btn btn-primary">Filtrar</button>
+                <a href="/horarios#secao-escala-domingo" class="btn btn-success" title="Exibir os próximos domingos">Próximos Domingos</a>
+                <a href="/horarios?modo_domingo=passados#secao-escala-domingo" class="btn btn-secondary">Passados</a>
+                <a href="/horarios?modo_domingo=todos#secao-escala-domingo" class="btn btn-secondary">Histórico Completo</a>
+            </form>
+        </div>
+
+        {% if pode_editar_horarios() %}
+            <div style="background: var(--cor-superficie); border: 1px solid var(--cor-borda); border-radius: var(--raio-md); padding: var(--space-3); margin-top: 15px;">
+                <div class="d-flex flex-wrap gap-4">
+                    <!-- Gerador Automático de Rodízio -->
+                    <div style="flex: 1; min-width: 300px; border-right: 1px solid var(--cor-borda); padding-right: 15px;">
+                        <h4 style="margin: 0 0 8px; font-size: 0.95rem; color: #d35400;">⚡ Gerar Lançamento do Rodízio Automático (TEF)</h4>
+                        <form action="/horarios/gerar_sugestao_domingo" method="POST" class="d-flex flex-wrap gap-2 items-end">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <div>
+                                <label class="form-label" style="font-size: 0.8rem;">A partir do Domingo</label>
+                                <input type="date" name="data_inicio_gerar" value="{{ proximo_domingo_iso }}" required class="form-control form-control-sm" style="width: auto;">
+                            </div>
+                            <div>
+                                <label class="form-label" style="font-size: 0.8rem;">Quantidade</label>
+                                <select name="qtd_domingos" class="form-select form-select-sm" style="width: auto;">
+                                    <option value="1">1 Domingo</option>
+                                    <option value="4" selected>Próximos 4 Domingos</option>
+                                    <option value="8">Próximos 8 Domingos</option>
+                                    <option value="12">Próximos 12 Domingos</option>
+                                </select>
+                            </div>
+                            <button type="submit" class="btn btn-success btn-sm">⚡ Gerar Rodízio</button>
+                        </form>
+                        <small style="color: var(--cor-texto-suave); display: block; margin-top: 6px;">
+                            Escala automaticamente em ciclo contínuo os funcionários marcados com <em>Sobreaviso TEF</em> no cadastro, pulando quem estiver de férias/ausência.
+                        </small>
+                    </div>
+
+                    <!-- Lançamento / Ajuste Manual -->
+                    <div style="flex: 1; min-width: 300px;">
+                        <h4 style="margin: 0 0 8px; font-size: 0.95rem; color: var(--cor-primaria);">➕ Lançar / Encaixar Manualmente</h4>
+                        <form action="/horarios/adicionar_item_escala_domingo" method="POST" class="d-flex flex-wrap gap-2 items-end">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <div>
+                                <label class="form-label" style="font-size: 0.8rem;">Domingo</label>
+                                <input type="date" name="data_domingo" value="{{ proximo_domingo_iso }}" required class="form-control form-control-sm" style="width: auto;">
+                            </div>
+                            <div>
+                                <label class="form-label" style="font-size: 0.8rem;">Funcionário</label>
+                                <select name="funcionario_id" required class="form-select form-select-sm" style="width: auto; max-width: 200px;">
+                                    <option value="">Selecione...</option>
+                                    <optgroup label="📱 Participam do Sobreaviso TEF">
+                                        {% for f in funcionarios if f[11] == 1 and f[14] == 1 %}
+                                            <option value="{{ f[0] }}">{{ f[1] }}</option>
+                                        {% endfor %}
+                                    </optgroup>
+                                    <optgroup label="Outros Colaboradores Ativos">
+                                        {% for f in funcionarios if f[11] == 1 and f[14] == 0 %}
+                                            <option value="{{ f[0] }}">{{ f[1] }}</option>
+                                        {% endfor %}
+                                    </optgroup>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="form-label" style="font-size: 0.8rem;">Obs (Opcional)</label>
+                                <input type="text" name="observacao" value="Sobreaviso TEF" class="form-control form-control-sm" style="width: 140px;">
+                            </div>
+                            <button type="submit" class="btn btn-primary btn-sm">Salvar</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        {% endif %}
+
+        {% if escala_domingos %}
+            <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 14px; margin-top: 15px;">
+                {% for d in escala_domingos %}
+                    <div class="card-tec" style="border-left-color: #e67e22; flex-direction: column; align-items: stretch; padding: 12px 14px; margin-bottom: 0;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--cor-borda); padding-bottom: 6px; margin-bottom: 8px;">
+                            <div style="font-weight: 700; color: #d35400; font-size: 0.98rem; display: flex; align-items: center; gap: 6px;">
+                                <span>📅 {{ d[2] }}</span>
+                            </div>
+                            {% if d[1] == proximo_domingo_iso %}
+                                <span class="badge" style="background: #27ae60; color: #fff; font-size: 0.7rem; padding: 3px 6px;">Próximo Domingo</span>
+                            {% endif %}
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 12px;">
+                            <img src="{{ d[7] or '/static/avatar-padrao.svg' }}" class="card-avatar" style="width: 44px; height: 44px; border-radius: 50%; object-fit: cover;">
+                            <div style="flex: 1; min-width: 0;">
+                                <div style="font-weight: 600; font-size: 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="{{ d[3] }}">{{ d[3] }}</div>
+                                <div style="font-size: 0.8rem; color: var(--cor-texto-suave);">{{ d[4] }}</div>
+                                <div style="margin-top: 4px;">
+                                    <span class="badge" style="background: #fff8e7; color: #b7791f; border: 1px solid #f39c12; font-size: 0.75rem; padding: 2px 6px;">
+                                        📱 {{ d[5] or 'Sobreaviso TEF' }}
+                                    </span>
+                                </div>
+                                {% if d[6] and d[6] != 'Sobreaviso TEF' and d[6] != 'Sobreaviso TEF (Rodízio)' %}
+                                    <div style="font-size: 0.76rem; color: var(--cor-texto-suave); margin-top: 3px; font-style: italic;">{{ d[6] }}</div>
+                                {% endif %}
+                            </div>
+                            {% if pode_editar_horarios() %}
+                                <div>
+                                    <form action="/horarios/excluir_escala_domingo/{{ d[0] }}" method="POST" class="form-inline">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                        <button type="submit" class="btn-icon btn-icon-danger" onclick="return confirm('Remover escala deste domingo?')" title="Remover" aria-label="Remover escala">
+                                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                                        </button>
+                                    </form>
+                                </div>
+                            {% endif %}
+                        </div>
+                    </div>
+                {% endfor %}
+            </div>
+        {% else %}
+            <div class="alert alert-info" style="margin-top: 15px; background: #fdfefe; border-left: 4px solid #3498db; padding: 14px 18px;">
+                <p style="margin: 0; font-weight: 500;">Nenhum plantão de Sobreaviso para TEF encontrado para o período filtrado.</p>
+                {% if pode_editar_horarios() %}
+                    <p style="margin: 6px 0 0; font-size: 0.88rem; color: var(--cor-texto-suave);">
+                        Utilize a opção acima <strong>⚡ Gerar Rodízio Automático</strong> para montar a escala para os próximos domingos, ou lance manualmente.
+                    </p>
+                {% endif %}
+            </div>
+        {% endif %}
+    </div>
+
     <!-- 2. COBERTURA DE ATENDIMENTO -->
     <div class="card" id="secao-cobertura">
         <div class="section-header">
@@ -894,6 +1041,7 @@ HTML_INTERFACE = """
                     <th onclick="ordenarTabela('tabela-equipe', 5)" style="cursor: pointer;">Equipe ↕</th>
                     <th onclick="ordenarTabela('tabela-equipe', 6)" style="cursor: pointer;">Tipo no Sábado ↕</th>
                     <th onclick="ordenarTabela('tabela-equipe', 7)" style="cursor:pointer;">Aniversário ↕</th>
+                    <th onclick="ordenarTabela('tabela-equipe', 8)" style="cursor:pointer;">Sobreaviso TEF (Dom) ↕</th>
                     {% if pode_editar_horarios() %} <th class="col-acoes">Ações</th> {% endif %}
                 </tr>
             </thead>
@@ -928,6 +1076,13 @@ HTML_INTERFACE = """
                         {% else %}🔄 Rodízio Normal{% endif %}
                     </td>
                     <td data-sort="{{ (f[13][3:5] ~ f[13][:2]) if f[13] else '9999' }}">{{ f[13] or 'Não informada' }}</td>
+                    <td>
+                        {% if f[14] == 1 %}
+                            <span class="badge" style="background:#e67e22; color:#fff; font-size:0.8em; padding:3px 7px; border-radius:4px;" title="Participa do Sobreaviso aos Domingos (TEF)">📱 Sim (TEF)</span>
+                        {% else %}
+                            <span style="color:var(--cor-texto-suave); opacity:0.5;">-</span>
+                        {% endif %}
+                    </td>
                     {% if pode_editar_horarios() %}
                     <td class="col-acoes">
                         <div class="acoes-container">
@@ -1278,6 +1433,18 @@ def ver_horarios():
     evento_data = request.args.get('evento_data', '').strip()
     evento_inicio = request.args.get('evento_inicio', '').strip()
     evento_fim = request.args.get('evento_fim', '').strip()
+    data_inicio_domingo = request.args.get('data_inicio_domingo', '').strip()
+    data_fim_domingo = request.args.get('data_fim_domingo', '').strip()
+    modo_domingo = request.args.get('modo_domingo', '').strip()
+    proximo_domingo_iso = obter_proximo_domingo()
+    try:
+        for valor in (data_inicio_domingo, data_fim_domingo):
+            if valor:
+                validar_data(valor)
+        if data_inicio_domingo and data_fim_domingo and data_inicio_domingo > data_fim_domingo:
+            raise ValueError
+    except ValueError:
+        return 'Informe um período de domingos válido.', 400
     try:
         pagina_eventos = max(1, int(request.args.get('pagina_eventos', '1')))
     except ValueError:
@@ -1304,7 +1471,7 @@ def ver_horarios():
         
         cursor.execute("""
             SELECT f.id, f.nome, f.cargo_id, f.jornada_id, f.equipe_sabado, f.eh_apoiador_sabado, c.nome, j.descricao, f.prioridade, f.eh_sobreaviso, f.foto_url, f.ativo, f.nao_trabalha_sabado,
-                   strftime('%d/%m', f.data_nascimento)
+                   strftime('%d/%m', f.data_nascimento), COALESCE(f.participa_sobreaviso_domingo, 0)
             FROM funcionarios f
             LEFT JOIN cargos c ON f.cargo_id = c.id
             LEFT JOIN jornadas j ON f.jornada_id = j.id
@@ -1438,6 +1605,36 @@ def ver_horarios():
         cursor.execute(query_trocas, params_trocas)
         trocas = cursor.fetchall()
 
+        query_domingo = """
+            SELECT e.id, e.data_domingo, strftime('%d/%m/%Y', e.data_domingo), f.nome,
+                   COALESCE(c.nome, 'Não definido'), e.horario, e.observacao, f.foto_url, f.id, f.ativo
+            FROM escala_domingo e
+            JOIN funcionarios f ON f.id = e.funcionario_id
+            LEFT JOIN cargos c ON c.id = f.cargo_id
+            WHERE 1=1
+        """
+        params_domingo = []
+        if modo_domingo == 'passados':
+            query_domingo += " AND e.data_domingo < ?"
+            params_domingo.append(date.today().isoformat())
+        elif modo_domingo == 'todos':
+            pass
+        elif data_inicio_domingo or data_fim_domingo:
+            if data_inicio_domingo:
+                query_domingo += " AND e.data_domingo >= ?"
+                params_domingo.append(data_inicio_domingo)
+            if data_fim_domingo:
+                query_domingo += " AND e.data_domingo <= ?"
+                params_domingo.append(data_fim_domingo)
+        else:
+            domingo_ref = date.today() - timedelta(days=7)
+            query_domingo += " AND e.data_domingo >= ?"
+            params_domingo.append(domingo_ref.isoformat())
+
+        query_domingo += " ORDER BY e.data_domingo ASC, e.id ASC"
+        cursor.execute(query_domingo, params_domingo)
+        escala_domingos = cursor.fetchall()
+
         feriado_cobertura = None
         ev_cob = conn.execute('''
             SELECT id, nome, tipo, hora_inicio, hora_fim, observacao FROM eventos
@@ -1462,6 +1659,11 @@ def ver_horarios():
         cargos=cargos, 
         jornadas=jornadas,
         escala_sabados=escala_sabados,
+        escala_domingos=escala_domingos,
+        data_inicio_domingo=data_inicio_domingo,
+        data_fim_domingo=data_fim_domingo,
+        modo_domingo=modo_domingo,
+        proximo_domingo_iso=proximo_domingo_iso,
         cor_equipe_dia=cor_equipe_dia,
         trocas=trocas,
         cobertura=cobertura,
@@ -1642,17 +1844,18 @@ def salvar_funcionario():
             nome_foto = f"{datetime.now():%Y%m%d%H%M%S%f}_{secure_filename(foto.filename)}"
             foto.save(os.path.join(UPLOAD_FOLDER, nome_foto))
             foto_url = f'/static/fotos/{nome_foto}'
+        participa_domingo = 1 if request.form.get('participa_sobreaviso_domingo') in ('1', 'true', 'on') else 0
         valores = (nome, prioridade, cargo, jornada, equipe, int(tipo == 'apoio'),
-                   int(tipo == 'sobreaviso'), int(tipo == 'nenhum'), ativo, nascimento or None)
+                   int(tipo == 'sobreaviso'), int(tipo == 'nenhum'), ativo, nascimento or None, participa_domingo)
         if func_id:
             conn.execute('''UPDATE funcionarios SET nome=?, prioridade=?, cargo_id=?, jornada_id=?,
                 equipe_sabado=?, eh_apoiador_sabado=?, eh_sobreaviso=?, nao_trabalha_sabado=?, ativo=?,
-                data_nascimento=?, foto_url=COALESCE(?, foto_url) WHERE id=?''', (*valores, foto_url, func_id))
+                data_nascimento=?, participa_sobreaviso_domingo=?, foto_url=COALESCE(?, foto_url) WHERE id=?''', (*valores, foto_url, func_id))
             acao = 'atualizar_funcionario'
         else:
             conn.execute('''INSERT INTO funcionarios (nome, prioridade, cargo_id, jornada_id,
-                equipe_sabado, eh_apoiador_sabado, eh_sobreaviso, nao_trabalha_sabado, ativo, data_nascimento, foto_url)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (*valores, foto_url or ''))
+                equipe_sabado, eh_apoiador_sabado, eh_sobreaviso, nao_trabalha_sabado, ativo, data_nascimento, participa_sobreaviso_domingo, foto_url)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (*valores, foto_url or ''))
             acao = 'criar_funcionario'
     
     # Auditoria: criação/atualização de funcionário (Opção 3)
@@ -1663,6 +1866,7 @@ def salvar_funcionario():
         'equipe_sabado': equipe,
         'tipo_sabado': tipo,
         'ativo': ativo,
+        'participa_sobreaviso_domingo': participa_domingo,
     })
     
     return redirect(url_for('horarios.ver_horarios') + '#secao-equipe')
@@ -2268,6 +2472,126 @@ def excluir_escala_sabado(id):
         flash(f"Erro ao excluir item da escala: {str(e)}", "danger")
 
     return redirect(destino)
+
+
+@horarios_bp.route('/horarios/gerar_sugestao_domingo', methods=['POST'])
+@login_required
+def gerar_sugestao_domingo():
+    if not pode_editar_horarios():
+        flash("Acesso não autorizado.", "danger")
+        return redirect('/horarios#secao-escala-domingo')
+
+    data_inicio = request.form.get('data_inicio_gerar', '').strip()
+    qtd = request.form.get('qtd_domingos', '4')
+
+    if not data_inicio:
+        flash("Informe a data de início para o rodízio.", "warning")
+        return redirect('/horarios#secao-escala-domingo')
+
+    try:
+        dt = validar_data(data_inicio)
+        if dt.weekday() != 6:
+            flash(f"A data selecionada ({dt.strftime('%d/%m/%Y')}) não é um domingo!", "warning")
+            return redirect('/horarios#secao-escala-domingo')
+
+        with closing(get_db()) as conn, conn:
+            autor = session.get('usuario') or str(session.get('user_id', 'sistema'))
+            total = gerar_rodizio_domingo(conn, data_inicio, qtd, autor)
+
+        registrar_acao_admin('gerar_rodizio_domingo', {
+            'data_inicio': data_inicio,
+            'qtd_domingos': qtd,
+            'total_gerado': total,
+        })
+        flash(f"Rodízio de Sobreaviso para TEF gerado com sucesso para {total} domingo(s)!", "success")
+    except ValueError as ve:
+        flash(f"Não foi possível gerar rodízio: {str(ve)}", "warning")
+    except Exception as e:
+        flash(f"Erro ao gerar rodízio de domingo: {str(e)}", "danger")
+
+    return redirect('/horarios#secao-escala-domingo')
+
+
+@horarios_bp.route('/horarios/adicionar_item_escala_domingo', methods=['POST'])
+@login_required
+def adicionar_item_escala_domingo():
+    if not pode_editar_horarios():
+        flash("Acesso não autorizado.", "danger")
+        return redirect('/horarios#secao-escala-domingo')
+
+    data_domingo = request.form.get('data_domingo', '').strip()
+    funcionario_id = request.form.get('funcionario_id', '').strip()
+    observacao = (request.form.get('observacao') or 'Sobreaviso TEF').strip()
+
+    if not data_domingo or not funcionario_id:
+        flash("Selecione o domingo e o funcionário para a escala.", "warning")
+        return redirect('/horarios#secao-escala-domingo')
+
+    try:
+        dt = validar_data(data_domingo)
+        if dt.weekday() != 6:
+            flash(f"A data selecionada ({dt.strftime('%d/%m/%Y')}) não é um domingo!", "warning")
+            return redirect('/horarios#secao-escala-domingo')
+
+        f_id = int(funcionario_id)
+        autor = session.get('usuario') or str(session.get('user_id', 'sistema'))
+
+        with closing(get_db()) as conn, conn:
+            existe = conn.execute("SELECT id FROM escala_domingo WHERE data_domingo = ?", (data_domingo,)).fetchone()
+            if existe:
+                conn.execute("""
+                    UPDATE escala_domingo
+                    SET funcionario_id = ?, horario = 'Sobreaviso TEF', observacao = ?, registrado_por = ?
+                    WHERE id = ?
+                """, (f_id, observacao, autor, existe[0]))
+            else:
+                conn.execute("""
+                    INSERT INTO escala_domingo (data_domingo, funcionario_id, horario, observacao, registrado_por)
+                    VALUES (?, ?, 'Sobreaviso TEF', ?, ?)
+                """, (data_domingo, f_id, observacao, autor))
+
+        registrar_acao_admin('adicionar_item_escala_domingo', {
+            'data_domingo': data_domingo,
+            'funcionario_id': f_id,
+            'observacao': observacao,
+        })
+        flash("Plantão de Sobreaviso de domingo registrado com sucesso!", "success")
+    except Exception as e:
+        flash(f"Erro ao registrar escala de domingo: {str(e)}", "danger")
+
+    return redirect('/horarios#secao-escala-domingo')
+
+
+@horarios_bp.route('/horarios/excluir_escala_domingo/<int:id>', methods=['POST'])
+@login_required
+def excluir_escala_domingo(id):
+    if not pode_editar_horarios():
+        flash("Acesso não autorizado.", "danger")
+        return redirect('/horarios#secao-escala-domingo')
+
+    destino = request.referrer or (url_for('horarios.ver_horarios') + '#secao-escala-domingo')
+    try:
+        with closing(get_db()) as conn, conn:
+            escala = conn.execute("SELECT data_domingo, funcionario_id, horario FROM escala_domingo WHERE id = ?", (id,)).fetchone()
+            if not escala:
+                flash("Item da escala de domingo não encontrado.", "warning")
+                return redirect(destino)
+
+            conn.execute("DELETE FROM escala_domingo WHERE id = ?", (id,))
+            conn.commit()
+
+        registrar_acao_admin('excluir_escala_domingo', {
+            'escala_id': id,
+            'data_domingo': escala['data_domingo'],
+            'funcionario_id': escala['funcionario_id'],
+            'horario': escala['horario'],
+        })
+        flash("Plantão do domingo excluído com sucesso!", "success")
+    except Exception as e:
+        flash(f"Erro ao excluir escala de domingo: {str(e)}", "danger")
+
+    return redirect(destino)
+
 
 @horarios_bp.route('/horarios/login', methods=['GET', 'POST'])
 def login():

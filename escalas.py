@@ -1,7 +1,7 @@
 import re
 import sqlite3
 from contextlib import closing
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 EQUIPES = ('Amarela', 'Verde', 'Estágio', 'Sem Equipe')
@@ -40,6 +40,10 @@ def migrar_horarios(conn):
     colunas = {row[1] for row in conn.execute('PRAGMA table_info(funcionarios)')}
     if 'nao_trabalha_sabado' not in colunas:
         conn.execute('ALTER TABLE funcionarios ADD COLUMN nao_trabalha_sabado INTEGER NOT NULL DEFAULT 0')
+    if 'prioridade' not in colunas:
+        conn.execute("ALTER TABLE funcionarios ADD COLUMN prioridade TEXT DEFAULT 'P1'")
+    if 'participa_sobreaviso_domingo' not in colunas:
+        conn.execute('ALTER TABLE funcionarios ADD COLUMN participa_sobreaviso_domingo INTEGER NOT NULL DEFAULT 0')
     colunas = {row[1] for row in conn.execute('PRAGMA table_info(trocas_sabado)')}
     for nome, tipo in (('detalhes', 'TEXT'), ('aplicada', 'INTEGER NOT NULL DEFAULT 0'),
                        ('registrado_por', 'INTEGER')):
@@ -51,6 +55,17 @@ def migrar_horarios(conn):
         tarde_inicio TEXT NOT NULL DEFAULT '', tarde_fim TEXT NOT NULL DEFAULT '',
         PRIMARY KEY (data, funcionario_id)
     )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS escala_domingo (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        data_domingo TEXT NOT NULL,
+        funcionario_id INTEGER NOT NULL,
+        horario TEXT NOT NULL DEFAULT 'Sobreaviso TEF',
+        observacao TEXT DEFAULT '',
+        registrado_por INTEGER,
+        criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (funcionario_id) REFERENCES funcionarios(id)
+    )''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_escala_domingo_data ON escala_domingo(data_domingo)')
     conn.execute('''INSERT INTO jornadas
         (descricao, tipo, manha_inicio, manha_fim, almoco_inicio, almoco_fim, tarde_inicio, tarde_fim)
         SELECT '08:00 às 12:00 (Meio período)', 'Semana', '08:00', '12:00', '', '', '', ''
@@ -280,3 +295,88 @@ def intervalos_cobertura(conn, data):
             intervalos = [(horarios[i], horarios[i + 1]) for i in (0, 2) if horarios[i] and horarios[i + 1]]
         resultado.append((pessoa, nome, foto, intervalos))
     return resultado
+
+
+def obter_proximo_domingo(data_base=None):
+    if isinstance(data_base, str) and data_base:
+        hoje = validar_data(data_base)
+    elif isinstance(data_base, date):
+        hoje = data_base
+    else:
+        hoje = date.today()
+    # No Python: segunda=0 ... sábado=5, domingo=6
+    dias_ate_domingo = (6 - hoje.weekday()) % 7
+    proximo = hoje + timedelta(days=dias_ate_domingo)
+    return proximo.isoformat()
+
+
+def gerar_rodizio_domingo(conn, data_inicio, qtd_domingos=1, autor=None):
+    dt_inicio = validar_data(data_inicio)
+    if dt_inicio.weekday() != 6:
+        raise ValueError(f"A data {dt_inicio.strftime('%d/%m/%Y')} não é um domingo.")
+    try:
+        qtd_domingos = max(1, min(int(qtd_domingos), 52))
+    except (TypeError, ValueError):
+        qtd_domingos = 1
+
+    candidatos = conn.execute("""
+        SELECT f.id, f.nome
+        FROM funcionarios f
+        WHERE f.ativo = 1 AND f.participa_sobreaviso_domingo = 1
+        ORDER BY f.prioridade ASC, f.nome ASC
+    """).fetchall()
+
+    if not candidatos:
+        raise ValueError("Nenhum funcionário ativo está marcado para participar do Sobreaviso aos Domingos.")
+
+    cand_ids = [c[0] for c in candidatos]
+    total_gerados = 0
+
+    for i in range(qtd_domingos):
+        dt_domingo = dt_inicio + timedelta(days=7 * i)
+        data_str = dt_domingo.isoformat()
+
+        # Descobre quem foi o último escalado antes desta data
+        ultimo_row = conn.execute("""
+            SELECT funcionario_id FROM escala_domingo
+            WHERE data_domingo < ?
+            ORDER BY data_domingo DESC, id DESC LIMIT 1
+        """, (data_str,)).fetchone()
+
+        if ultimo_row and ultimo_row[0] in cand_ids:
+            idx_inicio = (cand_ids.index(ultimo_row[0]) + 1) % len(cand_ids)
+        else:
+            idx_inicio = 0
+
+        # Escolhe o primeiro candidato da rotação que não possua ausência cadastrada nesta data
+        escolhido_id = None
+        for offset in range(len(cand_ids)):
+            tentativa_id = cand_ids[(idx_inicio + offset) % len(cand_ids)]
+            esta_ausente = conn.execute("""
+                SELECT 1 FROM ausencias
+                WHERE funcionario_id = ? AND ? BETWEEN data_inicio AND data_fim
+            """, (tentativa_id, data_str)).fetchone()
+            if not esta_ausente:
+                escolhido_id = tentativa_id
+                break
+
+        if not escolhido_id:
+            # Se todos estiverem ausentes, mantém a ordem da vez
+            escolhido_id = cand_ids[idx_inicio]
+
+        existe = conn.execute("SELECT id FROM escala_domingo WHERE data_domingo = ?", (data_str,)).fetchone()
+        if existe:
+            conn.execute("""
+                UPDATE escala_domingo
+                SET funcionario_id = ?, horario = 'Sobreaviso TEF', observacao = 'Sobreaviso TEF (Rodízio)', registrado_por = ?
+                WHERE id = ?
+            """, (escolhido_id, autor, existe[0]))
+        else:
+            conn.execute("""
+                INSERT INTO escala_domingo (data_domingo, funcionario_id, horario, observacao, registrado_por)
+                VALUES (?, ?, 'Sobreaviso TEF', 'Sobreaviso TEF (Rodízio)', ?)
+            """, (data_str, escolhido_id, autor))
+        total_gerados += 1
+
+    return total_gerados
+

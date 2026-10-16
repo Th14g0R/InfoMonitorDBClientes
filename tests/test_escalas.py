@@ -5,7 +5,8 @@ from contextlib import closing
 from pathlib import Path
 
 from escalas import (migrar_horarios, aplicar_troca, jornada_no_dia, intervalos_cobertura,
-                     ajustar_escala, preservar_banco_antes_migracao, registrar_substituicao)
+                     ajustar_escala, preservar_banco_antes_migracao, registrar_substituicao,
+                     obter_proximo_domingo, gerar_rodizio_domingo)
 
 
 class EscalasTest(unittest.TestCase):
@@ -129,3 +130,47 @@ class EscalasTest(unittest.TestCase):
                 self.assertEqual(conn.execute('SELECT nome FROM funcionarios').fetchone()[0], 'Registro preservado')
             with closing(sqlite3.connect(origem)) as conn:
                 self.assertEqual(len(conn.execute('PRAGMA table_info(funcionarios)').fetchall()), 2)
+
+    def test_obter_proximo_domingo(self):
+        # 2026-10-16 é uma sexta-feira; o próximo domingo é 2026-10-18
+        self.assertEqual(obter_proximo_domingo('2026-10-16'), '2026-10-18')
+        # 2026-10-18 já é um domingo
+        self.assertEqual(obter_proximo_domingo('2026-10-18'), '2026-10-18')
+
+    def test_gerar_rodizio_domingo_rotacao_e_ausencias(self):
+        # Cria 3 funcionários que participam do rodízio de domingo (TEF)
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS ausencias (
+                id INTEGER PRIMARY KEY, funcionario_id INTEGER, data_inicio TEXT, data_fim TEXT, motivo TEXT
+            );
+            UPDATE funcionarios SET participa_sobreaviso_domingo = 1 WHERE id IN (1, 2);
+            INSERT INTO funcionarios (id, nome, ativo, prioridade, participa_sobreaviso_domingo)
+            VALUES (3, 'Carlos', 1, 'P1', 1);
+        """)
+        # Domingo 1: 2026-10-18
+        total = gerar_rodizio_domingo(self.conn, '2026-10-18', qtd_domingos=3, autor='admin')
+        self.assertEqual(total, 3)
+
+        escalas = self.conn.execute("SELECT data_domingo, funcionario_id FROM escala_domingo ORDER BY data_domingo").fetchall()
+        # Ordenados por prioridade / nome: 1 (Ana), 2 (Bruno), 3 (Carlos)
+        self.assertEqual(escalas, [
+            ('2026-10-18', 1),
+            ('2026-10-25', 2),
+            ('2026-11-01', 3)
+        ])
+
+        # Agora cadastra ausência para Bruno (id=2) no segundo domingo (2026-10-25)
+        self.conn.execute("INSERT INTO ausencias (funcionario_id, data_inicio, data_fim, motivo) VALUES (2, '2026-10-24', '2026-10-26', 'Férias')")
+        # Regenera a partir de 2026-10-25
+        gerar_rodizio_domingo(self.conn, '2026-10-25', qtd_domingos=1, autor='admin')
+        # Deve pular Bruno (id=2) e escalar Carlos (id=3)
+        row = self.conn.execute("SELECT funcionario_id FROM escala_domingo WHERE data_domingo = '2026-10-25'").fetchone()
+        self.assertEqual(row[0], 3)
+
+    def test_gerar_rodizio_domingo_validacoes(self):
+        # Data que não é domingo
+        with self.assertRaises(ValueError):
+            gerar_rodizio_domingo(self.conn, '2026-10-17')  # Sábado
+        # Nenhum participante com participa_sobreaviso_domingo = 1
+        with self.assertRaises(ValueError):
+            gerar_rodizio_domingo(self.conn, '2026-10-18')

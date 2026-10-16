@@ -52,3 +52,12 @@
         <option value="0" {% if not funcionario.get('ativo', 1) %}selected{% endif %}>Inativo</option>
     </select>
 </div>
+<div class="campo-funcionario" style="grid-column: 1 / -1; background: #fff8e7; padding: 12px 14px; border-radius: 6px; border: 1px solid #f39c12; margin-top: 4px;">
+    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; font-weight: 600; color: #b7791f; margin: 0;">
+        <input type="checkbox" name="participa_sobreaviso_domingo" value="1" {% if funcionario.get('participa_sobreaviso_domingo') %}checked{% endif %} style="width: 18px; height: 18px; cursor: pointer;">
+        <span>📱 Participa do Rodízio de Sobreaviso aos Domingos (Atendimento TEF)</span>
+    </label>
+    <small style="color: #744210; display: block; margin-top: 4px; font-weight: normal; margin-left: 28px;">
+        Marque esta opção para incluir este colaborador no rodízio de atendimentos específicos de TEF aos domingos em regime de Sobreaviso.
+    </small>
+</div>

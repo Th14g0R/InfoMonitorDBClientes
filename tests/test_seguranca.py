@@ -1890,6 +1890,80 @@ O cliente loja-critica esta a mais de 1 dia sem bkp - status ERRO 2026-10-09 10:
         # Termo inexistente
         self.assertFalse(_banco_bate_busca(banco, '99.999.999/9999-99', lojas))
 
+    def test_sobreaviso_domingo_tef_fluxo_completo(self):
+        # 1. Cadastra funcionário com participa_sobreaviso_domingo = 1
+        with closing(self.bancos.get_db_connection()) as conn:
+            cargo = conn.execute("SELECT id FROM cargos LIMIT 1").fetchone()[0]
+            jornada = conn.execute("SELECT id FROM jornadas WHERE tipo = 'Semana' LIMIT 1").fetchone()[0]
+
+        dados = dict(
+            csrf_token=self.token,
+            nome='Especialista TEF',
+            prioridade='P1',
+            cargo_id=cargo,
+            jornada_id=jornada,
+            equipe_sabado='Verde',
+            tipo_sabado='rodizio',
+            ativo='1',
+            participa_sobreaviso_domingo='1'
+        )
+        res = self.client.post('/horarios/salvar_funcionario', data=dados)
+        self.assertEqual(res.status_code, 302)
+
+        with closing(self.bancos.get_db_connection()) as conn:
+            func = conn.execute("SELECT id, participa_sobreaviso_domingo FROM funcionarios WHERE nome = ?", (dados['nome'],)).fetchone()
+        self.assertIsNotNone(func)
+        self.assertEqual(func['participa_sobreaviso_domingo'], 1)
+
+        # 2. Verifica exibição na página /horarios
+        pagina = self.client.get('/horarios')
+        self.assertEqual(pagina.status_code, 200)
+        self.assertIn('📱 Sim (TEF)'.encode('utf-8'), pagina.data)
+        self.assertIn('secao-escala-domingo'.encode('utf-8'), pagina.data)
+
+        # 3. Gera rodízio automático a partir de um domingo
+        domingo = '2026-10-18'
+        res_gerar = self.client.post('/horarios/gerar_sugestao_domingo', data=dict(
+            csrf_token=self.token,
+            data_inicio_gerar=domingo,
+            qtd_domingos='2'
+        ))
+        self.assertEqual(res_gerar.status_code, 302)
+
+        with closing(self.bancos.get_db_connection()) as conn:
+            escalas = conn.execute("SELECT id, data_domingo, funcionario_id FROM escala_domingo ORDER BY data_domingo").fetchall()
+        self.assertEqual(len(escalas), 2)
+        self.assertEqual(escalas[0]['data_domingo'], '2026-10-18')
+        self.assertEqual(escalas[0]['funcionario_id'], func['id'])
+        self.assertEqual(escalas[1]['data_domingo'], '2026-10-25')
+
+        # 4. Inserção / ajuste manual em domingo específico
+        res_manual = self.client.post('/horarios/adicionar_item_escala_domingo', data=dict(
+            csrf_token=self.token,
+            data_domingo='2026-11-01',
+            funcionario_id=func['id'],
+            observacao='Sobreaviso TEF Especial'
+        ))
+        self.assertEqual(res_manual.status_code, 302)
+        with closing(self.bancos.get_db_connection()) as conn:
+            manual = conn.execute("SELECT id, observacao FROM escala_domingo WHERE data_domingo = '2026-11-01'").fetchone()
+        self.assertIsNotNone(manual)
+        self.assertEqual(manual['observacao'], 'Sobreaviso TEF Especial')
+
+        # 5. Exclusão de item de domingo
+        res_del = self.client.post(f"/horarios/excluir_escala_domingo/{manual['id']}", data=dict(
+            csrf_token=self.token
+        ))
+        self.assertEqual(res_del.status_code, 302)
+        with closing(self.bancos.get_db_connection()) as conn:
+            deletado = conn.execute("SELECT 1 FROM escala_domingo WHERE id = ?", (manual['id'],)).fetchone()
+        self.assertIsNone(deletado)
+
+        # 6. Teste de filtros por período e passados
+        res_filtro = self.client.get('/horarios?data_inicio_domingo=2026-10-01&data_fim_domingo=2026-10-31#secao-escala-domingo')
+        self.assertEqual(res_filtro.status_code, 200)
+        self.assertIn('2026-10-18'.encode('utf-8'), res_filtro.data)
+
 
 if __name__ == '__main__':
     unittest.main()
