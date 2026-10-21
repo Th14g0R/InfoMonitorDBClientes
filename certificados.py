@@ -1,4 +1,5 @@
 """Monitoramento TLS com consulta pública e alterações autenticadas."""
+import hmac
 import ipaddress
 import logging
 import math
@@ -13,7 +14,9 @@ from email.message import EmailMessage
 from zoneinfo import ZoneInfo
 
 from cryptography import x509
-from flask import flash, redirect, render_template, request, url_for
+from flask import current_app, flash, jsonify, redirect, render_template, request, session, url_for
+
+from seguranca import destino_redirect_seguro, registrar_acao_admin
 
 LOGGER = logging.getLogger(__name__)
 ALERTA_DIAS = 35
@@ -228,6 +231,77 @@ def configurar_certificados(bp, conectar, tem_permissao, scheduler):
             return 'Acesso negado.', 403
         flash(monitor.verificar(manual=True))
         return redirect(url_for('bancos.certificados'))
+
+    @bp.route('/certificados/remover', methods=['POST'], endpoint='remover')
+    def remover_certificado():
+        if not session.get('logged_in'):
+            destino_login = '/admin/login'
+            try:
+                destino_login = url_for('bancos.admin_login', next='/certificados')
+            except Exception:
+                pass
+            return redirect(destino_redirect_seguro(destino_login, fallback='/admin/login'))
+
+        if not tem_permissao('perm_certificados'):
+            return 'Acesso negado.', 403
+
+        # Validação de CSRF como camada de defesa em profundidade
+        esperado_csrf = session.get('_csrf_token')
+        recebido_csrf = request.headers.get('X-CSRF-Token') or request.form.get('csrf_token')
+        if esperado_csrf:
+            if not recebido_csrf or not hmac.compare_digest(esperado_csrf.encode(), recebido_csrf.encode()):
+                return jsonify(erro='Requisição inválida. Recarregue a página e tente novamente.'), 400
+
+        subdominio_bruto = request.form.get('subdominio') or request.form.get('dominio')
+        destino_certificados = '/certificados'
+        try:
+            destino_certificados = url_for('bancos.certificados')
+        except Exception:
+            pass
+
+        try:
+            dominio = validar_dominio(subdominio_bruto)
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(destino_redirect_seguro(destino_certificados, fallback='/certificados'))
+
+        with closing(conectar()) as conn, conn:
+            existe = conn.execute('SELECT 1 FROM certificados WHERE dominio = ?', (dominio,)).fetchone()
+            if not existe:
+                flash(f'Subdomínio {dominio} não encontrado.')
+                return redirect(destino_redirect_seguro(destino_certificados, fallback='/certificados'))
+
+            conn.execute('DELETE FROM certificados WHERE dominio = ?', (dominio,))
+            conn.execute('UPDATE certificados_rotina SET semana=NULL WHERE id=1')
+
+        try:
+            registrar_acao_admin('remover_subdominio_certificado', {
+                'subdominio': dominio,
+                'usuario_id': session.get('user_id'),
+                'usuario_nome': session.get('user_nome')
+            })
+        except Exception as e_auditoria:
+            LOGGER.warning('Falha ao registrar auditoria de remocao de certificado: %s', e_auditoria)
+
+        flash(f'Subdomínio {dominio} removido com sucesso.')
+        return redirect(destino_redirect_seguro(destino_certificados, fallback='/certificados'))
+
+    @bp.record_once
+    def _registrar_alias_certificados(state):
+        if 'certificados.remover' not in state.app.view_functions:
+            state.app.add_url_rule(
+                '/certificados/remover',
+                endpoint='certificados.remover',
+                view_func=remover_certificado,
+                methods=['POST']
+            )
+        if 'certificados.certificados' not in state.app.view_functions:
+            state.app.add_url_rule(
+                '/certificados',
+                endpoint='certificados.certificados',
+                view_func=listar,
+                methods=['GET']
+            )
 
     scheduler.add_job(monitor.verificar, 'cron', day_of_week='sun', hour=0, minute=0, timezone='America/Fortaleza',
                       id='certificados_semanal', replace_existing=True, max_instances=1, coalesce=True)

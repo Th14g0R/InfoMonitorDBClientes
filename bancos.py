@@ -169,6 +169,24 @@ else:
 
 CAMINHO_DATABASES_CONF = '/opt/firebird/databases.conf'
 DIRETORIO_BASE = '/opt/infobrasil'
+
+def diretorio_base_servidor(servidor):
+    return posixpath.join(DIRETORIO_BASE, '3.0') if servidor == 'DB05' else DIRETORIO_BASE
+
+TIMEOUT_FIND_ORFAOS = int(os.getenv('TIMEOUT_FIND_ORFAOS', '30'))
+TIMEOUT_CONEXAO_SSH = int(os.getenv('TIMEOUT_CONEXAO_SSH', '10'))
+
+def _sanitizar_texto_log(texto, credenciais=None):
+    """Remove senhas e segredos conhecidos antes de registrar no log."""
+    if not texto:
+        return ''
+    resultado = str(texto)
+    if credenciais:
+        for cred in credenciais:
+            if cred and isinstance(cred, str) and len(cred) >= 3 and cred in resultado:
+                resultado = resultado.replace(cred, '***')
+    return resultado
+
 DATA_DIR = os.path.abspath(os.getenv('DATA_DIR', '.'))
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_HISTORICO = os.path.join(DATA_DIR, 'historico_bancos.db')
@@ -1214,7 +1232,8 @@ def _obter_dados_servidor_linux(nome_servidor, info_servidor, busca=None, buscar
     
     ssh = None
     try:
-        ssh = conectar_ssh(info_servidor, timeout=5)
+        timeout_ssh = int(os.getenv('TIMEOUT_CONEXAO_SSH', str(TIMEOUT_CONEXAO_SSH)))
+        ssh = conectar_ssh(info_servidor, timeout=timeout_ssh)
         sftp = ssh.open_sftp()
 
         try:
@@ -1341,11 +1360,18 @@ def _obter_dados_servidor_linux(nome_servidor, info_servidor, busca=None, buscar
                     ) from exc
 
         if varrer_orfaos:
-            cmd_find = f"find {shlex.quote(DIRETORIO_BASE)} -type f \\( -name '*.fdb' -o -name '*.fbk' -o -name '*.bak' \\)"
-            stdin, stdout, stderr = ssh.exec_command(cmd_find, timeout=5)
-            saida_bytes = stdout.read()
-            erro_bytes = stderr.read()
-            status_saida = stdout.channel.recv_exit_status()
+            diretorio_base = diretorio_base_servidor(nome_servidor)
+            cmd_find = f"find {shlex.quote(diretorio_base)} -type f \\( -name '*.fdb' -o -name '*.fbk' -o -name '*.bak' \\)"
+            timeout_find = int(os.getenv('TIMEOUT_FIND_ORFAOS', str(TIMEOUT_FIND_ORFAOS)))
+            try:
+                stdin, stdout, stderr = ssh.exec_command(cmd_find, timeout=timeout_find)
+                saida_bytes = stdout.read()
+                erro_bytes = stderr.read()
+                status_saida = stdout.channel.recv_exit_status()
+            except (socket.timeout, TimeoutError) as exc:
+                raise TimeoutError(
+                    f"Tempo limite ({timeout_find}s) excedido ao varrer arquivos órfãos com find em {nome_servidor}"
+                ) from exc
             if status_saida != 0:
                 detalhe = erro_bytes.decode('utf-8', errors='replace').strip()
                 raise RuntimeError(f"Falha ao varrer arquivos órfãos (status {status_saida}): {detalhe}")
@@ -1396,7 +1422,28 @@ def _obter_dados_servidor_linux(nome_servidor, info_servidor, busca=None, buscar
                 CACHE_DADOS['bancos_por_servidor'][nome_servidor] = novo_cache
 
     except Exception as e:
-        LOGGER.warning('Falha SSH ao coletar dados de %s: %s', nome_servidor, e)
+        senha = info_servidor.get('senha') if isinstance(info_servidor, dict) else None
+        segredos = [s for s in (senha, os.getenv('SECRET_KEY')) if s and len(s) >= 3]
+        curr = e
+        while curr:
+            if senha and isinstance(senha, str) and len(senha) >= 3 and hasattr(curr, 'args') and curr.args:
+                try:
+                    curr.args = tuple(
+                        arg.replace(senha, '***') if isinstance(arg, str) else arg
+                        for arg in curr.args
+                    )
+                except Exception:
+                    pass
+            curr = getattr(curr, '__cause__', None) or getattr(curr, '__context__', None)
+        causa_detalhada = _sanitizar_texto_log(
+            f"{type(e).__name__}: {e}" + (f" (causa: {e.__cause__})" if getattr(e, '__cause__', None) else ""),
+            segredos
+        )
+        LOGGER.warning(
+            'Falha SSH ao coletar dados de %s: %s',
+            nome_servidor, causa_detalhada,
+            exc_info=True
+        )
         try:
             if ssh:
                 ssh.close()

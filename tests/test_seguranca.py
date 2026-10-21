@@ -114,6 +114,132 @@ class SegurancaTest(unittest.TestCase):
             with closing(self.bancos.get_db_connection()) as conn, conn:
                 conn.execute('DELETE FROM usuarios WHERE id=?', (uid,))
 
+    def test_certificados_remover_seguranca_completa(self):
+        # 1. Sem GET (405 Method Not Allowed)
+        self.assertEqual(self.client.get('/certificados/remover').status_code, 405)
+
+        # 2. Sem CSRF (400)
+        resp_sem_csrf = self.client.post('/certificados/remover', data={'subdominio': 'info-api.infobrasilsistemas.com.br'})
+        self.assertEqual(resp_sem_csrf.status_code, 400)
+
+        # 3. Sem login (visitante anônimo com CSRF token de visitante)
+        visitante = self.app.test_client()
+        visitante.get('/admin/login')
+        with visitante.session_transaction() as sess:
+            v_token = sess['_csrf_token']
+        resp_sem_login = visitante.post('/certificados/remover', data={
+            'subdominio': 'info-api.infobrasilsistemas.com.br',
+            'csrf_token': v_token
+        })
+        self.assertEqual(resp_sem_login.status_code, 302)
+        self.assertIn('/admin/login', resp_sem_login.headers.get('Location', ''))
+
+        # 4. Sem permissão (usuário logado sem perm_certificados)
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            uid = conn.execute('INSERT INTO usuarios(nome,email,senha_hash,ativo,perm_certificados) VALUES (?,?,?,1,0)',
+                               ('Usuario Sem Perm', 'semperm_cert@example.invalid', generate_password_hash(self.password))).lastrowid
+        try:
+            usuario = self.app.test_client()
+            usuario.get('/admin/login')
+            with usuario.session_transaction() as sess:
+                u_token = sess['_csrf_token']
+                sess.update(logged_in=True, user_id=uid, eh_master=False)
+            resp_403 = usuario.post('/certificados/remover', data={
+                'subdominio': 'info-api.infobrasilsistemas.com.br',
+                'csrf_token': u_token
+            })
+            self.assertEqual(resp_403.status_code, 403)
+        finally:
+            with closing(self.bancos.get_db_connection()) as conn, conn:
+                conn.execute('DELETE FROM usuarios WHERE id=?', (uid,))
+
+        # 5. Subdomínio inexistente (com usuário Master logado e CSRF válido)
+        resp_inexistente = self.client.post('/certificados/remover', data={
+            'subdominio': 'fantasma-inexistente.infobrasilsistemas.com.br',
+            'csrf_token': self.token
+        }, follow_redirects=False)
+        self.assertEqual(resp_inexistente.status_code, 302)
+        self.assertEqual(resp_inexistente.headers.get('Location'), '/certificados')
+
+        # 6. Remoção com sucesso
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            conn.execute("INSERT OR IGNORE INTO certificados(dominio) VALUES ('remover-teste.infobrasilsistemas.com.br')")
+            self.assertIsNotNone(conn.execute("SELECT 1 FROM certificados WHERE dominio = 'remover-teste.infobrasilsistemas.com.br'").fetchone())
+
+        with patch('certificados.registrar_acao_admin') as mock_audit:
+            resp_ok = self.client.post('/certificados/remover', data={
+                'subdominio': 'remover-teste.infobrasilsistemas.com.br',
+                'csrf_token': self.token
+            }, follow_redirects=True)
+            self.assertEqual(resp_ok.status_code, 200)
+            self.assertIn('removido com sucesso', resp_ok.text)
+            mock_audit.assert_called_once()
+            self.assertEqual(mock_audit.call_args[0][0], 'remover_subdominio_certificado')
+
+        with closing(self.bancos.get_db_connection()) as conn:
+            self.assertIsNone(conn.execute("SELECT 1 FROM certificados WHERE dominio = 'remover-teste.infobrasilsistemas.com.br'").fetchone())
+
+    def test_orfaos_timeout_e_registro_detalhado_sem_vazar_credenciais(self):
+        arquivo_conf = MagicMock()
+        arquivo_conf.__enter__.return_value.read.return_value = b'db = /opt/infobrasil/db.fdb\n'
+        sftp = MagicMock()
+        sftp.open.return_value = arquivo_conf
+        sftp.stat.return_value = MagicMock(st_size=100, st_mtime=1)
+        ssh = MagicMock()
+        ssh.open_sftp.return_value = sftp
+        
+        # Simula timeout de find no paramiko
+        ssh.exec_command.side_effect = TimeoutError('tempo esgotado no socket remoto com senha-ultra-secreta')
+        info = {'ip': '10.0.0.1', 'porta_fb': 3050, 'usuario': 'root', 'senha': 'senha-ultra-secreta'}
+        
+        self.bancos.limpar_cache_global()
+        with patch.object(self.bancos, 'conectar_ssh', return_value=ssh), \
+                self.assertLogs(self.bancos.LOGGER, level='WARNING') as logs:
+            dados, _, orfaos = self.bancos.obter_dados_servidor_linux(
+                'DB01', info, modo_busca_unificada=True, varrer_orfaos=True
+            )
+        
+        # Usuário recebe mensagem sanitizada
+        self.assertEqual(dados[0]['erro'], 'Falha na conexão ou coleta SSH.')
+        self.assertEqual(orfaos, [])
+        
+        # Log do servidor contém o tipo do erro e detalhe, mas NUNCA a senha
+        log_texto = '\n'.join(logs.output)
+        self.assertIn('DB01', log_texto)
+        self.assertIn('TimeoutError', log_texto)
+        self.assertNotIn('senha-ultra-secreta', log_texto)
+        self.assertIn('***', log_texto)
+
+    def test_orfaos_find_usa_diretorio_base_e_timeout_configurado(self):
+        arquivo_conf = MagicMock()
+        arquivo_conf.__enter__.return_value.read.return_value = b'db = /opt/infobrasil/3.0/db.fdb\n'
+        sftp = MagicMock()
+        sftp.open.return_value = arquivo_conf
+        sftp.stat.return_value = MagicMock(st_size=100, st_mtime=1)
+        stdout = MagicMock()
+        stdout.read.return_value = b''
+        stdout.channel.recv_exit_status.return_value = 0
+        stderr = MagicMock()
+        stderr.read.return_value = b''
+        ssh = MagicMock()
+        ssh.open_sftp.return_value = sftp
+        ssh.exec_command.return_value = (MagicMock(), stdout, stderr)
+        info = {'ip': 'localhost', 'porta_fb': 3050}
+
+        self.bancos.limpar_cache_global()
+        with patch.object(self.bancos, 'conectar_ssh', return_value=ssh), \
+                patch.dict('os.environ', {'TIMEOUT_FIND_ORFAOS': '45'}):
+            self.bancos.obter_dados_servidor_linux(
+                'DB05', info, modo_busca_unificada=True, varrer_orfaos=True
+            )
+        
+        # DB05 deve usar /opt/infobrasil/3.0 e timeout 45
+        ssh.exec_command.assert_called_once()
+        cmd_chamado = ssh.exec_command.call_args[0][0]
+        timeout_chamado = ssh.exec_command.call_args[1].get('timeout')
+        self.assertIn('/opt/infobrasil/3.0', cmd_chamado)
+        self.assertEqual(timeout_chamado, 45)
+
     def test_csrf_missing_invalid_and_foreign_session(self):
         for token in (None, 'invalid', 'á', 'b' * 64):
             with self.subTest(token=token):

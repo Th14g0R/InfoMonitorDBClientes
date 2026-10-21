@@ -88,8 +88,15 @@ o banco de produção. Essa cópia de migração não substitui backups periódi
 
 Use `python production.py`, nunca o servidor de desenvolvimento do Flask. O
 runner valida `BIND_HOST`, `BIND_PORT` (1–65535) e `WEB_THREADS` (1–64) e inicia
-Waitress. A configuração recomendada é `WEB_THREADS=4`; aumente somente depois
-de medir carga e memória.
+Waitress. Se `BIND_HOST` não estiver configurado no `.env`, o sistema usa o padrão
+seguro `127.0.0.1` (respondendo apenas localmente) e registra um aviso em destaque
+no log. Para que o sistema responda para outros computadores na rede interna, configure
+explicitamente `BIND_HOST=0.0.0.0` no `.env`. A configuração recomendada é `WEB_THREADS=4`;
+aumente somente depois de medir carga e memória.
+
+Para ambientes onde a varredura de arquivos Firebird ou a conexão SSH seja lenta
+devido ao volume de dados, configure `TIMEOUT_CONEXAO_SSH` (padrão 10s) e
+`TIMEOUT_FIND_ORFAOS` (padrão 30s) no `.env`.
 
 Mantenha **um único processo**. O APScheduler é criado dentro da aplicação e
 múltiplos processos executariam a mesma coleta agendada mais de uma vez. Waitress

@@ -10,6 +10,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ProductionConfigTests(unittest.TestCase):
+    def test_bind_host_padrao_aviso_destaque(self):
+        import io
+        import sys
+        stderr_capture = io.StringIO()
+        with patch('production.load_dotenv'), \
+                patch.dict(os.environ, {}, clear=True), \
+                patch.object(sys, 'stderr', stderr_capture):
+            config = production.configuracao_servidor()
+            self.assertEqual(config['host'], '127.0.0.1')
+            saida = stderr_capture.getvalue()
+            self.assertIn('AVISO DE CONFIGURAÇÃO - BIND_HOST', saida)
+            self.assertIn('127.0.0.1', saida)
+            self.assertIn('BIND_HOST=0.0.0.0', saida)
+
     def test_configuracao_valida(self):
         with patch.dict(os.environ, {
             'BIND_HOST': '127.0.0.1', 'BIND_PORT': '9123', 'WEB_THREADS': '6'
