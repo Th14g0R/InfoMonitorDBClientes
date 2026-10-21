@@ -2002,6 +2002,43 @@ O cliente loja-critica esta a mais de 1 dia sem bkp - status ERRO 2026-10-09 10:
         self.assertIn(nome_inativo, html_master)
         self.assertIn('INATIVO', html_master)
 
+    def test_destino_redirect_seguro_e_prevencao_open_redirect(self):
+        from seguranca import destino_redirect_seguro
+        # Caminhos relativos válidos
+        self.assertEqual(destino_redirect_seguro('/admin'), '/admin')
+        self.assertEqual(destino_redirect_seguro('/horarios?data=2026-10-25#secao-ausencias'), '/horarios?data=2026-10-25#secao-ausencias')
+
+        # Tentativas de Open Redirect
+        self.assertEqual(destino_redirect_seguro('https://evil.com'), '/admin')
+        self.assertEqual(destino_redirect_seguro('http://evil.com'), '/admin')
+        self.assertEqual(destino_redirect_seguro('//evil.com'), '/admin')
+        self.assertEqual(destino_redirect_seguro('/\\evil.com'), '/admin')
+        self.assertEqual(destino_redirect_seguro('/http:evil.com'), '/admin')
+        self.assertEqual(destino_redirect_seguro('\\evil.com'), '/admin')
+        self.assertEqual(destino_redirect_seguro(None), '/admin')
+        self.assertEqual(destino_redirect_seguro(''), '/admin')
+
+        # Contexto de requisição com Referer malicioso em salvar_ausencia
+        with self.app.test_request_context('/horarios/salvar_ausencia', headers={'Host': 'localhost:5000'}):
+            self.assertEqual(destino_redirect_seguro('https://evil.com/phish', '/horarios#secao-ausencias'), '/horarios#secao-ausencias')
+            # Referer interno no mesmo host
+            self.assertEqual(
+                destino_redirect_seguro('http://localhost:5000/horarios?filtro=1#secao-ausencias', '/horarios#secao-ausencias'),
+                '/horarios?filtro=1#secao-ausencias'
+            )
+
+    def test_salvar_ausencia_rejeita_open_redirect_no_referrer(self):
+        # Envia salvar_ausencia com dados inválidos e Header Referer apontando para site externo malicioso
+        res = self.client.post(
+            '/horarios/salvar_ausencia',
+            data=dict(csrf_token=self.token),
+            headers={'Referer': 'https://evil.com/ataque'}
+        )
+        self.assertEqual(res.status_code, 302)
+        # Deve redirecionar para a página interna e nunca para evil.com
+        self.assertNotIn('evil.com', res.headers.get('Location', ''))
+        self.assertTrue(res.headers.get('Location', '').startswith('/horarios') or res.headers.get('Location', '').startswith('http://localhost/horarios'))
+
 
 if __name__ == '__main__':
     unittest.main()

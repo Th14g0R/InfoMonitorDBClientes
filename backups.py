@@ -2,6 +2,7 @@ import os
 import re
 import ssl
 import smtplib
+import logging
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -10,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 
 FUSO_LOCAL = ZoneInfo('America/Fortaleza')
+LOGGER = logging.getLogger('backups')
 EMAIL_DESTINATARIO_PADRAO = 'suporte@infobrasilsistemas.com.br'
 ASSUNTO_ALERTA_PADRAO = 'Alerta de backup em atraso'
 
@@ -446,7 +448,7 @@ def enviar_email_alerta_backups(
         try:
             from dotenv import load_dotenv
             load_dotenv()
-        except Exception:
+        except (ImportError, OSError):
             pass
         usuario = usuario or os.getenv('SMTP_USER')
         senha = senha or os.getenv('SMTP_PASS')
@@ -474,8 +476,8 @@ def enviar_email_alerta_backups(
         server = smtplib.SMTP(servidor, porta, timeout=20)
         try:
             server.starttls(context=contexto)
-        except Exception:
-            pass
+        except (smtplib.SMTPException, ssl.SSLError) as tls_err:
+            LOGGER.warning('Falha ao iniciar STARTTLS no envio de e-mail de backup: %s', tls_err)
 
     try:
         server.login(usuario, senha)
@@ -483,7 +485,7 @@ def enviar_email_alerta_backups(
     finally:
         try:
             server.quit()
-        except Exception:
+        except (smtplib.SMTPException, OSError):
             pass
 
     return True, "E-mail de alerta enviado com sucesso."

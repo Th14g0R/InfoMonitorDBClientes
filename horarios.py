@@ -6,7 +6,7 @@ from contextlib import closing
 import os
 from datetime import datetime, date, timedelta
 from werkzeug.utils import secure_filename
-from seguranca import csrf_token, registrar_acao_admin
+from seguranca import csrf_token, registrar_acao_admin, destino_redirect_seguro
 from escalas import (EQUIPES, TIPOS_SABADO, FAIXAS_SABADO, preservar_banco_antes_migracao,
                      migrar_horarios, validar_data, aplicar_troca, intervalos_cobertura,
                      validar_participante_sabado, ajustar_escala, registrar_substituicao,
@@ -71,8 +71,11 @@ def eh_usuario_master():
         conn.close()
         if usuario and usuario['ativo']:
             return bool(usuario['eh_master'])
-    except Exception:
+    except (KeyError, sqlite3.Error):
         pass
+    except Exception as exc:
+        import logging
+        logging.getLogger('horarios').debug('Erro inesperado em eh_usuario_master: %s', exc)
     return bool(session.get('eh_master', False))
 
 horarios_bp.add_app_template_global(pode_editar_horarios, name='pode_editar_horarios')
@@ -196,7 +199,7 @@ def init_db():
             'hora_fim': "TEXT NOT NULL DEFAULT ''",
             'tipo': "TEXT NOT NULL DEFAULT 'comum'",
         }.items():
-            if coluna not in colunas_eventos:
+            if coluna not in colunas_eventos and coluna.isidentifier():
                 cursor.execute(f'ALTER TABLE eventos ADD COLUMN {coluna} {definicao}')
         colunas_participantes = {c[1] for c in cursor.execute('PRAGMA table_info(evento_participantes)')}
         if 'genero' not in colunas_participantes:
@@ -917,7 +920,7 @@ HTML_INTERFACE = """
                     <div class="card-tec" style="border-left-color: #e67e22; flex-direction: column; align-items: stretch; padding: 12px 14px; margin-bottom: 0;">
                         <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--cor-borda); padding-bottom: 6px; margin-bottom: 8px;">
                             <div style="font-weight: 700; color: #d35400; font-size: 0.98rem; display: flex; align-items: center; gap: 6px;">
-                                <span>📅 {{ d[2] }}</span>
+                                <span data-domingo="{{ d[1] }}">📅 {{ d[2] }}</span>
                             </div>
                             {% if d[1] == proximo_domingo_iso %}
                                 <span class="badge" style="background: #27ae60; color: #fff; font-size: 0.7rem; padding: 3px 6px;">Próximo Domingo</span>
@@ -2181,9 +2184,12 @@ def salvar_ausencia():
     hora_inicio = request.form.get('hora_inicio', '').strip()
     hora_fim = request.form.get('hora_fim', '').strip()
 
+    destino_padrao = url_for('horarios.ver_horarios') + '#secao-ausencias'
+    destino_voltar = destino_redirect_seguro(request.referrer, destino_padrao)
+
     if not funcionario_id or not motivo or not data_inicio or not data_fim:
         flash("Preencha todos os campos obrigatórios (Técnico, Motivo, Data Início e Data Fim).", "danger")
-        return redirect(request.referrer or (url_for('horarios.ver_horarios') + '#secao-ausencias'))
+        return redirect(destino_voltar)
 
     try:
         f_id = int(funcionario_id)
@@ -2191,20 +2197,20 @@ def salvar_ausencia():
         d_fim = validar_data(data_fim)
         if d_in > d_fim:
             flash("A data de início não pode ser posterior à data de término.", "danger")
-            return redirect(request.referrer or (url_for('horarios.ver_horarios') + '#secao-ausencias'))
+            return redirect(destino_voltar)
         if hora_inicio and hora_fim and d_in == d_fim and hora_inicio >= hora_fim:
             flash("A hora de início deve ser anterior à hora de término.", "danger")
-            return redirect(request.referrer or (url_for('horarios.ver_horarios') + '#secao-ausencias'))
+            return redirect(destino_voltar)
     except ValueError as ve:
         flash(f"Dados inválidos: {str(ve)}", "danger")
-        return redirect(request.referrer or (url_for('horarios.ver_horarios') + '#secao-ausencias'))
+        return redirect(destino_voltar)
 
     try:
         with closing(get_db()) as conn, conn:
             func = conn.execute("SELECT nome FROM funcionarios WHERE id = ?", (f_id,)).fetchone()
             if not func:
                 flash("Funcionário selecionado não existe.", "danger")
-                return redirect(request.referrer or (url_for('horarios.ver_horarios') + '#secao-ausencias'))
+                return redirect(destino_voltar)
 
             if ausencia_id:
                 conn.execute("""
@@ -2306,7 +2312,7 @@ def editar_ausencia(id):
 @horarios_bp.route('/horarios/excluir_ausencia/<int:id>', methods=['POST'])
 @login_required
 def excluir_ausencia(id):
-    destino = request.referrer or (url_for('horarios.ver_horarios') + '#secao-ausencias')
+    destino = destino_redirect_seguro(request.referrer, url_for('horarios.ver_horarios') + '#secao-ausencias')
     try:
         with closing(get_db()) as conn, conn:
             ausencia = conn.execute("SELECT funcionario_id, motivo, data_inicio, data_fim FROM ausencias WHERE id = ?", (id,)).fetchone()
@@ -2513,7 +2519,7 @@ def excluir_funcionario(id):
 @horarios_bp.route('/horarios/excluir_escala_sabado/<int:id>', methods=['POST'])
 @login_required
 def excluir_escala_sabado(id):
-    destino = request.referrer or (url_for('horarios.ver_horarios') + '#secao-escala-sabado')
+    destino = destino_redirect_seguro(request.referrer, url_for('horarios.ver_horarios') + '#secao-escala-sabado')
     try:
         with closing(get_db()) as conn, conn:
             escala = conn.execute("SELECT data_sabado, funcionario_id, horario FROM escala_sabado WHERE id = ?", (id,)).fetchone()
@@ -2632,7 +2638,7 @@ def excluir_escala_domingo(id):
         flash("Acesso não autorizado.", "danger")
         return redirect('/horarios#secao-escala-domingo')
 
-    destino = request.referrer or (url_for('horarios.ver_horarios') + '#secao-escala-domingo')
+    destino = destino_redirect_seguro(request.referrer, url_for('horarios.ver_horarios') + '#secao-escala-domingo')
     try:
         with closing(get_db()) as conn, conn:
             escala = conn.execute("SELECT data_domingo, funcionario_id, horario FROM escala_domingo WHERE id = ?", (id,)).fetchone()
