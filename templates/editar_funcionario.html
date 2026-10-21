@@ -3,26 +3,34 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Editar funcionário</title>
+    <title>Editar funcionário — InfoMonitor</title>
+    <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
     <link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
     <script src="{{ url_for('static', filename='ui.js') }}" defer></script>
-    <style>
-        body { font: 15px 'Segoe UI', sans-serif; color: var(--cor-texto); background: var(--cor-fundo); padding: 20px; }
-        main { max-width: 760px; margin: 24px auto; padding: 24px; background: var(--cor-superficie); border: 1px solid var(--cor-borda); border-radius: var(--raio-md); }
-        form { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: var(--space-3); }
-        .acoes { grid-column: 1 / -1; display: flex; align-items: center; gap: var(--space-3); }
-        a { color: var(--cor-primaria); }
-    </style>
 </head>
 <body>
-<main>
-    <h2>Editar funcionário</h2>
-    <p>Altere a equipe, jornada e participação aos sábados.</p>
-    <form action="{{ url_for('horarios.salvar_funcionario') }}" method="POST" enctype="multipart/form-data">
-        {% include 'campos_funcionario.html' %}
-        <p class="acoes">As escalas já registradas são preservadas. Revise as datas futuras se a disponibilidade mudar.</p>
-        <div class="acoes"><button type="submit" class="btn btn-primary">Salvar alterações</button><a href="/horarios#secao-equipe">Cancelar</a></div>
-    </form>
+<main class="container" style="max-width: 860px; margin: 32px auto; padding: 0 var(--space-4);">
+    <div class="nav-bar">
+        <div class="d-flex align-center gap-2">
+            <h2 style="margin: 0; font-size: var(--font-size-lg);">✏️ Editar Funcionário</h2>
+        </div>
+        <div>
+            <a href="/horarios#secao-equipe" class="btn btn-secondary">⬅️ Voltar aos Horários</a>
+        </div>
+    </div>
+    <div class="card">
+        <p class="text-muted" style="margin-bottom: var(--space-4);">Altere a equipe, jornada e participação aos sábados e domingos do colaborador.</p>
+        <form action="{{ url_for('horarios.salvar_funcionario') }}" method="POST" enctype="multipart/form-data" class="form-grid">
+            {% include 'campos_funcionario.html' %}
+            <div class="acoes" style="grid-column: 1 / -1; margin-top: var(--space-3); display: flex; flex-direction: column; gap: var(--space-3);">
+                <p class="text-muted" style="font-size: var(--font-size-xs); margin: 0;">As escalas já registradas são preservadas. Revise as datas futuras se a disponibilidade mudar.</p>
+                <div class="d-flex gap-2">
+                    <button type="submit" class="btn btn-primary">Salvar alterações</button>
+                    <a href="/horarios#secao-equipe" class="btn btn-secondary">Cancelar</a>
+                </div>
+            </div>
+        </form>
+    </div>
 </main>
 </body>
 </html>

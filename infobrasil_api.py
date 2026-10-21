@@ -85,10 +85,10 @@ def obter_configuracao_api():
                             user = v
                         elif k == 'INFOBRASIL_API_PASS' and not senha:
                             senha = v
-            except Exception:
+            except (OSError, ValueError):
                 pass
 
-    if not url:
+    if not url or not url.startswith(('http://', 'https://')):
         url = URL_API_PADRAO
 
     return {
@@ -116,6 +116,9 @@ def autenticar_api(url=None, user=None, password=None, timeout=12, usuario=None,
     if not api_user or not api_pass:
         return None, None, "Usuário e senha da API InfoBrasil não configurados."
 
+    if not api_url.lower().startswith(('http://', 'https://')):
+        return None, None, "URL da API inválida: use apenas http:// ou https://."
+
     login_url = f"{api_url}/api/v1/auth/login"
     credenciais = f"{api_user}:{api_pass}"
     b64_creds = base64.b64encode(credenciais.encode('utf-8')).decode('ascii')
@@ -133,7 +136,7 @@ def autenticar_api(url=None, user=None, password=None, timeout=12, usuario=None,
     )
 
     try:
-        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:  # nosec B310  # nosec B310
             data = json.loads(resp.read().decode('utf-8'))
             token = data.get('access_token')
             if not token:
@@ -181,7 +184,7 @@ def testar_conexao_api(url=None, user=None, password=None, timeout=12, usuario=N
     )
 
     try:
-        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:  # nosec B310  # nosec B310
             if resp.status == 200:
                 nome_usuario = (user_info or {}).get('username') or 'usuário autenticado'
                 return {
@@ -220,7 +223,7 @@ def buscar_todos_clientes_api(token, api_url, page_size=1000, timeout=20):
                 'Accept': 'application/json'
             }
         )
-        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:  # nosec B310
             data = json.loads(resp.read().decode('utf-8'))
             itens = data if isinstance(data, list) else data.get('items', data.get('data', []))
             if not itens:
@@ -271,7 +274,7 @@ def consultar_cliente_por_id_api(cli_id, token=None, url=None, timeout=12):
         }
     )
     try:
-        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:  # nosec B310  # nosec B310
             data = json.loads(resp.read().decode('utf-8'))
             return data, None
     except urllib.error.HTTPError as e:

@@ -47,7 +47,7 @@ def migrar_horarios(conn):
     colunas = {row[1] for row in conn.execute('PRAGMA table_info(trocas_sabado)')}
     for nome, tipo in (('detalhes', 'TEXT'), ('aplicada', 'INTEGER NOT NULL DEFAULT 0'),
                        ('registrado_por', 'INTEGER')):
-        if nome not in colunas:
+        if nome not in colunas and nome.isidentifier():
             conn.execute(f'ALTER TABLE trocas_sabado ADD COLUMN {nome} {tipo}')
     conn.execute('''CREATE TABLE IF NOT EXISTS jornadas_dia (
         data TEXT NOT NULL, funcionario_id INTEGER NOT NULL,

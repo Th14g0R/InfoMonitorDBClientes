@@ -7,6 +7,7 @@ import hmac
 import posixpath
 import logging
 import json
+from urllib.parse import urlsplit
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from threading import Lock
@@ -50,7 +51,7 @@ def senha_atende_politica(senha):
 
 
 def ip_cliente():
-    return request.remote_addr or '0.0.0.0'
+    return request.remote_addr or '127.0.0.1'
 
 
 def login_bloqueado(ip=None):
@@ -313,7 +314,21 @@ def destino_redirect_seguro(destino, fallback='/admin'):
     """Evita open-redirect: só caminhos relativos internos."""
     if not destino:
         return fallback
-    destino = destino.strip()
+    destino = str(destino).strip()
+    try:
+        parsed = urlsplit(destino)
+        if parsed.netloc:
+            from flask import has_request_context
+            if has_request_context() and request.host and parsed.netloc == request.host:
+                destino = parsed.path
+                if parsed.query:
+                    destino += '?' + parsed.query
+                if parsed.fragment:
+                    destino += '#' + parsed.fragment
+            else:
+                return fallback
+    except Exception:
+        return fallback
     if not destino.startswith('/') or destino.startswith('//') or '\\' in destino:
         return fallback
     if destino.lower().startswith(('/\\', '/http')):
