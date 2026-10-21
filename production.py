@@ -20,7 +20,8 @@ def _inteiro_config(nome, padrao, minimo, maximo):
 
 
 def _host_config():
-    host = os.getenv("BIND_HOST", "127.0.0.1").strip()
+    bind_env = os.getenv("BIND_HOST")
+    host = bind_env.strip() if bind_env else "127.0.0.1"
     if not host or len(host) > 253 or any(c.isspace() for c in host):
         raise SystemExit("BIND_HOST deve ser um IP ou nome de host valido.")
     try:
@@ -32,6 +33,18 @@ def _host_config():
             host,
         ):
             raise SystemExit("BIND_HOST deve ser um IP ou nome de host valido.")
+    if not bind_env:
+        sys.stderr.write(
+            "\n" + "=" * 78 + "\n"
+            " [AVISO DE CONFIGURAÇÃO - BIND_HOST]\n"
+            " BIND_HOST não está definido no arquivo .env.\n"
+            f" Usando padrão seguro local: {host} (o sistema NÃO responderá fora desta máquina).\n"
+            " Se precisar acessar de outras máquinas na rede interna, configure no seu .env:\n"
+            "   BIND_HOST=0.0.0.0\n"
+            + "=" * 78 + "\n\n"
+        )
+    else:
+        sys.stderr.write(f"[INFO] Servidor Waitress iniciando com BIND_HOST={host}\n")
     return host
 
 

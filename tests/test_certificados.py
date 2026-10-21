@@ -168,6 +168,94 @@ class CertificadosTest(unittest.TestCase):
             self.assertIn('Datas fictícias', teste.get_content())
             self.assertIn('01/11/2026 09:00', teste.get_content())
 
+    def test_remover_subdominio_completo(self):
+        from flask import Blueprint, url_for
+        app = Flask(__name__, template_folder=str(Path.cwd() / 'templates'))
+        app.secret_key = 'teste'
+        app.jinja_env.globals['csrf_token'] = lambda: 'token-valido'
+        bp = Blueprint('bancos', __name__)
+        configurar_certificados(bp, self.conectar, lambda p: True, MagicMock())
+        app.register_blueprint(bp)
+        client = app.test_client()
+
+        # url_for('certificados.remover') deve resolver para /certificados/remover
+        with app.test_request_context():
+            self.assertEqual(url_for('certificados.remover'), '/certificados/remover')
+            self.assertEqual(url_for('bancos.remover'), '/certificados/remover')
+
+        # 1. Sem GET para exclusão (deve retornar 405 Method Not Allowed)
+        self.assertEqual(client.get('/certificados/remover').status_code, 405)
+
+        # 2. Sem login: redireciona para tela de login
+        with client.session_transaction() as sess:
+            sess['_csrf_token'] = 'token-valido'
+        resp_sem_login = client.post('/certificados/remover', data={
+            'subdominio': 'info-api.infobrasilsistemas.com.br',
+            'csrf_token': 'token-valido'
+        })
+        self.assertEqual(resp_sem_login.status_code, 302)
+        self.assertIn('/admin/login', resp_sem_login.headers.get('Location', ''))
+
+        # 3. Sem CSRF (ou CSRF inválido) para usuário logado: 400
+        with client.session_transaction() as sess:
+            sess['logged_in'] = True
+            sess['_csrf_token'] = 'token-valido'
+        resp_sem_csrf = client.post('/certificados/remover', data={
+            'subdominio': 'info-api.infobrasilsistemas.com.br'
+        })
+        self.assertEqual(resp_sem_csrf.status_code, 400)
+
+        # 4. Subdomínio com formato inválido
+        resp_formato = client.post('/certificados/remover', data={
+            'subdominio': 'invalido-sem-sufixo',
+            'csrf_token': 'token-valido'
+        }, follow_redirects=True)
+        self.assertEqual(resp_formato.status_code, 200)
+
+        # 5. Subdomínio inexistente (formato válido, mas não cadastrado)
+        resp_inexistente = client.post('/certificados/remover', data={
+            'subdominio': 'fantasma.infobrasilsistemas.com.br',
+            'csrf_token': 'token-valido'
+        }, follow_redirects=True)
+        self.assertEqual(resp_inexistente.status_code, 200)
+        self.assertIn('não encontrado', resp_inexistente.text)
+
+        # 6. Remoção ok: remove do banco, limpa semana da rotina e registra auditoria
+        dominio_alvo = 'info-api.infobrasilsistemas.com.br'
+        with closing(self.conectar()) as conn:
+            self.assertIsNotNone(conn.execute('SELECT 1 FROM certificados WHERE dominio=?', (dominio_alvo,)).fetchone())
+
+        with patch('certificados.registrar_acao_admin') as mock_audit:
+            resp_ok = client.post('/certificados/remover', data={
+                'subdominio': dominio_alvo,
+                'csrf_token': 'token-valido'
+            }, follow_redirects=True)
+            self.assertEqual(resp_ok.status_code, 200)
+            self.assertIn('removido com sucesso', resp_ok.text)
+            mock_audit.assert_called_once()
+            args_audit = mock_audit.call_args[0]
+            self.assertEqual(args_audit[0], 'remover_subdominio_certificado')
+            self.assertEqual(args_audit[1]['subdominio'], dominio_alvo)
+
+        with closing(self.conectar()) as conn:
+            self.assertIsNone(conn.execute('SELECT 1 FROM certificados WHERE dominio=?', (dominio_alvo,)).fetchone())
+
+        # 7. Sem permissão (logged_in mas tem_permissao retorna False)
+        app_sem_perm = Flask(__name__, template_folder=str(Path.cwd() / 'templates'))
+        app_sem_perm.secret_key = 'teste'
+        bp_sem_perm = Blueprint('bancos', __name__)
+        configurar_certificados(bp_sem_perm, self.conectar, lambda p: False, MagicMock())
+        app_sem_perm.register_blueprint(bp_sem_perm)
+        client_sem_perm = app_sem_perm.test_client()
+        with client_sem_perm.session_transaction() as sess:
+            sess['logged_in'] = True
+            sess['_csrf_token'] = 'token-valido'
+        resp_403 = client_sem_perm.post('/certificados/remover', data={
+            'subdominio': 'api-tray.infobrasilsistemas.com.br',
+            'csrf_token': 'token-valido'
+        })
+        self.assertEqual(resp_403.status_code, 403)
+
 
 if __name__ == '__main__':
     unittest.main()
