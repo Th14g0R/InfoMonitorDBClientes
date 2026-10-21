@@ -187,22 +187,22 @@ class SegurancaTest(unittest.TestCase):
         sftp.stat.return_value = MagicMock(st_size=100, st_mtime=1)
         ssh = MagicMock()
         ssh.open_sftp.return_value = sftp
-        
+
         # Simula timeout de find no paramiko
         ssh.exec_command.side_effect = TimeoutError('tempo esgotado no socket remoto com senha-ultra-secreta')
         info = {'ip': '10.0.0.1', 'porta_fb': 3050, 'usuario': 'root', 'senha': 'senha-ultra-secreta'}
-        
+
         self.bancos.limpar_cache_global()
         with patch.object(self.bancos, 'conectar_ssh', return_value=ssh), \
                 self.assertLogs(self.bancos.LOGGER, level='WARNING') as logs:
             dados, _, orfaos = self.bancos.obter_dados_servidor_linux(
                 'DB01', info, modo_busca_unificada=True, varrer_orfaos=True
             )
-        
+
         # Usuário recebe mensagem sanitizada
         self.assertEqual(dados[0]['erro'], 'Falha na conexão ou coleta SSH.')
         self.assertEqual(orfaos, [])
-        
+
         # Log do servidor contém o tipo do erro e detalhe, mas NUNCA a senha
         log_texto = '\n'.join(logs.output)
         self.assertIn('DB01', log_texto)
@@ -232,7 +232,7 @@ class SegurancaTest(unittest.TestCase):
             self.bancos.obter_dados_servidor_linux(
                 'DB05', info, modo_busca_unificada=True, varrer_orfaos=True
             )
-        
+
         # DB05 deve usar /opt/infobrasil/3.0 e timeout 45
         ssh.exec_command.assert_called_once()
         cmd_chamado = ssh.exec_command.call_args[0][0]
