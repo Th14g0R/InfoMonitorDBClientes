@@ -1,5 +1,15 @@
 # Histórico de versões
 
+## 1.2.1 - 2026-10-21
+
+- rede: `BIND_HOST` ausente no `.env` mantém 127.0.0.1, mas agora emite aviso em destaque na inicialização; documentado `BIND_HOST=0.0.0.0` para rede interna (README e `.env.example`);
+- /orfaos: timeouts configuráveis (`TIMEOUT_FIND_ORFAOS`, padrão 30s; `TIMEOUT_CONEXAO_SSH`, padrão 10s) e causa detalhada da falha SSH registrada no log do servidor, com credenciais mascaradas;
+- certificados: remoção de subdomínio em /certificados (POST `/certificados/remover`, somente logado, CSRF, auditoria) com diálogo de confirmação;
+- visual: indicador de conexão CNAME desenhado em CSS, sem depender de fonte de emoji (corrige retângulo vazio no Windows);
+- backups: histórico de alertas com data e hora separadas por hífen, sem coluna Detalhes, envio manual indicado na situação, dias dispensados nos últimos 30 dias, horário lido do agendador (9h) e rolagem com cabeçalho fixo;
+- pendências conhecidas: causa de /orfaos a confirmar pelo log em produção (`find` com status 1 ainda interrompe o servidor); linhas "Dispensado" são inferidas pela ausência de registro; altura da rolagem aproximada (cerca de 11 linhas);
+- testes: 143 testes passando.
+
 ## 1.2.0 - 2026-10-21
 
 - seguranca: redirecionamentos validados (mesmo host, caminhos relativos), whitelist de servidor, nan-injection, sanitizacao de excecoes e `BIND_HOST` padrao 127.0.0.1;
