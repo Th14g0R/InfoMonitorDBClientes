@@ -1,13 +1,161 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Certificados — InfoMonitor</title><link rel="stylesheet" href="/static/ui.css">
-<style>main{max-width:1400px;margin:24px auto;padding:16px}nav,.acoes{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px}.tabela{overflow:auto}table{width:100%;border-collapse:collapse}th,td{white-space:nowrap;text-align:left;padding:12px;border-bottom:1px solid var(--cor-borda,#ccc)}input{padding:10px;min-width:280px}.aviso{padding:12px;background:var(--cor-superficie,#eee)}.estado{font-weight:600}</style></head>
-<body><main><nav><a href="/horarios" class="btn">Horários</a><a href="/todos" class="btn">Servidores</a><a href="/cnpj" class="btn">Consulta CNPJ</a>{% if not session.get('logged_in') %}<a href="/admin/login?next=/certificados" class="btn">Entrar</a>{% endif %}</nav>
-<h1>Certificados dos subdomínios</h1><p>Verificação automática aos domingos às 00h (Fortaleza), com alertas para vencimentos nos próximos {{ alerta_dias }} dias. Falhas no envio são tentadas novamente na próxima verificação.</p>
-{% for mensagem in get_flashed_messages() %}<p class="aviso" role="status">{{ mensagem }}</p>{% endfor %}
-{% if pode_editar %}<div class="acoes"><form method="post" action="/admin/certificados/adicionar"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><label for="dominio">Novo subdomínio</label> <input id="dominio" name="dominio" maxlength="253" placeholder="app.infobrasilsistemas.com.br" required> <button class="btn" type="submit">Adicionar</button></form>
-<form method="post" action="/admin/certificados/verificar"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn" type="submit">Verificar agora</button></form></div>{% endif %}
-<div class="tabela"><table><thead><tr>{% for chave, titulo in colunas.items() %}<th scope="col"{% if ordem == chave %} aria-sort="{{ 'descending' if direcao == 'desc' else 'ascending' }}"{% endif %}><a href="{{ url_for('bancos.certificados', ordem=chave, direcao='desc' if ordem == chave and direcao == 'asc' else 'asc') }}">{{ titulo }}{% if ordem == chave %} {{ '▼' if direcao == 'desc' else '▲' }}{% endif %}</a></th>{% endfor %}</tr></thead><tbody>
-{% for item in itens %}<tr><td><a href="https://{{ item.dominio }}" target="_blank" rel="noopener noreferrer">{{ item.dominio }}</a></td><td class="estado">{{ item.status }}</td><td>{{ formatar_data(item.expira_em) }}</td><td>{{ item.dias if item.dias is not none else '—' }}</td><td>{{ formatar_data(item.verificado_em) }}</td><td>{{ formatar_data(item.email_em) }}</td><td>{{ item.email_status or 'Não solicitada' }}</td></tr>{% endfor %}
-</tbody></table></div><h2>Histórico de solicitações de renovação</h2><p>Destinatário: atendimento@nossatelecom.com.br · Assunto: Certificado vencendo</p><div class="tabela"><table><thead><tr><th>Data</th><th>Subdomínios</th><th>Resultado</th></tr></thead><tbody>{% for envio in historico %}<tr><td>{{ formatar_data(envio.criado_em) }}</td><td>{{ envio.dominios }}</td><td>{{ envio.resultado }}</td></tr>{% else %}<tr><td colspan="3">Nenhum envio registrado.</td></tr>{% endfor %}</tbody></table></div>
-<p>Falhas na verificação preservam a última validade conhecida. </p></main></body></html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Certificados SSL — InfoMonitor</title>
+  <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
+  <link rel="stylesheet" href="/static/ui.css">
+  <script src="/static/ui.js" defer></script>
+</head>
+<body>
+  <main class="container" style="max-width: 1400px; margin: 24px auto; padding: 0 var(--space-4);">
+    <header class="nav-bar">
+      <div class="d-flex align-center gap-3">
+        <h2 style="margin: 0; font-size: var(--font-size-lg); display: flex; align-items: center; gap: 8px;">
+          <span>🔒</span> Monitoramento de Certificados SSL
+        </h2>
+      </div>
+      <nav class="d-flex gap-2 align-center flex-wrap" aria-label="Navegação principal">
+        <a href="/horarios" class="btn btn-secondary">🗓️ Horários</a>
+        <a href="/todos" class="btn btn-bancos">🖥️ Servidores</a>
+        <a href="/cnpj" class="btn btn-secondary">🏢 Consulta CNPJ</a>
+        {% if not session.get('logged_in') %}
+          <a href="/admin/login?next=/certificados" class="btn btn-primary">Entrar</a>
+        {% endif %}
+      </nav>
+    </header>
+
+    {% for mensagem in get_flashed_messages() %}
+      <div class="alert alert-info" role="status" style="margin-bottom: var(--space-4);">
+        {{ mensagem }}
+      </div>
+    {% endfor %}
+
+    <div class="card" style="margin-bottom: var(--space-5);">
+      <div class="section-header d-flex justify-between items-center flex-wrap gap-2">
+        <div>
+          <h3 style="margin: 0;">🌐 Subdomínios Monitorados</h3>
+          <p class="text-muted" style="margin-top: var(--space-1); margin-bottom: 0;">
+            Verificação automática aos domingos às 00h (Fortaleza), com alertas para vencimentos nos próximos {{ alerta_dias }} dias. Falhas no envio são tentadas novamente na próxima verificação.
+          </p>
+        </div>
+      </div>
+
+      {% if pode_editar %}
+      <div class="info-box info-box-primary d-flex flex-wrap justify-between items-center gap-3" style="margin-top: var(--space-3); margin-bottom: var(--space-4);">
+        <form method="post" action="/admin/certificados/adicionar" class="d-flex gap-2 align-center flex-wrap" style="flex: 1;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <label for="dominio" class="form-label" style="font-weight: 600;">Novo subdomínio:</label>
+          <input id="dominio" name="dominio" maxlength="253" placeholder="app.infobrasilsistemas.com.br" required class="form-control" style="min-width: 280px; width: auto;">
+          <button class="btn btn-primary" type="submit">➕ Adicionar</button>
+        </form>
+        <form method="post" action="/admin/certificados/verificar" class="form-inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="btn btn-secondary" type="submit">🔄 Verificar agora</button>
+        </form>
+      </div>
+      {% endif %}
+
+      <div class="tabela-wrap" style="overflow-x: auto; margin-top: var(--space-3);">
+        <table class="table table-striped" style="width: 100%; border-collapse: collapse;">
+          <thead>
+            <tr>
+              {% for chave, titulo in colunas.items() %}
+              <th scope="col" style="padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--cor-borda); background: var(--cor-fundo); text-align: left;" {% if ordem == chave %} aria-sort="{{ 'descending' if direcao == 'desc' else 'ascending' }}"{% endif %}>
+                <a href="{{ url_for('bancos.certificados', ordem=chave, direcao='desc' if ordem == chave and direcao == 'asc' else 'asc') }}" style="color: inherit; text-decoration: none; font-weight: 600;">
+                  {{ titulo }}{% if ordem == chave %} {{ '▼' if direcao == 'desc' else '▲' }}{% endif %}
+                </a>
+              </th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in itens %}
+            <tr>
+              <td><a href="https://{{ item.dominio }}" target="_blank" rel="noopener noreferrer" style="color: var(--cor-primaria); font-weight: 500;">{{ item.dominio }}</a></td>
+              <td>
+                {% if item.status == 'Válido' or item.status == 'Ativo' %}
+                  <span class="badge badge-success">✓ {{ item.status }}</span>
+                {% elif item.status == 'Vencendo' %}
+                  <span class="badge badge-warning">⚠️ {{ item.status }}</span>
+                {% elif item.status == 'Expirado' %}
+                  <span class="badge badge-danger">✗ {{ item.status }}</span>
+                {% else %}
+                  <span class="badge badge-neutral">{{ item.status }}</span>
+                {% endif %}
+              </td>
+              <td>{{ formatar_data(item.expira_em) }}</td>
+              <td>
+                {% if item.dias is not none %}
+                  {% if item.dias <= 15 %}
+                    <span class="badge badge-danger">{{ item.dias }} dias</span>
+                  {% elif item.dias <= 35 %}
+                    <span class="badge badge-warning">{{ item.dias }} dias</span>
+                  {% else %}
+                    <span class="badge badge-success">{{ item.dias }} dias</span>
+                  {% endif %}
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+              <td>{{ formatar_data(item.verificado_em) }}</td>
+              <td>{{ formatar_data(item.email_em) }}</td>
+              <td>
+                {% if item.email_status == 'Enviado' %}
+                  <span class="badge badge-info">{{ item.email_status }}</span>
+                {% elif item.email_status %}
+                  <span class="badge badge-neutral">{{ item.email_status }}</span>
+                {% else %}
+                  <span class="text-muted">Não solicitada</span>
+                {% endif %}
+              </td>
+            </tr>
+            {% else %}
+            <tr>
+              <td colspan="7" class="text-muted" style="text-align: center; padding: var(--space-4);">Nenhum certificado cadastrado.</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p class="text-muted" style="font-size: var(--font-size-xs); margin-top: var(--space-3); margin-bottom: 0;">
+        ℹ️ Falhas na verificação preservam a última validade conhecida.
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="section-header">
+        <h3 style="margin: 0;">📬 Histórico de Solicitações de Renovação</h3>
+        <p class="text-muted" style="margin-top: var(--space-1); margin-bottom: 0;">
+          Destinatário: <code>atendimento@nossatelecom.com.br</code> · Assunto: <strong>Certificado vencendo</strong>
+        </p>
+      </div>
+      <div class="tabela-wrap" style="overflow-x: auto; margin-top: var(--space-3);">
+        <table class="table table-striped" style="width: 100%; border-collapse: collapse;">
+          <thead>
+            <tr>
+              <th scope="col" style="padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--cor-borda); background: var(--cor-fundo); text-align: left;">Data</th>
+              <th scope="col" style="padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--cor-borda); background: var(--cor-fundo); text-align: left;">Subdomínios</th>
+              <th scope="col" style="padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--cor-borda); background: var(--cor-fundo); text-align: left;">Resultado</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for envio in historico %}
+            <tr>
+              <td>{{ formatar_data(envio.criado_em) }}</td>
+              <td>{{ envio.dominios }}</td>
+              <td><span class="badge badge-info">{{ envio.resultado }}</span></td>
+            </tr>
+            {% else %}
+            <tr>
+              <td colspan="3" class="text-muted" style="text-align: center; padding: var(--space-4);">Nenhum envio registrado.</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

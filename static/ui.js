@@ -286,4 +286,41 @@ document.addEventListener('DOMContentLoaded', () => {
         window.showToast(text, type);
         box.remove();
     });
+
+    // ===== ACESSIBILIDADE AUTOMÁTICA (WCAG 2.1 AA) =====
+    // Garante texto alternativo em imagens de avatares/fotos
+    document.querySelectorAll('img:not([alt])').forEach(img => {
+        const row = img.closest('tr');
+        const card = img.closest('.card-tec, .evento-participante, .avatar-item');
+        let nome = '';
+        if (row) {
+            const tdNome = row.querySelector('td:nth-child(2), strong');
+            if (tdNome) nome = tdNome.textContent.trim();
+        } else if (card) {
+            const spanNome = card.querySelector('strong, span, .nome');
+            if (spanNome) nome = spanNome.textContent.trim();
+        }
+        img.setAttribute('alt', nome ? `Foto de ${nome}` : 'Avatar');
+    });
+
+    // Garante labels acessíveis em formulários legados que não possuem rótulo explícito
+    document.querySelectorAll('input:not([aria-label]):not([aria-labelledby]):not([type="hidden"])').forEach(input => {
+        if (!input.labels || input.labels.length === 0) {
+            const name = input.name || input.id || input.placeholder;
+            if (name) {
+                const labelText = input.placeholder || name.replace(/_/g, ' ');
+                input.setAttribute('aria-label', labelText.charAt(0).toUpperCase() + labelText.slice(1));
+            }
+        }
+    });
+
+    document.querySelectorAll('select:not([aria-label]):not([aria-labelledby])').forEach(sel => {
+        if (!sel.labels || sel.labels.length === 0) {
+            const name = sel.name || sel.id;
+            if (name) {
+                const labelText = name.replace(/_/g, ' ');
+                sel.setAttribute('aria-label', labelText.charAt(0).toUpperCase() + labelText.slice(1));
+            }
+        }
+    });
 });

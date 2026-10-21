@@ -1,63 +1,63 @@
 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 <input type="hidden" name="id" value="{{ funcionario.get('id', '') }}">
 <div class="campo-funcionario">
-    <label for="func-nome">Nome completo</label>
-    <input id="func-nome" name="nome" value="{{ funcionario.get('nome', '') }}" required maxlength="150">
+    <label for="func-nome" class="form-label">Nome completo</label>
+    <input id="func-nome" name="nome" value="{{ funcionario.get('nome', '') }}" required maxlength="150" class="form-control">
 </div>
 <div class="campo-funcionario">
-    <label for="func-nascimento">Data de nascimento (opcional)</label>
-    <input id="func-nascimento" type="date" name="data_nascimento" value="{{ funcionario.get('data_nascimento') or '' }}" max="{{ hoje }}">
+    <label for="func-nascimento" class="form-label">Data de nascimento (opcional)</label>
+    <input id="func-nascimento" type="date" name="data_nascimento" value="{{ funcionario.get('data_nascimento') or '' }}" max="{{ hoje }}" class="form-control">
 </div>
 <div class="campo-funcionario">
-    <label for="func-foto">Foto do colaborador</label>
-    <input id="func-foto" type="file" name="foto" accept="image/png,image/jpeg,image/gif,image/webp">
+    <label for="func-foto" class="form-label">Foto do colaborador</label>
+    <input id="func-foto" type="file" name="foto" accept="image/png,image/jpeg,image/gif,image/webp" class="form-control">
 </div>
 <div class="campo-funcionario">
-    <label for="func-prioridade">Prioridade</label>
-    <select id="func-prioridade" name="prioridade" required>
+    <label for="func-prioridade" class="form-label">Prioridade</label>
+    <select id="func-prioridade" name="prioridade" required class="form-select">
         {% for i in range(1, 6) %}<option value="P{{ i }}" {% if funcionario.get('prioridade', 'P1') == 'P' ~ i %}selected{% endif %}>Prioridade {{ i }}</option>{% endfor %}
     </select>
 </div>
 <div class="campo-funcionario">
-    <label for="func-cargo">Cargo</label>
-    <select id="func-cargo" name="cargo_id" required>
+    <label for="func-cargo" class="form-label">Cargo</label>
+    <select id="func-cargo" name="cargo_id" required class="form-select">
         <option value="">Selecione o cargo</option>
         {% for c in cargos %}<option value="{{ c[0] }}" {% if funcionario.get('cargo_id') == c[0] %}selected{% endif %}>{{ c[1] }}</option>{% endfor %}
     </select>
 </div>
 <div class="campo-funcionario">
-    <label for="func-jornada">Jornada da semana</label>
-    <select id="func-jornada" name="jornada_id" required>
+    <label for="func-jornada" class="form-label">Jornada da semana</label>
+    <select id="func-jornada" name="jornada_id" required class="form-select">
         <option value="">Selecione a jornada</option>
         {% for j in jornadas if j[2] == 'Semana' %}<option value="{{ j[0] }}" {% if funcionario.get('jornada_id') == j[0] %}selected{% endif %}>{{ j[1] }}</option>{% endfor %}
     </select>
 </div>
 <div class="campo-funcionario">
-    <label for="func-equipe">Equipe</label>
-    <select id="func-equipe" name="equipe_sabado" required>
+    <label for="func-equipe" class="form-label">Equipe</label>
+    <select id="func-equipe" name="equipe_sabado" required class="form-select">
         {% for equipe in equipes %}<option value="{{ equipe }}" {% if funcionario.get('equipe_sabado', 'Sem Equipe') == equipe %}selected{% endif %}>{{ equipe }}</option>{% endfor %}
     </select>
 </div>
 {% set tipo_atual = 'nenhum' if funcionario.get('nao_trabalha_sabado', 1) else ('sobreaviso' if funcionario.get('eh_sobreaviso') else ('apoio' if funcionario.get('eh_apoiador_sabado') else 'rodizio')) %}
 <div class="campo-funcionario">
-    <label for="func-sabado">Participação aos sábados</label>
-    <select id="func-sabado" name="tipo_sabado" required>
+    <label for="func-sabado" class="form-label">Participação aos sábados</label>
+    <select id="func-sabado" name="tipo_sabado" required class="form-select">
         {% for tipo, rotulo in tipos_sabado.items() %}<option value="{{ tipo }}" {% if tipo_atual == tipo %}selected{% endif %}>{{ rotulo }}</option>{% endfor %}
     </select>
 </div>
 <div class="campo-funcionario">
-    <label for="func-ativo">Status</label>
-    <select id="func-ativo" name="ativo">
+    <label for="func-ativo" class="form-label">Status</label>
+    <select id="func-ativo" name="ativo" class="form-select">
         <option value="1" {% if funcionario.get('ativo', 1) %}selected{% endif %}>Ativo</option>
         <option value="0" {% if not funcionario.get('ativo', 1) %}selected{% endif %}>Inativo</option>
     </select>
 </div>
-<div class="campo-funcionario" style="grid-column: 1 / -1; background: #fff8e7; padding: 12px 14px; border-radius: 6px; border: 1px solid #f39c12; margin-top: 4px;">
-    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; font-weight: 600; color: #b7791f; margin: 0;">
-        <input type="checkbox" name="participa_sobreaviso_domingo" value="1" {% if funcionario.get('participa_sobreaviso_domingo') %}checked{% endif %} style="width: 18px; height: 18px; cursor: pointer;">
+<div class="campo-funcionario campo-destaque-aviso">
+    <label for="func-sobreaviso-domingo">
+        <input type="checkbox" id="func-sobreaviso-domingo" name="participa_sobreaviso_domingo" value="1" {% if funcionario.get('participa_sobreaviso_domingo') %}checked{% endif %}>
         <span>📱 Participa do Rodízio de Sobreaviso aos Domingos (Atendimento TEF)</span>
     </label>
-    <small style="color: #744210; display: block; margin-top: 4px; font-weight: normal; margin-left: 28px;">
+    <small>
         Marque esta opção para incluir este colaborador no rodízio de atendimentos específicos de TEF aos domingos em regime de Sobreaviso.
     </small>
 </div>
