@@ -214,6 +214,8 @@ def init_db_sistema():
 
     # Colunas de nível de acesso por página (1 = tem acesso). O Master sempre tem acesso a tudo, independente destas colunas.
     for coluna in PERMISSOES_DISPONIVEIS:
+        if not coluna.isidentifier():
+            continue
         try:
             cursor.execute(f"ALTER TABLE usuarios ADD COLUMN {coluna} INTEGER DEFAULT 0;")
         except sqlite3.OperationalError:
@@ -227,6 +229,8 @@ def init_db_sistema():
         )
     ''')
     for coluna_dup in ('cod_info', 'cli_situacao'):
+        if not coluna_dup.isidentifier():
+            continue
         try:
             cursor.execute(f"ALTER TABLE import_duplicatas_pendentes ADD COLUMN {coluna_dup} TEXT;")
         except sqlite3.OperationalError:
@@ -594,8 +598,10 @@ def _obter_status_backups_ftp(forcar_atualizacao=False):
     }
 
     try:
+        if not URL_STATUS_BACKUPS_FTP.startswith(('http://', 'https://')):
+            raise ValueError('URL_STATUS_BACKUPS_FTP deve iniciar com http:// ou https://')
         req = urllib.request.Request(URL_STATUS_BACKUPS_FTP, headers={'User-Agent': 'InfoMonitorDBClientes'})
-        with urllib.request.urlopen(req, timeout=8) as resp:
+        with urllib.request.urlopen(req, timeout=8) as resp:  # nosec B310
             conteudo = resp.read()
             try:
                 texto = conteudo.decode('utf-8')
@@ -669,19 +675,20 @@ def upload_banco_avulso():
         return redirect('/admin/login')
     if not tem_permissao('perm_gestao_bancos'):
         return "Você não tem permissão para esta ação.", 403
+    servidor_req = request.form.get('servidor')
+    servidor = servidor_req if servidor_req in SERVIDORES else None
     if not verificar_senha_confirmacao(request.form.get('senha_confirmacao')):
-        return redirect(url_for('bancos.admin_painel', servidor=request.form.get('servidor'), erro="Senha de confirmação incorreta. Ação cancelada."))
+        return redirect(destino_redirect_seguro(url_for('bancos.admin_painel', servidor=servidor, erro="Senha de confirmação incorreta. Ação cancelada.")))
 
-    servidor = request.form.get('servidor')
     alias = sanitizar_alias(request.form.get('alias', ''))
     arquivo = request.files.get('arquivo_fdb')
 
     if not servidor or not alias or not arquivo or not arquivo.filename:
-        return redirect(url_for('bancos.admin_painel', servidor=servidor, erro="Informe o Alias e selecione o arquivo .FDB!"))
+        return redirect(destino_redirect_seguro(url_for('bancos.admin_painel', servidor=servidor, erro="Informe o Alias e selecione o arquivo .FDB!")))
 
     info_srv = SERVIDORES.get(servidor)
     if not info_srv:
-        return redirect(url_for('bancos.admin_painel', servidor=servidor, erro="Servidor inválido."))
+        return redirect(destino_redirect_seguro(url_for('bancos.admin_painel', servidor=servidor, erro="Servidor inválido.")))
 
     try:
         caminho_destino = validar_caminho_banco(caminho_do_alias_no_conf(servidor, alias), DIRETORIO_BASE)
@@ -773,8 +780,8 @@ def salvar_historico_diario(metricas_servidores=None):
                         1 for banco in bancos
                         if banco.get('arquivo_existe') and not banco.get('eh_inativo')
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                LOGGER.warning('Falha ao coletar dados completos do servidor %s para histórico: %s', nome_servidor, e)
         # Sem uma varredura completa de órfãos, não grave um total sabidamente
         # parcial: preserve o último snapshot confiável em vez de subcontá-lo.
         if total_bytes_real is None:
@@ -1334,7 +1341,7 @@ def _obter_dados_servidor_linux(nome_servidor, info_servidor, busca=None, buscar
                     ) from exc
 
         if varrer_orfaos:
-            cmd_find = f"find {DIRETORIO_BASE} -type f \\( -name '*.fdb' -o -name '*.fbk' -o -name '*.bak' \\)"
+            cmd_find = f"find {shlex.quote(DIRETORIO_BASE)} -type f \\( -name '*.fdb' -o -name '*.fbk' -o -name '*.bak' \\)"
             stdin, stdout, stderr = ssh.exec_command(cmd_find, timeout=5)
             saida_bytes = stdout.read()
             erro_bytes = stderr.read()
@@ -1393,8 +1400,8 @@ def _obter_dados_servidor_linux(nome_servidor, info_servidor, busca=None, buscar
         try:
             if ssh:
                 ssh.close()
-        except Exception:
-            pass
+        except Exception as e_close:
+            LOGGER.debug('Erro ao fechar conexao SSH com %s: %s', nome_servidor, e_close)
         return [{
             'servidor': nome_servidor,
             'porta': info_servidor['porta_fb'],
@@ -1677,8 +1684,8 @@ def salvar_databases_conf_remoto(nome_servidor, novo_conteudo, hash_esperado=Non
                     if temporario:
                         try:
                             sftp.remove(temporario)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            LOGGER.debug('Erro ao remover temporário em %s: %s', nome_servidor, exc)
                         temporario = None
                     if not _salvar_databases_conf_direto_com_rollback(
                             sftp, destino_real, novos_bytes, bytes_atuais, hash_base):
@@ -4516,9 +4523,9 @@ def esqueci_senha():
             server.login(SMTP_USER, SMTP_PASS)
             server.sendmail(SMTP_USER, [usuario['email']], msg.as_string())
             server.quit()
-        except Exception:
-            # Não expõe detalhes do erro de SMTP ao usuário final
-            pass
+        except Exception as e_smtp:
+            # Registra o erro internamente sem expor detalhes ao usuário final
+            LOGGER.warning('Falha ao enviar e-mail de recuperação de senha: %s', e_smtp)
 
         return render_template_string(HTML_ESQUECI_SENHA, sucesso=msg_generica)
 
@@ -4849,9 +4856,10 @@ def admin_adicionar():
     ok, resposta = exigir_permissao('perm_gestao_bancos')
     if not ok:
         return resposta
-    srv = request.form.get('servidor', '')
+    srv_req = request.form.get('servidor', '')
+    srv = srv_req if srv_req in SERVIDORES else None
     def voltar(**mensagem):
-        return redirect(url_for('bancos.admin_painel', servidor=srv, **mensagem))
+        return redirect(destino_redirect_seguro(url_for('bancos.admin_painel', servidor=srv, **mensagem)))
     if srv not in SERVIDORES:
         return voltar(erro='Servidor inválido.')
     if not verificar_senha_confirmacao(request.form.get('senha_confirmacao')):
@@ -4859,7 +4867,7 @@ def admin_adicionar():
     alias = sanitizar_alias(request.form.get('alias', ''))
     envolvidos = request.form.get('envolvidos', '').strip()
     arquivo = request.files.get('arquivo_fdb')
-    tem_arquivo = arquivo is not None and bool(arquivo.filename)
+    tem_arquivo = arquivo is not None and len((arquivo.filename or '').strip()) > 0
     if not alias or len(alias) > 100 or len(envolvidos) > 300 or any(c in envolvidos for c in '\r\n'):
         return voltar(erro='Informe um alias válido e os responsáveis em uma única linha.')
     if tem_arquivo and not arquivo.filename.lower().endswith('.fdb'):
@@ -5053,10 +5061,10 @@ def admin_inativar():
     if not session.get('logged_in'): return redirect('/admin/login')
     if not tem_permissao('perm_gestao_bancos'):
         return "Você não tem permissão para esta ação.", 403
+    srv_req = request.form.get('servidor')
+    srv = srv_req if srv_req in SERVIDORES else None
     if not verificar_senha_confirmacao(request.form.get('senha_confirmacao')):
-        return redirect(url_for('bancos.admin_painel', servidor=request.form.get('servidor'), erro="Senha de confirmação incorreta. Ação cancelada."))
-
-    srv = request.form.get('servidor')
+        return redirect(destino_redirect_seguro(url_for('bancos.admin_painel', servidor=srv, erro="Senha de confirmação incorreta. Ação cancelada.")))
     alias_target = request.form.get('alias', '').strip()
     if (srv not in SERVIDORES or not alias_target or len(alias_target) > 100 or
             any(ord(caractere) < 32 for caractere in alias_target)):
@@ -5148,10 +5156,10 @@ def admin_salvar_raw():
     if not session.get('logged_in'): return redirect('/admin/login')
     if not tem_permissao('perm_gestao_bancos'):
         return "Você não tem permissão para esta ação.", 403
+    srv_req = request.form.get('servidor')
+    srv = srv_req if srv_req in SERVIDORES else None
     if not verificar_senha_confirmacao(request.form.get('senha_confirmacao')):
-        return redirect(url_for('bancos.admin_painel', servidor=request.form.get('servidor'), erro="Senha de confirmação incorreta. Ação cancelada."))
-
-    srv = request.form.get('servidor')
+        return redirect(destino_redirect_seguro(url_for('bancos.admin_painel', servidor=srv, erro="Senha de confirmação incorreta. Ação cancelada.")))
     conteudo_raw = request.form.get('conteudo_raw', '')
     hash_original = request.form.get('hash_original', '').strip()
     if srv not in SERVIDORES:
@@ -7316,7 +7324,7 @@ def api_consulta_cnpj(cnpj):
             f'https://publica.cnpj.ws/cnpj/{clean}',
             headers={'User-Agent': 'InfoMonitor/1.0', 'Accept': 'application/json'}
         )
-        with urllib.request.urlopen(req, timeout=12) as resp:
+        with urllib.request.urlopen(req, timeout=12) as resp:  # nosec B310
             data = json.loads(resp.read().decode('utf-8'))
             return jsonify(data)
     except urllib.error.HTTPError as e:

@@ -93,7 +93,7 @@ def index():
     return redirect(url_for('horarios.ver_horarios'))
 
 if __name__ == '__main__':
-    host = os.getenv('BIND_HOST', '0.0.0.0')
+    host = os.getenv('BIND_HOST', '127.0.0.1')
     porta = int(os.getenv('BIND_PORT', '8888'))
     # BIND_HOST=0.0.0.0 no .env se precisar expor na rede interna
     app.run(host=host, port=porta, debug=False)
