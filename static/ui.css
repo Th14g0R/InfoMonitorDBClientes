@@ -274,7 +274,8 @@ tr:hover { background-color: var(--cor-superficie-hover); }
 }
 .badge-success { background: var(--cor-sucesso-bg); color: var(--cor-sucesso); border: 1px solid var(--cor-sucesso-borda); }
 .badge-warning { background: var(--cor-aviso-bg); color: var(--cor-aviso); border: 1px solid var(--cor-aviso-borda); }
-.badge-danger { background: var(--cor-perigo-bg); color: var(--cor-perigo); border: 1px solid var(--cor-perigo-borda); }
+.badge-danger { background: var(--cor-perigo-bg); color: #991b1b; border: 1px solid var(--cor-perigo-borda); }
+[data-theme="dark"] .badge-danger { color: var(--cor-perigo); }
 .badge-info { background: var(--cor-primaria-clara); color: var(--cor-primaria); border: 1px solid var(--cor-borda); }
 .badge-neutral { background: var(--cor-fundo); color: var(--cor-texto-suave); border: 1px solid var(--cor-borda); }
 
@@ -845,21 +846,40 @@ tr:hover { background-color: var(--cor-superficie-hover); }
 
 /* CNAME Status */
 .cname-status {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  font-size: var(--font-size-sm);
-  border-radius: var(--raio-sm);
-  background: var(--cor-fundo);
-  border: 1px solid var(--cor-borda);
-  color: var(--cor-texto-suave);
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
+  border-radius: 50%;
+  background-color: var(--cor-borda-forte);
+  border: 2px solid var(--cor-superficie);
+  box-shadow: 0 0 0 1px var(--cor-borda);
+  vertical-align: middle;
+  flex-shrink: 0;
+  transition: transform var(--transition-normal), background-color var(--transition-normal);
 }
-.cname-status.ativo { background: var(--cor-sucesso-bg); border-color: var(--cor-sucesso-borda); color: var(--cor-sucesso); }
-.cname-status.inativo { background: var(--cor-perigo-bg); border-color: var(--cor-perigo-borda); color: var(--cor-perigo); }
-.cname-status.testando { background: var(--cor-aviso-bg); border-color: var(--cor-aviso-borda); color: var(--cor-aviso); }
-.cname-status.indefinido { background: var(--cor-fundo); border-color: var(--cor-borda-forte); color: var(--cor-texto-suave); }
+.cname-status.ativo {
+  background-color: var(--cor-sucesso);
+  box-shadow: 0 0 0 1px var(--cor-sucesso-borda);
+}
+.cname-status.inativo {
+  background-color: var(--cor-perigo);
+  box-shadow: 0 0 0 1px var(--cor-perigo-borda);
+}
+.cname-status.testando {
+  background-color: var(--cor-aviso);
+  box-shadow: 0 0 0 1px var(--cor-aviso-borda);
+  animation: cname-pulse 1.4s ease-in-out infinite;
+}
+.cname-status.indefinido {
+  background-color: var(--cor-texto-suave);
+  box-shadow: 0 0 0 1px var(--cor-borda);
+}
+
+@keyframes cname-pulse {
+  0%, 100% { opacity: 0.55; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
 
 /* Tabelas responsivas (cards no mobile) */
 @media (max-width: 700px) {
@@ -969,10 +989,10 @@ tr:hover { background-color: var(--cor-superficie-hover); }
 [data-theme="dark"] .btn-copy:hover { background: #60a5fa; color: #0b1220; border-color: #60a5fa; }
 [data-theme="dark"] .btn-icon { background: #141c2e; border-color: #2a3a5a; color: #94a3b8; }
 [data-theme="dark"] .btn-icon:hover { background: #1e2a42; border-color: #3a4a6a; color: #f8fafc; }
-[data-theme="dark"] .cname-status { background: #1e2a42; border-color: #2a3a5a; color: #94a3b8; }
-[data-theme="dark"] .cname-status.ativo { background: #052e16; border-color: #065f46; color: #4ade80; }
-[data-theme="dark"] .cname-status.inativo { background: #3d0d0d; border-color: #991b1b; color: #fca5a5; }
-[data-theme="dark"] .cname-status.testando { background: #3d2a05; border-color: #92400e; color: #fbbf24; }
+[data-theme="dark"] .cname-status { border-color: var(--cor-superficie); }
+[data-theme="dark"] .cname-status.ativo { background-color: var(--cor-sucesso); box-shadow: 0 0 0 1px var(--cor-sucesso-borda); }
+[data-theme="dark"] .cname-status.inativo { background-color: var(--cor-perigo); box-shadow: 0 0 0 1px var(--cor-perigo-borda); }
+[data-theme="dark"] .cname-status.testando { background-color: var(--cor-aviso); box-shadow: 0 0 0 1px var(--cor-aviso-borda); }
 [data-theme="dark"] .top5-item { background: #141c2e; border-color: #2a3a5a; }
 [data-theme="dark"] .top5-item.clicavel-cname:hover { background: #2e104a; }
 [data-theme="dark"] .header-info { background: #141c2e; border-color: #2a3a5a; }

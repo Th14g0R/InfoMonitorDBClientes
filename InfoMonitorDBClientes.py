@@ -93,7 +93,17 @@ def index():
     return redirect(url_for('horarios.ver_horarios'))
 
 if __name__ == '__main__':
-    host = os.getenv('BIND_HOST', '127.0.0.1')
+    bind_env = os.getenv('BIND_HOST')
+    host = bind_env.strip() if bind_env else '127.0.0.1'
     porta = int(os.getenv('BIND_PORT', '8888'))
-    # BIND_HOST=0.0.0.0 no .env se precisar expor na rede interna
+    if not bind_env:
+        print("=" * 78)
+        print(" [AVISO DE CONFIGURAÇÃO - BIND_HOST]")
+        print(" BIND_HOST não está definido no arquivo .env.")
+        print(f" Usando padrão seguro local: {host} (o sistema NÃO responderá fora desta máquina).")
+        print(" Se precisar acessar de outras máquinas na rede interna, configure no seu .env:")
+        print("   BIND_HOST=0.0.0.0")
+        print("=" * 78)
+    else:
+        print(f"[INFO] Servidor iniciando em http://{host}:{porta} (BIND_HOST={host})")
     app.run(host=host, port=porta, debug=False)
