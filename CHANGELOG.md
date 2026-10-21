@@ -1,5 +1,12 @@
 # Histórico de versões
 
+## 1.2.0 - 2026-10-21
+
+- seguranca: redirecionamentos validados (mesmo host, caminhos relativos), whitelist de servidor, nan-injection, sanitizacao de excecoes e `BIND_HOST` padrao 127.0.0.1;
+- seguranca: URL da API InfoBrasil aceita apenas http/https (bloqueia file:// e outros esquemas) com testes;
+- visual: tokens de cor/tipografia unificados em `static/ui.css`, templates padronizados (cnpj, certificados, eventos, funcionarios) e correcoes de acessibilidade (axe: 7 violacoes para 0);
+- testes: 134 testes passando.
+
 ## 1.1.6 - build 20260925.7 - 2026-09-25
 
 - restaura a edição e inativação de aliases em servidores sem permissão para criar arquivos temporários;

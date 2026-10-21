@@ -116,6 +116,9 @@ def autenticar_api(url=None, user=None, password=None, timeout=12, usuario=None,
     if not api_user or not api_pass:
         return None, None, "Usuário e senha da API InfoBrasil não configurados."
 
+    if not api_url.lower().startswith(('http://', 'https://')):
+        return None, None, "URL da API inválida: use apenas http:// ou https://."
+
     login_url = f"{api_url}/api/v1/auth/login"
     credenciais = f"{api_user}:{api_pass}"
     b64_creds = base64.b64encode(credenciais.encode('utf-8')).decode('ascii')
