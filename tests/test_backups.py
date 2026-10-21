@@ -3,11 +3,14 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from backups import (
+    FUSO_LOCAL,
     analisar_status_para_alerta,
     enviar_email_alerta_backups,
     extrair_dias_atraso,
+    formatar_data_hora_hifen,
     gerar_relatorio_email_backups,
     interpretar_status_backups,
+    montar_linhas_historico_alertas,
 )
 
 
@@ -179,6 +182,102 @@ Total de clientes ERRO --> [ 3 ]
             self.assertEqual(args[0], 'suporte@infobrasilsistemas.com.br')
             self.assertEqual(args[1], ['suporte@infobrasilsistemas.com.br'])
             self.assertIn('Subject: Alerta de backup em atraso', args[2])
+
+    def test_montar_linhas_dia_com_envio(self):
+        agora_dt = datetime.datetime(2026, 10, 21, 10, 0, tzinfo=FUSO_LOCAL)
+        registros = [{
+            'id': 10,
+            'data_envio': '2026-10-20 09:00:00',
+            'data_referencia': '2026-10-20',
+            'destinatario': 'suporte@infobrasilsistemas.com.br',
+            'assunto': 'Alerta de backup em atraso',
+            'status_envio': 'ENVIADO',
+            'total_ok': 100,
+            'total_atrasado': 4,
+            'total_critico': 2,
+            'clientes_criticos': 'loja1 (3 dias), loja2 (4 dias)',
+            'detalhes': 'Disparo automático das 09h'
+        }]
+        linhas = montar_linhas_historico_alertas(registros, agora_dt=agora_dt, limite_dias=30)
+        linha_envio = next(l for l in linhas if l.get('id') == 10)
+        self.assertEqual(linha_envio['data_envio'], '2026-10-20 - 09:00:00')
+        self.assertEqual(linha_envio['situacao_texto'], 'Enviado')
+        self.assertEqual(linha_envio['status_envio'], 'ENVIADO')
+        self.assertFalse(linha_envio['eh_manual'])
+        self.assertEqual(linha_envio['destinatario'], 'suporte@infobrasilsistemas.com.br')
+        self.assertEqual(linha_envio['total_critico'], 2)
+
+    def test_montar_linhas_dia_dispensado(self):
+        # 1. Antes das 09:00 de hoje: não deve criar linha para hoje
+        agora_antes = datetime.datetime(2026, 10, 21, 8, 45, tzinfo=FUSO_LOCAL)
+        linhas_antes = montar_linhas_historico_alertas([], agora_dt=agora_antes, limite_dias=30, hora_corte_hoje=9)
+        self.assertEqual(len(linhas_antes), 29)
+        self.assertFalse(any(l['data_referencia'] == '2026-10-21' for l in linhas_antes))
+        self.assertTrue(all(l['situacao_texto'] == 'Dispensado (tudo em dia)' for l in linhas_antes))
+        self.assertTrue(all(l['destinatario'] is None for l in linhas_antes))
+        self.assertTrue(all(l['clientes_criticos'] is None for l in linhas_antes))
+
+        # 2. Após as 09:00 de hoje: cria linha para hoje se não houve envio
+        agora_apos = datetime.datetime(2026, 10, 21, 9, 15, tzinfo=FUSO_LOCAL)
+        linhas_apos = montar_linhas_historico_alertas([], agora_dt=agora_apos, limite_dias=30, hora_corte_hoje=9)
+        self.assertEqual(len(linhas_apos), 30)
+        linha_hoje = next(l for l in linhas_apos if l['data_referencia'] == '2026-10-21')
+        self.assertEqual(linha_hoje['data_envio'], '2026-10-21 - 09:00:00')
+        self.assertEqual(linha_hoje['situacao_texto'], 'Dispensado (tudo em dia)')
+        self.assertEqual(linha_hoje['status_envio'], 'DISPENSADO')
+        self.assertIsNone(linha_hoje['destinatario'])
+        self.assertIsNone(linha_hoje['clientes_criticos'])
+
+    def test_montar_linhas_envio_manual(self):
+        agora_dt = datetime.datetime(2026, 10, 21, 16, 0, tzinfo=FUSO_LOCAL)
+        registros = [{
+            'id': 25,
+            'data_envio': '2026-10-21 14:30:15',
+            'data_referencia': '2026-10-21',
+            'destinatario': 'suporte@infobrasilsistemas.com.br',
+            'assunto': 'Alerta de backup em atraso',
+            'status_envio': 'ENVIADO',
+            'total_ok': 120,
+            'total_atrasado': 1,
+            'total_critico': 1,
+            'clientes_criticos': 'loja-manual (3 dias)',
+            'detalhes': 'Disparo manual por Administrador'
+        }]
+        linhas = montar_linhas_historico_alertas(registros, agora_dt=agora_dt, limite_dias=30)
+        linha_manual = next(l for l in linhas if l.get('id') == 25)
+        self.assertEqual(linha_manual['data_envio'], '2026-10-21 - 14:30:15')
+        self.assertEqual(linha_manual['situacao_texto'], 'Enviado (manual)')
+        self.assertTrue(linha_manual['eh_manual'])
+
+    def test_montar_linhas_limite_30_dias(self):
+        agora_dt = datetime.datetime(2026, 10, 21, 10, 0, tzinfo=FUSO_LOCAL)
+        registros = [
+            # Registro dentro da janela (ontem)
+            {
+                'id': 1,
+                'data_envio': '2026-10-20 09:00:00',
+                'data_referencia': '2026-10-20',
+                'destinatario': 'suporte@infobrasilsistemas.com.br',
+                'status_envio': 'ENVIADO',
+                'detalhes': 'Disparo automático'
+            },
+            # Registro fora da janela (35 dias atrás)
+            {
+                'id': 2,
+                'data_envio': '2026-09-10 09:00:00',
+                'data_referencia': '2026-09-10',
+                'destinatario': 'suporte@infobrasilsistemas.com.br',
+                'status_envio': 'ENVIADO',
+                'detalhes': 'Disparo automático'
+            }
+        ]
+        linhas = montar_linhas_historico_alertas(registros, agora_dt=agora_dt, limite_dias=30)
+        self.assertEqual(len(linhas), 30)
+        self.assertFalse(any(l.get('id') == 2 for l in linhas))
+        # Verifica datas limites: mais recente é 2026-10-21 e mais antiga é 2026-09-22 (30 dias)
+        datas = [l['data_referencia'] for l in linhas]
+        self.assertEqual(datas[0], '2026-10-21')
+        self.assertEqual(datas[-1], '2026-09-22')
 
 
 if __name__ == '__main__':
