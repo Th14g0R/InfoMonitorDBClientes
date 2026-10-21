@@ -34,6 +34,7 @@ from backups import (
     gerar_relatorio_email_backups,
     enviar_email_alerta_backups,
     extrair_dias_atraso,
+    montar_linhas_historico_alertas,
     EMAIL_DESTINATARIO_PADRAO,
     ASSUNTO_ALERTA_PADRAO,
     FUSO_LOCAL,
@@ -871,17 +872,34 @@ def obter_marcador_alerta_hoje(conn, analise=None):
     }
 
 
-def obter_historico_alertas_backups(conn, limite=20):
-    """Retorna os registros mais recentes de envios e tentativas de alertas de backups."""
+def obter_horario_agendado_alerta_backups(scheduler_instance=None):
+    """Lê o horário real configurado no agendador para o alerta diário de backups."""
+    try:
+        s = scheduler_instance if scheduler_instance is not None else scheduler
+        job = s.get_job('alerta_backups_diario') if s else None
+        if job and hasattr(job, 'trigger') and hasattr(job.trigger, 'fields'):
+            campos = {f.name: str(f) for f in job.trigger.fields}
+            h = campos.get('hour', '9')
+            m = campos.get('minute', '0')
+            if m and m != '0':
+                return f"{h}h{m.zfill(2)}"
+            return f"{h}h"
+    except Exception:
+        pass
+    return "9h"
+
+
+def obter_historico_alertas_backups(conn, limite=100, agora_dt=None, limite_dias=30):
+    """Retorna os registros mais recentes de envios e tentativas de alertas de backups com dias dispensados."""
     cursor = conn.execute('''
         SELECT id, data_envio, data_referencia, destinatario, assunto,
                status_envio, total_ok, total_atrasado, total_critico,
                clientes_criticos, detalhes
         FROM backups_alertas_emails
-        ORDER BY id DESC
-        LIMIT ?
-    ''', (limite,))
-    return [dict(linha) for linha in cursor.fetchall()]
+        ORDER BY data_envio DESC, id DESC
+    ''')
+    registros = [dict(linha) for linha in cursor.fetchall()]
+    return montar_linhas_historico_alertas(registros, agora_dt=agora_dt, limite_dias=limite_dias)
 
 
 def executar_rotina_alerta_backups(forcar=False, usuario_solicitante=None):
@@ -2326,7 +2344,7 @@ HTML_LAYOUT = """
                                 <td>
                                     {% if banco.arquivo_existe and not banco.eh_inativo %}
                                         <div class="cname-cell" data-host="{{ banco.cname_string }}" data-assinatura="{{ assinatura_cname(banco.cname_string) }}" data-alias="{{ banco.alias }}">
-                                            <span class="cname-status testando" role="status" aria-label="Testando status do CNAME" title="Testando conectividade...">⏳</span>
+                                            <span class="cname-status testando" role="status" aria-label="Testando status do CNAME" title="Testando conectividade..."></span>
                                             <span class="cname-texto">{{ banco.cname_string }}</span>
                                             <button class="btn-copy" data-cname="{{ banco.cname_string }}" onclick="copiarCnameCliente(this)" title="{{ banco.cname_string }}{% if banco.cname_custom %} (editado manualmente){% endif %} — clique para copiar">
                                                 📋 Copiar
@@ -2821,15 +2839,13 @@ HTML_LAYOUT = """
             function atualizarStatus(statusEl, estado, titulo) {
                 statusEl.classList.remove('ativo', 'inativo', 'testando', 'indefinido');
                 statusEl.classList.add(estado);
+                statusEl.textContent = '';
 
                 if (estado === 'ativo') {
-                    statusEl.textContent = '🟢';
                     statusEl.setAttribute('aria-label', 'CNAME ativo');
                 } else if (estado === 'inativo') {
-                    statusEl.textContent = '🔴';
                     statusEl.setAttribute('aria-label', 'CNAME inativo');
                 } else {
-                    statusEl.textContent = '⚪';
                     statusEl.setAttribute('aria-label', 'Não foi possível testar o CNAME');
                 }
                 statusEl.title = titulo;
@@ -2848,7 +2864,7 @@ HTML_LAYOUT = """
 
                 statusEl.classList.remove('ativo', 'inativo', 'indefinido');
                 statusEl.classList.add('testando');
-                statusEl.textContent = '⏳';
+                statusEl.textContent = '';
                 statusEl.setAttribute('aria-label', 'Testando status do CNAME');
                 statusEl.title = 'Testando conectividade...';
 
@@ -2865,7 +2881,7 @@ HTML_LAYOUT = """
                         clearTimeout(timeout);
                         statusEl.classList.remove('ativo', 'inativo', 'indefinido');
                         statusEl.classList.add('testando');
-                        statusEl.textContent = '⏳';
+                        statusEl.textContent = '';
                         statusEl.setAttribute('aria-label', 'CNAME aguardando nova tentativa');
                         statusEl.title = `Limite temporário. Nova tentativa em ${espera}s.`;
                         const dispersao = Math.min(tentativa * 250, 2000) + Math.floor(Math.random() * 300);
@@ -6694,11 +6710,32 @@ HTML_BACKUPS_FTP = """
         .bloco-historico { background: var(--cor-superficie); border: 1px solid var(--cor-borda); border-radius: var(--raio); padding: 18px 20px; margin-top: 26px; }
         .bloco-historico-topo { margin-bottom: 14px; }
         .bloco-historico-topo h3 { margin: 0 0 4px 0; font-size: 1.1em; }
-        .tabela-responsiva { overflow-x: auto; }
+        .historico-scroll {
+            max-height: 440px;
+            overflow-y: auto;
+            overflow-x: auto;
+            border: 1px solid var(--cor-borda);
+            border-radius: var(--raio-md, 6px);
+        }
         .tabela-historico { width: 100%; border-collapse: collapse; font-size: 0.85em; text-align: left; }
-        .tabela-historico th { background: #f8fafc; padding: 10px 12px; border-bottom: 1px solid var(--cor-borda); color: var(--cor-texto-suave); font-weight: 600; }
+        .tabela-historico thead th {
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            background: var(--cor-fundo);
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--cor-borda);
+            color: var(--cor-texto-suave);
+            font-weight: 600;
+            box-shadow: 0 1px 0 var(--cor-borda);
+        }
         .tabela-historico td { padding: 10px 12px; border-bottom: 1px solid var(--cor-borda); vertical-align: middle; }
-        .tabela-historico tr:hover td { background: #f8fafc; }
+        .tabela-historico tr:hover td { background: var(--cor-superficie-hover); }
+        .badge-DISPENSADO {
+            background: var(--cor-sucesso-bg);
+            color: var(--cor-sucesso);
+            border: 1px solid var(--cor-sucesso-borda);
+        }
     </style>
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <script src="{{ url_for('static', filename='csrf.js') }}"></script>
@@ -6810,10 +6847,10 @@ HTML_BACKUPS_FTP = """
         <div class="bloco-historico">
             <div class="bloco-historico-topo">
                 <h3>📜 Histórico de Alertas de Backup Enviados</h3>
-                <span style="font-size: 0.82em; color: var(--cor-texto-suave);">Registros de disparos automáticos das 14h e manuais</span>
+                <span style="font-size: 0.82em; color: var(--cor-texto-suave);">Registros de disparos automáticos às {{ horario_alerta or '9h' }} e manuais</span>
             </div>
             {% if historico_emails %}
-                <div class="tabela-responsiva">
+                <div class="historico-scroll" tabindex="0" role="region" aria-label="Histórico de alertas de backup">
                     <table class="tabela-historico">
                         <thead>
                             <tr>
@@ -6822,7 +6859,6 @@ HTML_BACKUPS_FTP = """
                                 <th>Destinatário</th>
                                 <th>Totais</th>
                                 <th>Clientes Críticos</th>
-                                <th>Detalhes</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -6830,22 +6866,33 @@ HTML_BACKUPS_FTP = """
                                 <tr>
                                     <td style="font-weight: 600; white-space: nowrap;">{{ h.data_envio }}</td>
                                     <td>
-                                        {% if h.status_envio == 'ENVIADO' %}
-                                            <span class="badge-status badge-OK">✅ Enviado</span>
+                                        {% if h.status_envio == 'DISPENSADO' %}
+                                            <span class="badge-status badge-DISPENSADO">Dispensado (tudo em dia)</span>
+                                        {% elif h.status_envio == 'ENVIADO' %}
+                                            <span class="badge-status badge-OK">✅ {{ h.situacao_texto or ('Enviado (manual)' if h.eh_manual else 'Enviado') }}</span>
                                         {% else %}
-                                            <span class="badge-status badge-ERRO">❌ Falha</span>
+                                            <span class="badge-status badge-ERRO">❌ {{ h.situacao_texto or ('Falha (manual)' if h.eh_manual else 'Falha') }}</span>
                                         {% endif %}
                                     </td>
-                                    <td style="color: var(--cor-texto-suave);"><code>{{ h.destinatario }}</code></td>
+                                    <td style="color: var(--cor-texto-suave);">
+                                        {% if h.destinatario %}
+                                            <code>{{ h.destinatario }}</code>
+                                        {% else %}
+                                            —
+                                        {% endif %}
+                                    </td>
                                     <td style="white-space: nowrap; font-size: 0.85em;">
-                                        <span style="color: var(--cor-sucesso);">OK: {{ h.total_ok }}</span> |
-                                        <span style="color: var(--cor-aviso);">Atraso: {{ h.total_atrasado }}</span> |
-                                        <span style="color: var(--cor-perigo); font-weight: 700;">Críticos: {{ h.total_critico }}</span>
+                                        {% if h.total_ok is not none or h.total_atrasado is not none or h.total_critico is not none %}
+                                            <span style="color: var(--cor-sucesso);">OK: {{ h.total_ok or 0 }}</span> |
+                                            <span style="color: var(--cor-aviso);">Atraso: {{ h.total_atrasado or 0 }}</span> |
+                                            <span style="color: var(--cor-perigo); font-weight: 700;">Críticos: {{ h.total_critico or 0 }}</span>
+                                        {% else %}
+                                            —
+                                        {% endif %}
                                     </td>
                                     <td style="font-size: 0.85em; max-width: 280px; word-break: break-word;">
                                         {{ h.clientes_criticos or '—' }}
                                     </td>
-                                    <td style="font-size: 0.85em; color: var(--cor-texto-suave);">{{ h.detalhes or '—' }}</td>
                                 </tr>
                             {% endfor %}
                         </tbody>
@@ -6875,7 +6922,7 @@ def exibir_backups_ftp():
     conn = get_db_connection()
     try:
         marcador_email = obter_marcador_alerta_hoje(conn, analise)
-        historico_emails = obter_historico_alertas_backups(conn, limite=20)
+        historico_emails = obter_historico_alertas_backups(conn, limite=100, limite_dias=30)
     finally:
         conn.close()
 
@@ -6909,6 +6956,7 @@ def exibir_backups_ftp():
         historico_emails=historico_emails,
         analise=analise,
         pode_disparar=pode_disparar,
+        horario_alerta=obter_horario_agendado_alerta_backups(),
         msg_sucesso=msg_sucesso,
         msg_erro=msg_erro
     )

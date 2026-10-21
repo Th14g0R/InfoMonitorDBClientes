@@ -68,6 +68,9 @@
                 </a>
               </th>
               {% endfor %}
+              {% if session.get('logged_in') %}
+              <th scope="col" style="padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--cor-borda); background: var(--cor-fundo); text-align: right;">Ações</th>
+              {% endif %}
             </tr>
           </thead>
           <tbody>
@@ -110,15 +113,44 @@
                   <span class="text-muted">Não solicitada</span>
                 {% endif %}
               </td>
+              {% if session.get('logged_in') %}
+              <td style="text-align: right; white-space: nowrap;">
+                <button type="button" class="btn btn-danger btn-sm" onclick="openModal('modalRemover{{ loop.index }}')" aria-label="Remover {{ item.dominio }}">
+                  🗑️ Remover
+                </button>
+              </td>
+              {% endif %}
             </tr>
             {% else %}
             <tr>
-              <td colspan="7" class="text-muted" style="text-align: center; padding: var(--space-4);">Nenhum certificado cadastrado.</td>
+              <td colspan="{{ 8 if session.get('logged_in') else 7 }}" class="text-muted" style="text-align: center; padding: var(--space-4);">Nenhum certificado cadastrado.</td>
             </tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
+      {% if session.get('logged_in') %}
+        {% for item in itens %}
+        <div class="app-modal" id="modalRemover{{ loop.index }}" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="tituloRemover{{ loop.index }}">
+          <form action="{% if request.url_rule and 'certificados.remover' in request.url_rule.map._rules_by_endpoint %}{{ url_for('certificados.remover') }}{% else %}/certificados/remover{% endif %}" method="post" class="modal-content admin-delete-modal">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="subdominio" value="{{ item.dominio }}">
+            <div class="modal-header admin-danger-header">
+              <h5 class="modal-title" id="tituloRemover{{ loop.index }}">Remover subdomínio</h5>
+              <button type="button" class="modal-close" onclick="closeModal('modalRemover{{ loop.index }}')" aria-label="Fechar">&times;</button>
+            </div>
+            <div class="modal-body">
+              <p>Tem certeza de que deseja remover o monitoramento do subdomínio <strong>{{ item.dominio }}</strong>?</p>
+              <p class="text-muted" style="margin-bottom: 0;">Esta ação deixará de monitorar a expiração deste certificado SSL.</p>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-secondary" onclick="closeModal('modalRemover{{ loop.index }}')">Cancelar</button>
+              <button type="submit" class="btn btn-danger">Confirmar remoção</button>
+            </div>
+          </form>
+        </div>
+        {% endfor %}
+      {% endif %}
       <p class="text-muted" style="font-size: var(--font-size-xs); margin-top: var(--space-3); margin-bottom: 0;">
         ℹ️ Falhas na verificação preservam a última validade conhecida.
       </p>
@@ -156,6 +188,7 @@
         </table>
       </div>
     </div>
+    <div class="focus-trap-overlay" tabindex="-1"></div>
   </main>
 </body>
 </html>

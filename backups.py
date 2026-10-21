@@ -3,7 +3,7 @@ import re
 import ssl
 import smtplib
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from html.parser import HTMLParser
@@ -489,4 +489,91 @@ def enviar_email_alerta_backups(
             pass
 
     return True, "E-mail de alerta enviado com sucesso."
+
+
+def formatar_data_hora_hifen(dt_str):
+    """Separa data e hora com hífen (ex.: 2026-10-21 - 09:00:00)."""
+    if not dt_str:
+        return '—'
+    dt_str = str(dt_str).strip()
+    if ' - ' in dt_str:
+        return dt_str
+    partes = dt_str.split(' ', 1)
+    if len(partes) == 2:
+        return f"{partes[0]} - {partes[1]}"
+    return dt_str
+
+
+def montar_linhas_historico_alertas(registros, agora_dt=None, limite_dias=30, hora_corte_hoje=9):
+    """
+    Monta as linhas para exibição no Histórico de Alertas de Backup (/backups-ftp).
+    - Considera a janela dos últimos `limite_dias` (padrão 30 dias) no fuso America/Fortaleza.
+    - Coluna Data/Hora: separada por hífen (ex: 2026-10-21 - 09:00:00).
+    - Coluna Situação: 'Enviado', 'Enviado (manual)', 'Falha', 'Falha (manual)' ou 'Dispensado (tudo em dia)'.
+    - Dias sem envio na janela: linha sintetizada 'Dispensado (tudo em dia)' sem destinatário nem clientes críticos.
+    - Para o dia de hoje: não gera linha de dispensado antes das 09:00 (hora_corte_hoje).
+    - Retorna lista ordenada de forma decrescente por data/hora de envio.
+    """
+    if agora_dt is None:
+        agora_dt = datetime.now(FUSO_LOCAL)
+    elif agora_dt.tzinfo is None:
+        agora_dt = agora_dt.replace(tzinfo=FUSO_LOCAL)
+
+    hoje_date = agora_dt.date()
+    data_limite = hoje_date - timedelta(days=limite_dias - 1)
+
+    registros_validos = []
+    dias_com_registro = set()
+
+    for r in registros:
+        r_copia = dict(r)
+        d_str = (r_copia.get('data_referencia') or (r_copia.get('data_envio') or '')[:10]).strip()
+        try:
+            d_obj = datetime.strptime(d_str, '%Y-%m-%d').date()
+        except ValueError:
+            continue
+
+        if data_limite <= d_obj <= hoje_date:
+            dias_com_registro.add(d_obj)
+            detalhes = (r_copia.get('detalhes') or '').strip()
+            eh_manual = 'manual' in detalhes.lower()
+            status_envio = (r_copia.get('status_envio') or '').upper()
+
+            if status_envio == 'ENVIADO':
+                r_copia['situacao_texto'] = 'Enviado (manual)' if eh_manual else 'Enviado'
+            elif status_envio == 'FALHA':
+                r_copia['situacao_texto'] = 'Falha (manual)' if eh_manual else 'Falha'
+            else:
+                r_copia['situacao_texto'] = status_envio or '—'
+
+            r_copia['eh_manual'] = eh_manual
+            r_copia['data_envio'] = formatar_data_hora_hifen(r_copia.get('data_envio'))
+            registros_validos.append(r_copia)
+
+    # Dias sem envio dentro da janela
+    linhas_dispensadas = []
+    for i in range(limite_dias):
+        d = hoje_date - timedelta(days=i)
+        if d == hoje_date and agora_dt.hour < hora_corte_hoje:
+            continue
+        if d not in dias_com_registro:
+            linhas_dispensadas.append({
+                'id': None,
+                'data_envio': f"{d.strftime('%Y-%m-%d')} - 09:00:00",
+                'data_referencia': d.strftime('%Y-%m-%d'),
+                'destinatario': None,
+                'assunto': None,
+                'status_envio': 'DISPENSADO',
+                'situacao_texto': 'Dispensado (tudo em dia)',
+                'total_ok': None,
+                'total_atrasado': None,
+                'total_critico': None,
+                'clientes_criticos': None,
+                'detalhes': None,
+                'eh_manual': False
+            })
+
+    todas = registros_validos + linhas_dispensadas
+    todas.sort(key=lambda x: (x.get('data_envio') or '', x.get('id') or 0), reverse=True)
+    return todas
 
