@@ -1,0 +1,88 @@
+<nav class="navegacao-servidores" aria-label="Navegação dos servidores">
+    <label class="seletor-servidor" for="servidor-navegacao" title="Bancos">
+        <select id="servidor-navegacao" aria-label="Bancos" title="Bancos">
+            {% if modo_inativos or modo_orfaos or modo_historico or not servidor_atual %}<option value="" selected>Selecione um servidor</option>{% endif %}
+            <option value="/todos{% if ordem_atual %}?ordem={{ ordem_atual|urlencode }}{% endif %}" {% if modo_todos %}selected{% endif %}>Todos os servidores</option>
+            {% for nome, info in (servidores or {}).items() %}
+            <option value="/servidor/{{ nome|urlencode }}{% if ordem_atual %}?ordem={{ ordem_atual|urlencode }}{% endif %}" {% if nome == servidor_atual and not modo_todos and not modo_inativos and not modo_orfaos and not modo_historico %}selected{% endif %}>{{ info.rotulo if info is mapping else nome }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <details class="menu-acoes">
+        <summary class="btn">Consultas</summary>
+        <div class="menu-painel">
+            <a href="/inativos" {% if modo_inativos %}aria-current="page"{% endif %}>Alias inativados</a>
+            <a href="/orfaos" {% if modo_orfaos %}aria-current="page"{% endif %}>Arquivos órfãos no disco</a>
+            <a href="/historico" {% if modo_historico %}aria-current="page"{% endif %}>Histórico de disco</a>
+            <a href="/backups-ftp">Backups FTP</a>
+            <a href="/certificados">Certificados</a>
+            <a href="/cnpj">Consulta CNPJ</a>
+            <a href="/todos?filtro=sem_lojas" {% if filtro_status == 'sem_lojas' %}aria-current="page"{% endif %}>Clientes sem lojas cadastradas</a>
+            <a href="/todos?filtro=lojas_incompletas" {% if filtro_status == 'lojas_incompletas' %}aria-current="page"{% endif %}>Clientes com lojas incompletas</a>
+            <a href="/relatorio-clientes-lojas" target="_blank" title="Baixar relatório em Excel com resumo executivo e lista detalhada de clientes e lojas">📊 Relatório Clientes & Lojas (.xlsx)</a>
+        </div>
+    </details>
+    <details class="menu-acoes">
+        <summary class="btn">Links</summary>
+        <div class="menu-painel">
+            <a href="https://consultatefsuporte.nevesalisson87.workers.dev/" target="_blank" rel="noopener noreferrer" title="TEF-SiTEF">💳 TEF-SiTEF</a>
+            <a href="https://smartpos-infobrasil-436598344590.us-east1.run.app/" target="_blank" rel="noopener noreferrer" title="SmartPOS">📱 SmartPOS</a>
+            <a href="https://guia.infobrasilsistemas.com.br/infobrasilsistemas/areadosuporte/principal.html" target="_blank" rel="noopener noreferrer" title="Downloads">📥 Downloads</a>
+            <a href="https://notas-de-credito-e-debito.vercel.app/" target="_blank" rel="noopener noreferrer" title="Reforma Tributária">📄 Reforma Tributária</a>
+        </div>
+    </details>
+    <a href="/horarios" class="btn">🗓️ Horários</a>
+    <a href="http://{{ request.host.split(':')[0] }}:8501" target="_blank" rel="noopener noreferrer" class="btn" title="Transcrição e Auditoria de Chamadas Call Center">🎧 Transcritor Call Center</a>
+    {% if session.get('logged_in') %}
+    <details class="menu-acoes">
+        <summary class="btn">Gerenciar</summary>
+        <div class="menu-painel">
+            {% if tem_permissao('perm_gestao_bancos') %}
+                <a href="/admin{% if servidor_atual %}?servidor={{ servidor_atual|urlencode }}{% endif %}">Gestão de bancos</a>
+            {% else %}
+                <button type="button" onclick="return avisarSemPermissao('Gestão de Bancos')">Gestão de bancos</button>
+            {% endif %}
+            {% if tem_permissao('perm_horarios') %}
+                <a href="/horarios#secao-cargos-jornadas">Gestão de horários</a>
+            {% else %}
+                <button type="button" onclick="return avisarSemPermissao('Gestão de Horários')">Gestão de horários</button>
+            {% endif %}
+            {% if tem_permissao('perm_servidores') %}
+                <a href="/admin/importar-lojas">Importar lojas</a>
+                <a href="/admin/atualizar-lojas-info">Atualizar CodInfo / Situação</a>
+                <button type="button" onclick="marcarSemCnpjIgnorados()">Ignorar lojas sem CNPJ</button>
+            {% else %}
+                <button type="button" onclick="return avisarSemPermissao('Importação de Lojas')">Importar lojas</button>
+                <button type="button" onclick="return avisarSemPermissao('Atualização de Lojas')">Atualizar CodInfo / Situação</button>
+                <button type="button" onclick="return avisarSemPermissao('Editar Lojas')">Ignorar lojas sem CNPJ</button>
+            {% endif %}
+        </div>
+    </details>
+    {% endif %}
+    <div class="menu-direita">
+        <a href="{{ atualizar_url or ('?atualizar=1' ~ ('&busca=' ~ busca_termo|urlencode if busca_termo else '') ~ ('&ordem=' ~ ordem_atual|urlencode if ordem_atual else '') ~ ('&filtro=' ~ filtro_status|urlencode if filtro_status else '')) }}" class="btn btn-icone btn-atualizar" title="Atualizar dados do servidor" aria-label="Atualizar dados do servidor">↻</a>
+        <button id="theme-toggle" class="theme-toggle" aria-label="Alternar tema" title="Alternar tema claro/escuro">
+            <svg class="moon-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+            <svg class="sun-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+        </button>
+        {% if session.get('logged_in') %}
+        <details class="menu-acoes menu-conta">
+            <summary class="btn" title="{{ session.get('user_nome', 'Usuário') }}"><span class="nome-conta" title="{{ session.get('user_nome', 'Usuário') }}">{{ session.get('user_nome', '') }}</span>{% if session.get('eh_master') %}<span class="selo-master">Master</span>{% endif %}</summary>
+            <div class="menu-painel">
+                {% if tem_permissao('perm_gestao_bancos') %}
+                    <a href="/admin?perfil=1">Meu perfil</a>
+                {% else %}
+                    <button type="button" onclick="return avisarSemPermissao('Gestão de Bancos')">Meu perfil</button>
+                {% endif %}
+                <hr>
+                <form action="/admin/logout" method="POST">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit">Sair da conta</button>
+                </form>
+            </div>
+        </details>
+        {% else %}
+        <a href="/admin/login" title="Entrar" aria-label="Entrar" class="btn menu-conta"><svg class="icone-perfil" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg></a>
+        {% endif %}
+    </div>
+</nav>

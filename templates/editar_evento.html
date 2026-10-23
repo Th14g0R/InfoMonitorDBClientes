@@ -3,13 +3,19 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>Editar evento</title>
     <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
-    <link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
-    <script src="{{ url_for('static', filename='ui.js') }}" defer></script>
+    <link rel="stylesheet" href="/static/ui.css?v=menu-20261023-1">
+    <link rel="stylesheet" href="/static/menu_navegacao.css?v=menu-20261023-1">
+    <script src="/static/csrf.js"></script>
+    <script src="/static/ui.js?v=menu-20261023-1" defer></script>
 </head>
 <body>
-<main id="conteudo-principal" class="container" style="max-width: 860px; margin: 32px auto; padding: 0 var(--space-4);">
+<header class="header-editar-evento" style="max-width: 860px; margin: 16px auto 0 auto; padding: 0 var(--space-4);">
+    {% include 'menu_navegacao.html' %}
+</header>
+<main id="conteudo-principal" class="container" style="max-width: 860px; margin: 16px auto 32px auto; padding: 0 var(--space-4);">
     <div class="nav-bar">
         <div class="d-flex align-center gap-2">
             <h2 style="margin: 0; font-size: var(--font-size-lg);">✏️ Editar evento</h2>

@@ -3,10 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>Consulta CNPJ Pro — InfoMonitor</title>
   <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
-  <link rel="stylesheet" href="/static/ui.css">
-  <script src="/static/ui.js" defer></script>
+  <link rel="stylesheet" href="/static/ui.css?v=menu-20261023-1">
+  <link rel="stylesheet" href="/static/menu_navegacao.css?v=menu-20261023-1">
+  <script src="/static/csrf.js"></script>
+  <script src="/static/ui.js?v=menu-20261023-1" defer></script>
   <style>
     /* Reset & Base System integrado ao ui.css */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -51,8 +54,8 @@
       background: var(--cor-superficie);
       backdrop-filter: blur(8px);
       border-bottom: 1px solid var(--cor-borda);
-      height: 64px;
-      display: flex; align-items: center;
+      padding: 10px 0;
+      display: flex; flex-direction: column;
       box-shadow: var(--shadow-sm);
     }
     .header-inner {
@@ -317,7 +320,7 @@
 
   <!-- Header -->
   <header class="header">
-    <div class="header-inner">
+    <div class="header-inner" style="margin-bottom: 8px;">
       <div class="brand">
         <div class="brand-icon">🏢</div>
         <div>
@@ -327,12 +330,9 @@
           <div class="brand-sub">InfoMonitor · Receita Federal</div>
         </div>
       </div>
-      <nav class="header-nav">
-        <a href="/horarios" class="nav-btn">🗓️ Horários</a>
-        <a href="/todos" class="nav-btn">🖥️ Servidores</a>
-        <a href="/certificados" class="nav-btn">🔒 Certificados</a>
-        <button type="button" class="nav-btn" aria-label="Alternar tema" onclick="document.body.dataset.theme = document.body.dataset.theme === 'dark' ? 'light' : 'dark'; localStorage.setItem('infomonitor-theme', document.body.dataset.theme);">🌓</button>
-      </nav>
+    </div>
+    <div class="header-inner">
+      {% include 'menu_navegacao.html' %}
     </div>
   </header>
 

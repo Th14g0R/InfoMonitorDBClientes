@@ -534,8 +534,9 @@ HTML_INTERFACE = """
     </style>
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <script src="{{ url_for('static', filename='csrf.js') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='horarios-20261001-6') }}">
-<script src="{{ url_for('static', filename='ui.js', v='horarios-20261001-6') }}" defer></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='menu-20261023-1') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='menu_navegacao.css', v='menu-20261023-1') }}">
+<script src="{{ url_for('static', filename='ui.js', v='menu-20261023-1') }}" defer></script>
 </head>
 <body>
     <!-- Skip link para acessibilidade -->
@@ -544,36 +545,9 @@ HTML_INTERFACE = """
     <!-- Overlay para focus trap em modais -->
     <div class="focus-trap-overlay" aria-hidden="true"></div>
 
-    <div class="nav-bar">
-        <h2 style="margin: 0;">🗓️ Controle de Horários, Cobertura e Rodízio</h2>
-        <div class="d-flex items-center gap-2 flex-wrap">
-            <a href="{{ url_for('bancos.exibir_servidor') }}" class="btn btn-primary">🖥️ Servidores</a>
-            <a href="/certificados" class="btn btn-primary">Certificados</a>
-            <a href="/cnpj" class="btn btn-primary" title="Consulta de CNPJs na Receita Federal">🔍 CNPJ</a>
-            <a href="http://{{ request.host.split(':')[0] }}:8501" target="_blank" rel="noopener noreferrer" class="btn btn-secondary" title="Transcrição e Auditoria de Chamadas Call Center">🎧 Transcritor Call Center</a>
-            <a href="https://consultatefsuporte.nevesalisson87.workers.dev/" target="_blank" rel="noopener noreferrer" class="btn btn-secondary" title="TEF-SiTEF">💳 TEF-SiTEF</a>
-            <a href="https://smartpos-infobrasil-436598344590.us-east1.run.app/" target="_blank" rel="noopener noreferrer" class="btn btn-secondary" title="SmartPOS">📱 SmartPOS</a>
-            <a href="https://guia.infobrasilsistemas.com.br/infobrasilsistemas/areadosuporte/principal.html" target="_blank" rel="noopener noreferrer" class="btn btn-secondary" title="Downloads">📥 Downloads</a>
-            <a href="https://notas-de-credito-e-debito.vercel.app/" target="_blank" rel="noopener noreferrer" class="btn btn-secondary" title="ReformaTributária">📄 ReformaTributária</a>
-            {% if not session.get('logged_in') %}
-                <a href="{{ url_for('bancos.admin_login', next='/admin') }}" class="btn btn-bancos">🗄️ Gestão de Bancos</a>
-            {% elif usuario_tem_permissao('perm_gestao_bancos') %}
-                <a href="{{ url_for('bancos.admin_painel') }}" class="btn btn-bancos">🗄️ Gestão de Bancos</a>
-            {% else %}
-                <button type="button" class="btn btn-bancos" onclick="return avisarSemPermissao('Gestão de Bancos')">🗄️ Gestão de Bancos</button>
-            {% endif %}
-            {% if pode_editar_horarios() %}
-                <form action="/horarios/logout" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn btn-danger">🔒 Sair da Edição</button></form>
-            {% elif session.get('logged_in') %}
-                <button type="button" class="btn btn-success" onclick="return avisarSemPermissao('Gestão de Horários')">🔑 Login</button>
-            {% else %}
-                <a href="/horarios/login" class="btn btn-success">🔑 Login</a>
-            {% endif %}
-            <button id="theme-toggle" class="theme-toggle" aria-label="Alternar tema" title="Alternar tema claro/escuro">
-                <svg class="moon-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
-                <svg class="sun-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
-            </button>
-        </div>
+    <div class="topo-horarios" style="position: sticky; top: 0; z-index: var(--z-sticky, 100); background: var(--cor-superficie); border-bottom: 1px solid var(--cor-borda); padding: 12px 20px 8px 20px;">
+        <h2 style="margin: 0 0 6px 0; font-size: 1.3rem;">🗓️ Controle de Horários, Cobertura e Rodízio</h2>
+        {% include 'menu_navegacao.html' %}
     </div>
 
     <div style="background: var(--cor-superficie); border-bottom: 1px solid var(--cor-borda); padding: 8px 16px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
@@ -607,7 +581,7 @@ HTML_INTERFACE = """
         <div class="info-box info-box-primary d-flex flex-wrap justify-between items-center gap-3">
             <div class="d-flex gap-2 items-center flex-wrap">
                 {% if pode_editar_horarios() %}
-                    <form action="/horarios/gerar_sugestao_sabado" method="POST" class="form-inline d-flex gap-2 items-center" onsubmit="return validarSabadoForm(this.data_sabado)">
+                    <form action="/horarios/gerar_sugestao_sabado" method="POST" class="form-inline d-flex flex-wrap gap-2 items-center" onsubmit="return validarSabadoForm(this.data_sabado)">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <label>⚡ <strong>Gerar Rodízio:</strong></label>
                         <input type="date" name="data_sabado" id="input_gerar_sabado" required class="form-control" onchange="validarApenasSabado(this)" style="width: auto;">
@@ -645,7 +619,7 @@ HTML_INTERFACE = """
         {% if pode_editar_horarios() and data_filtro_sabado %}
             <div class="card" style="margin-bottom: var(--space-4);">
                 <h4 style="margin: 0 0 var(--space-3); font-size: var(--font-size-base);">➕ Adicionar / Encaixar Técnico Nesta Escala</h4>
-                <form action="/horarios/adicionar_item_escala" method="POST" class="form-grid" style="grid-template-columns: auto auto auto auto 1fr auto; align-items: end; gap: var(--space-2);">
+                <form action="/horarios/adicionar_item_escala" method="POST" class="d-flex flex-wrap gap-2 items-end" style="width: 100%;">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="data_sabado" value="{{ data_filtro_sabado }}">
                     <div>
@@ -858,7 +832,7 @@ HTML_INTERFACE = """
             <div style="background: var(--cor-superficie); border: 1px solid var(--cor-borda); border-radius: var(--raio-md); padding: var(--space-3); margin-top: 15px;">
                 <div class="d-flex flex-wrap gap-4">
                     <!-- Gerador Automático de Rodízio -->
-                    <div style="flex: 1; min-width: 300px; border-right: 1px solid var(--cor-borda); padding-right: 15px;">
+                    <div style="flex: 1; min-width: min(300px, 100%); border-right: 1px solid var(--cor-borda); padding-right: 15px;">
                         <h4 style="margin: 0 0 8px; font-size: 0.95rem; color: #d35400;">⚡ Gerar Lançamento do Rodízio Automático (TEF)</h4>
                         <form action="/horarios/gerar_sugestao_domingo" method="POST" class="d-flex flex-wrap gap-2 items-end">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -883,7 +857,7 @@ HTML_INTERFACE = """
                     </div>
 
                     <!-- Lançamento / Ajuste Manual -->
-                    <div style="flex: 1; min-width: 300px;">
+                    <div style="flex: 1; min-width: min(300px, 100%);">
                         <h4 style="margin: 0 0 8px; font-size: 0.95rem; color: var(--cor-primaria);">➕ Lançar / Encaixar Manualmente</h4>
                         <form action="/horarios/adicionar_item_escala_domingo" method="POST" class="d-flex flex-wrap gap-2 items-end">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -1221,10 +1195,11 @@ HTML_INTERFACE = """
         <div class="section-header">
             <h3>⚙️ Gerenciamento de Cargos e Tabela de Horários (CRUD)</h3>
         </div>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); gap: 20px;">
             
-            <div>
+            <div style="min-width: 0;">
                 <h4>📋 Gestão de Cargos</h4>
+                <div class="tabela-wrap" style="overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: var(--space-2);">
                 <table>
                     <thead>
                         <tr><th>Cargo</th><th class="col-acoes">Ação</th></tr>
@@ -1240,15 +1215,17 @@ HTML_INTERFACE = """
                         {% endfor %}
                     </tbody>
                 </table>
+                </div>
                 <form action="/horarios/novo_cargo" method="POST" class="d-flex gap-2" style="margin-top: 10px;">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    <input type="text" name="nome_cargo" placeholder="Novo Cargo" required class="form-control" style="flex: 1;">
+                    <input type="text" name="nome_cargo" placeholder="Novo Cargo" required class="form-control" style="flex: 1; min-width: 0;">
                     <button type="submit" class="btn btn-admin">Adicionar</button>
                 </form>
             </div>
 
-            <div>
+            <div style="min-width: 0;">
                 <h4>⏰ Tabela de Horários / Jornadas</h4>
+                <div class="tabela-wrap" style="overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: var(--space-2);">
                 <table>
                     <thead>
                         <tr><th>Descrição</th><th>Tipo</th><th class="col-acoes">Ação</th></tr>
@@ -1265,16 +1242,17 @@ HTML_INTERFACE = """
                         {% endfor %}
                     </tbody>
                 </table>
-                <form action="/horarios/nova_jornada" method="POST" class="form-grid" style="grid-template-columns: 1fr 1fr;">
+                </div>
+                <form action="/horarios/nova_jornada" method="POST" class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    <input type="text" name="descricao" placeholder="Ex: 08:00 às 12:00 (Sábado)" required class="form-control">
-                    <select name="tipo" class="form-select">
+                    <input type="text" name="descricao" placeholder="Ex: 08:00 às 12:00 (Sábado)" required class="form-control" style="min-width: 0;">
+                    <select name="tipo" class="form-select" style="min-width: 0;">
                         <option value="Semana">Semana</option>
                         <option value="Sabado">Sábado</option>
                     </select>
-                    <input type="text" name="m_in" placeholder="Início Manhã (08:00)" required class="form-control">
-                    <input type="text" name="m_out" placeholder="Fim Manhã (12:00)" required class="form-control">
-                    <button type="submit" class="btn btn-admin" style="grid-column: span 2;">Adicionar Horário</button>
+                    <input type="text" name="m_in" placeholder="Início Manhã (08:00)" required class="form-control" style="min-width: 0;">
+                    <input type="text" name="m_out" placeholder="Fim Manhã (12:00)" required class="form-control" style="min-width: 0;">
+                    <button type="submit" class="btn btn-admin" style="grid-column: 1 / -1;">Adicionar Horário</button>
                 </form>
             </div>
 
@@ -2264,54 +2242,83 @@ def editar_ausencia(id):
     a_id, f_id, motivo, d_in, d_fim, h_in, h_fim = aus
     opts_funcs = "".join([f'<option value="{f[0]}" {"selected" if f[0]==f_id else ""}>{escape(f[1])}</option>' for f in funcs])
 
-    return f"""
-    <link rel="stylesheet" href="/static/ui.css">
-    <script src="/static/ui.js" defer></script>
-    <div style="max-width: 500px; margin: 40px auto; font-family: sans-serif; padding: 20px; border: 1px solid #ccc; border-radius: 8px; background: white;">
-        <h3>✏️ Editar Ausência / Licença</h3>
-        <form action="/horarios/salvar_ausencia" method="POST" style="display: grid; gap: 12px;">
+    menu_html = render_template('menu_navegacao.html')
+
+    return f"""<!doctype html>
+<html lang="pt-BR">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="{csrf_token()}">
+    <title>Editar Ausência — InfoMonitor</title>
+    <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
+    <link rel="stylesheet" href="/static/ui.css?v=menu-20261023-1">
+    <link rel="stylesheet" href="/static/menu_navegacao.css?v=menu-20261023-1">
+    <script src="/static/csrf.js"></script>
+    <script src="/static/ui.js?v=menu-20261023-1" defer></script>
+</head>
+<body>
+<header class="header-editar-ausencia" style="max-width: 860px; margin: 16px auto 0 auto; padding: 0 var(--space-4);">
+    {menu_html}
+</header>
+<main id="conteudo-principal" class="container" style="max-width: 860px; width: 100%; box-sizing: border-box; margin: 16px auto 32px auto; padding: 0 var(--space-4);">
+    <div class="nav-bar d-flex justify-between align-center flex-wrap gap-2" style="margin-bottom: var(--space-4);">
+        <div class="d-flex align-center gap-2">
+            <h2 style="margin: 0; font-size: var(--font-size-lg);">✏️ Editar Ausência / Licença</h2>
+        </div>
+        <div>
+            <a href="/horarios#secao-ausencias" class="btn btn-secondary">⬅️ Voltar às Ausências</a>
+        </div>
+    </div>
+    <div class="card edicao-ausencia-card" style="max-width: 560px; width: 100%; box-sizing: border-box; margin: 0 auto; padding: 20px;">
+        <form action="/horarios/salvar_ausencia" method="POST" style="display: flex; flex-direction: column; gap: 12px; width: 100%; box-sizing: border-box;">
             <input type="hidden" name="csrf_token" value="{csrf_token()}">
             <input type="hidden" name="id" value="{a_id}">
             
-            <div>
-                <label style="font-size: 0.85em;">Técnico:</label>
-                <select name="funcionario_id" required style="width: 100%; padding: 8px;">
+            <div style="width: 100%;">
+                <label style="font-size: 0.85em; font-weight: 600; display: block; margin-bottom: 4px;">Técnico:</label>
+                <select name="funcionario_id" required style="width: 100%; box-sizing: border-box; padding: 8px;">
                     {opts_funcs}
                 </select>
             </div>
 
-            <div>
-                <label style="font-size: 0.85em;">Motivo:</label>
-                <input type="text" name="motivo" value="{escape(motivo)}" required style="width: 100%; padding: 8px;">
+            <div style="width: 100%;">
+                <label style="font-size: 0.85em; font-weight: 600; display: block; margin-bottom: 4px;">Motivo:</label>
+                <input type="text" name="motivo" value="{escape(motivo)}" required style="width: 100%; box-sizing: border-box; padding: 8px;">
             </div>
 
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                <div>
-                    <label style="font-size: 0.85em;">Data Início:</label>
-                    <input type="date" name="data_inicio" value="{d_in}" required style="width: 100%; padding: 8px;">
+            <div style="display: flex; flex-wrap: wrap; gap: 10px; width: 100%;">
+                <div style="flex: 1 1 140px; min-width: 0;">
+                    <label style="font-size: 0.85em; font-weight: 600; display: block; margin-bottom: 4px;">Data Início:</label>
+                    <input type="date" name="data_inicio" value="{d_in}" required style="width: 100%; box-sizing: border-box; padding: 8px;">
                 </div>
-                <div>
-                    <label style="font-size: 0.85em;">Hora Início (Opcional):</label>
-                    <input type="time" name="hora_inicio" value="{h_in or ''}" style="width: 100%; padding: 8px;">
-                </div>
-            </div>
-
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                <div>
-                    <label style="font-size: 0.85em;">Data Fim:</label>
-                    <input type="date" name="data_fim" value="{d_fim}" required style="width: 100%; padding: 8px;">
-                </div>
-                <div>
-                    <label style="font-size: 0.85em;">Hora Fim (Opcional):</label>
-                    <input type="time" name="hora_fim" value="{h_fim or ''}" style="width: 100%; padding: 8px;">
+                <div style="flex: 1 1 140px; min-width: 0;">
+                    <label style="font-size: 0.85em; font-weight: 600; display: block; margin-bottom: 4px;">Hora Início (Opcional):</label>
+                    <input type="time" name="hora_inicio" value="{h_in or ''}" style="width: 100%; box-sizing: border-box; padding: 8px;">
                 </div>
             </div>
 
-            <button type="submit" class="btn btn-success">Salvar Ausência</button>
-            <a href="/horarios#secao-ausencias" class="btn btn-secondary" style="text-align: center;">Cancelar</a>
+            <div style="display: flex; flex-wrap: wrap; gap: 10px; width: 100%;">
+                <div style="flex: 1 1 140px; min-width: 0;">
+                    <label style="font-size: 0.85em; font-weight: 600; display: block; margin-bottom: 4px;">Data Fim:</label>
+                    <input type="date" name="data_fim" value="{d_fim}" required style="width: 100%; box-sizing: border-box; padding: 8px;">
+                </div>
+                <div style="flex: 1 1 140px; min-width: 0;">
+                    <label style="font-size: 0.85em; font-weight: 600; display: block; margin-bottom: 4px;">Hora Fim (Opcional):</label>
+                    <input type="time" name="hora_fim" value="{h_fim or ''}" style="width: 100%; box-sizing: border-box; padding: 8px;">
+                </div>
+            </div>
+
+            <div class="d-flex gap-2 flex-wrap" style="margin-top: 8px;">
+                <button type="submit" class="btn btn-primary">Salvar Ausência</button>
+                <a href="/horarios#secao-ausencias" class="btn btn-secondary" style="text-align: center;">Cancelar</a>
+            </div>
         </form>
     </div>
-    """
+</main>
+</body>
+</html>
+"""
 
 @horarios_bp.route('/horarios/excluir_ausencia/<int:id>', methods=['POST'])
 @login_required

@@ -3,6 +3,31 @@ window.avisarSemPermissao = function(area) {
     return false;
 };
 
+window.marcarSemCnpjIgnorados = function() {
+    if (!confirm('Deseja marcar como IGNORADOS todos os lançamentos de lojas sem CNPJ cadastrado?')) return;
+    const csrfToken = (typeof getCsrfToken === 'function' ? getCsrfToken() : '') ||
+                      document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') ||
+                      document.querySelector('input[name="csrf_token"]')?.value || '';
+    const headers = { 'Content-Type': 'application/json' };
+    if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+    const fetchFunc = typeof csrfFetch === 'function' ? csrfFetch : fetch;
+    fetchFunc('/admin/lojas/ignorar-sem-cnpj', {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify({})
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.sucesso || data.ok) {
+            alert(data.mensagem || 'Lojas atualizadas com sucesso!');
+            location.reload();
+        } else {
+            alert('Erro: ' + (data.mensagem || data.erro || 'tente novamente.'));
+        }
+    })
+    .catch(() => alert('Não foi possível concluir a ação. Verifique sua conexão.'));
+};
+
 document.addEventListener('DOMContentLoaded', () => {
     // ===== TEMA (Light/Dark) =====
     const THEME_KEY = 'infomonitor-theme';
@@ -86,19 +111,64 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ===== MENUS DROPDOWN =====
-    const menus = document.querySelectorAll('.menu-acoes');
+    function ajustarPosicaoMenuPainel(menu) {
+        const painel = menu.querySelector('.menu-painel');
+        if (!painel) return;
+        if (window.innerWidth <= 700) {
+            painel.style.left = '';
+            painel.style.right = '';
+            return;
+        }
+        if (menu.closest('.menu-direita')) {
+            painel.style.left = 'auto';
+            painel.style.right = '0';
+            return;
+        }
+        painel.style.left = '0';
+        painel.style.right = 'auto';
+        const rect = painel.getBoundingClientRect();
+        if (rect.right > window.innerWidth) {
+            painel.style.left = 'auto';
+            painel.style.right = '0';
+        } else if (rect.left < 0) {
+            painel.style.left = '0';
+            painel.style.right = 'auto';
+        }
+    }
+
+    document.querySelectorAll('.menu-acoes').forEach(menu => {
+        menu.addEventListener('toggle', () => {
+            if (menu.open) {
+                ajustarPosicaoMenuPainel(menu);
+            }
+        });
+    });
+
+    window.addEventListener('resize', () => {
+        document.querySelectorAll('.menu-acoes[open]').forEach(ajustarPosicaoMenuPainel);
+    });
+
     document.addEventListener('click', event => {
-        menus.forEach(menu => { if (!menu.contains(event.target)) menu.open = false; });
+        document.querySelectorAll('.menu-acoes').forEach(menu => {
+            if (!menu.contains(event.target)) menu.open = false;
+        });
     });
     document.addEventListener('keydown', event => {
-        if (event.key === 'Escape') menus.forEach(menu => {
-            if (menu.open) { menu.open = false; menu.querySelector('summary').focus(); }
-        });
+        if (event.key === 'Escape') {
+            document.querySelectorAll('.menu-acoes').forEach(menu => {
+                if (menu.open) {
+                    menu.open = false;
+                    menu.querySelector('summary')?.focus();
+                }
+            });
+        }
     });
 
     // ===== NAVEGAÇÃO DE SERVIDORES =====
     document.getElementById('servidor-navegacao')?.addEventListener('change', event => {
-        window.location.assign(event.target.value);
+        if (event.target.value) {
+            window.location.assign(event.target.value);
+        }
     });
 
     // ===== FOCUS TRAP PARA MODAIS (Acessibilidade) =====

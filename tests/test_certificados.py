@@ -173,6 +173,8 @@ class CertificadosTest(unittest.TestCase):
         app = Flask(__name__, template_folder=str(Path.cwd() / 'templates'))
         app.secret_key = 'teste'
         app.jinja_env.globals['csrf_token'] = lambda: 'token-valido'
+        # O menu comum vem do context processor de bancos_bp, que não é registrado neste app mínimo.
+        app.jinja_env.globals['tem_permissao'] = lambda p: True
         bp = Blueprint('bancos', __name__)
         configurar_certificados(bp, self.conectar, lambda p: True, MagicMock())
         app.register_blueprint(bp)

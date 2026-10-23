@@ -1,5 +1,15 @@
 # Histórico de versões
 
+## 1.2.2 - 2026-10-23
+
+- navegacao: componente unificado de navegação (`templates/menu_navegacao.html`) e folha de estilos dedicada (`static/menu_navegacao.css`) aplicados em todas as telas da aplicação;
+- menus: dropdowns de Consultas e Links externos (TEF-SiTEF, SmartPOS, Downloads, Reforma Tributária com abertura em nova aba), atalhos públicos para Horários e Transcritor Call Center;
+- administracao: menu Gerenciar restrito e visível apenas para usuários logados, com Gestão de bancos, Gestão de horários (seção administrativa `#secao-cargos-jornadas`), importação de lojas e atualização de CodInfo com verificação estrita de permissões;
+- conta e tema: grupo direito unificado com botão minimalista de atualização (preservando filtros e parâmetros de busca), alternador de tema claro/escuro único e menu de conta com silhueta SVG deslogado e dropdown com perfil e logout logado;
+- responsividade: suporte robusto a telas pequenas a partir de 320px sem rolagem horizontal ou sobreposição, com quebra dinâmica de dropdowns, truncamento de nome de usuário e rolagem controlada na tabela de bancos apenas em mobile (`<= 700px`);
+- seguranca: ação de ignorar lojas sem CNPJ centralizada em `static/ui.js` com confirmação e envio via cabeçalho `X-CSRF-Token`; injeção resiliente de contexto global e permissões;
+- testes: 151 testes passando.
+
 ## 1.2.1 - 2026-10-21
 
 - rede: `BIND_HOST` ausente no `.env` mantém 127.0.0.1, mas agora emite aviso em destaque na inicialização; documentado `BIND_HOST=0.0.0.0` para rede interna (README e `.env.example`);

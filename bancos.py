@@ -112,6 +112,20 @@ def proteger_gestao():
 def tem_permissao(codigo_permissao):
     """Master sempre tem acesso total. Demais usuários dependem da coluna de permissão específica."""
     usuario = g.get('usuario_atual')
+    if not usuario and session.get('logged_in') and session.get('user_id'):
+        try:
+            conn = get_db_connection()
+            usuario = conn.execute("SELECT * FROM usuarios WHERE id = ?", (session['user_id'],)).fetchone()
+            conn.close()
+            if usuario and usuario['ativo']:
+                g.usuario_atual = usuario
+                session['user_nome'] = nome_para_assinatura(usuario['nome'])
+                session['eh_master'] = bool(usuario['eh_master'])
+            else:
+                usuario = None
+        except Exception:
+            usuario = None
+
     if not usuario:
         return False
     if usuario['eh_master']:
@@ -124,8 +138,21 @@ def tem_permissao(codigo_permissao):
 bancos_bp.add_app_template_global(tem_permissao, name='tem_permissao')
 
 @bancos_bp.app_context_processor
-def inject_flags_ui():
-    return {'allow_register': ALLOW_PUBLIC_REGISTER}
+def inject_contexto_global_menu():
+    return {
+        'allow_register': ALLOW_PUBLIC_REGISTER,
+        'servidores': SERVIDORES,
+        'tem_permissao': tem_permissao,
+        'servidor_atual': '',
+        'modo_todos': False,
+        'modo_inativos': False,
+        'modo_orfaos': False,
+        'modo_historico': False,
+        'filtro_status': None,
+        'busca_termo': '',
+        'ordem_atual': '',
+        'atualizar_url': '',
+    }
 
 def exigir_permissao(codigo_permissao):
     """Para uso em rotas: True se autorizado, senão já devolve a resposta de erro/redirecionamento pronta."""
@@ -1909,8 +1936,9 @@ HTML_LAYOUT = """
     </style>
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <script src="{{ url_for('static', filename='csrf.js') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='public-20260925-4') }}">
-<script src="{{ url_for('static', filename='ui.js', v='public-20260925-4') }}" defer></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='menu-20261023-1') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='menu_navegacao.css', v='menu-20261023-1') }}">
+<script src="{{ url_for('static', filename='ui.js', v='menu-20261023-1') }}" defer></script>
 </head>
 <body>
     <!-- Skip link para acessibilidade -->
@@ -1935,85 +1963,7 @@ HTML_LAYOUT = """
             </form>
         </div>
 
-        <nav class="navegacao-servidores" aria-label="Navegação dos servidores">
-            <label class="seletor-servidor" for="servidor-navegacao">Visualização
-                <select id="servidor-navegacao">
-                    {% if modo_inativos or modo_orfaos or modo_historico %}<option value="" selected>Selecione um servidor</option>{% endif %}
-                    <option value="/todos?ordem={{ ordem_atual|urlencode }}" {% if modo_todos %}selected{% endif %}>Todos os servidores</option>
-                    {% for nome, info in servidores.items() %}
-                    <option value="/servidor/{{ nome|urlencode }}?ordem={{ ordem_atual|urlencode }}" {% if nome == servidor_atual and not modo_todos and not modo_inativos and not modo_orfaos and not modo_historico %}selected{% endif %}>{{ info.rotulo }}</option>
-                    {% endfor %}
-                </select>
-            </label>
-            <details class="menu-acoes">
-                <summary class="btn">Consultas</summary>
-                <div class="menu-painel">
-                    <a href="/inativos" {% if modo_inativos %}aria-current="page"{% endif %}>Alias inativados</a>
-                    <a href="/orfaos" {% if modo_orfaos %}aria-current="page"{% endif %}>Arquivos órfãos no disco</a>
-                    <a href="/historico" {% if modo_historico %}aria-current="page"{% endif %}>Histórico de disco</a>
-                    <a href="/backups-ftp">Backups FTP</a>
-                    <a href="/certificados">Certificados</a>
-                    <a href="/cnpj">Consulta CNPJ</a>
-                    <a href="/todos?filtro=sem_lojas" {% if filtro_status == 'sem_lojas' %}aria-current="page"{% endif %}>Clientes sem lojas cadastradas</a>
-                    <a href="/todos?filtro=lojas_incompletas" {% if filtro_status == 'lojas_incompletas' %}aria-current="page"{% endif %}>Clientes com lojas incompletas</a>
-                    <a href="/relatorio-clientes-lojas" target="_blank" title="Baixar relatório em Excel com resumo executivo e lista detalhada de clientes e lojas">📊 Relatório Clientes & Lojas (.xlsx)</a>
-                </div>
-            </details>
-            {% if session.get('logged_in') %}
-            <details class="menu-acoes">
-                <summary class="btn">Gerenciar</summary>
-                <div class="menu-painel">
-                    {% if tem_permissao('perm_gestao_bancos') %}
-                        <a href="/admin?servidor={{ servidor_atual|urlencode }}">Gestão de bancos</a>
-                    {% else %}
-                        <button type="button" onclick="return avisarSemPermissao('Gestão de Bancos')">Gestão de bancos</button>
-                    {% endif %}
-                    {% if tem_permissao('perm_servidores') %}
-                        <a href="/admin/importar-lojas">Importar lojas</a>
-                        <a href="/admin/atualizar-lojas-info">Atualizar CodInfo / Situação</a>
-                        <button type="button" onclick="marcarSemCnpjIgnorados()">Ignorar lojas sem CNPJ</button>
-                        <a href="/relatorio-clientes-lojas" target="_blank">📊 Relatório Clientes & Lojas (.xlsx)</a>
-                    {% else %}
-                        <button type="button" onclick="return avisarSemPermissao('Importação de Lojas')">Importar lojas</button>
-                        <button type="button" onclick="return avisarSemPermissao('Atualização de Lojas')">Atualizar CodInfo / Situação</button>
-                        <button type="button" onclick="return avisarSemPermissao('Editar Lojas')">Ignorar lojas sem CNPJ</button>
-                        <a href="/relatorio-clientes-lojas" target="_blank">📊 Relatório Clientes & Lojas (.xlsx)</a>
-                    {% endif %}
-                    <a href="http://{{ request.host.split(':')[0] }}:8501" target="_blank" rel="noopener noreferrer">🎧 Transcritor Call Center</a>
-                </div>
-            </details>
-            {% endif %}
-            <a href="?atualizar=1{% if busca_termo %}&busca={{ busca_termo|urlencode }}{% endif %}{% if ordem_atual %}&ordem={{ ordem_atual|urlencode }}{% endif %}{% if filtro_status %}&filtro={{ filtro_status|urlencode }}{% endif %}" class="btn" title="Atualizar dados do servidor">↻ Atualizar</a>
-            <a href="/horarios" class="btn">🗓️ Horários</a>
-            <a href="http://{{ request.host.split(':')[0] }}:8501" target="_blank" rel="noopener noreferrer" class="btn" title="Transcrição e Auditoria de Chamadas Call Center">🎧 Transcritor Call Center</a>
-            <a href="https://consultatefsuporte.nevesalisson87.workers.dev/" target="_blank" rel="noopener noreferrer" class="btn" title="TEF-SiTEF">💳 TEF-SiTEF</a>
-            <a href="https://smartpos-infobrasil-436598344590.us-east1.run.app/" target="_blank" rel="noopener noreferrer" class="btn" title="SmartPOS">📱 SmartPOS</a>
-            <a href="https://guia.infobrasilsistemas.com.br/infobrasilsistemas/areadosuporte/principal.html" target="_blank" rel="noopener noreferrer" class="btn" title="Downloads">📥 Downloads</a>
-            <a href="https://notas-de-credito-e-debito.vercel.app/" target="_blank" rel="noopener noreferrer" class="btn" title="ReformaTributária">📄 ReformaTributária</a>
-            <button id="theme-toggle" class="theme-toggle" aria-label="Alternar tema" title="Alternar tema claro/escuro">
-                <svg class="moon-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
-                <svg class="sun-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
-            </button>
-            {% if session.get('logged_in') %}
-            <details class="menu-acoes menu-conta">
-                <summary class="btn"><span class="nome-conta">{{ session.get('user_nome', '') }}</span>{% if session.get('eh_master') %}<span class="selo-master">Master</span>{% endif %}</summary>
-                <div class="menu-painel">
-                    {% if tem_permissao('perm_gestao_bancos') %}
-                        <a href="/admin">Meu perfil</a>
-                    {% else %}
-                        <button type="button" onclick="return avisarSemPermissao('Gestão de Bancos')">Meu perfil</button>
-                    {% endif %}
-                    <hr>
-                    <form action="/admin/logout" method="POST">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                        <button type="submit">Sair da conta</button>
-                    </form>
-                </div>
-            </details>
-            {% else %}
-            <a href="/admin/login" class="btn menu-conta">Entrar</a>
-            {% endif %}
-        </nav>
+        {% include 'menu_navegacao.html' %}
 
         <div class="header-info">
             {% if modo_historico %}
@@ -2281,6 +2231,7 @@ HTML_LAYOUT = """
                 {% elif bancos|length == 0 %}
                     <div class="text-center text-muted" style="padding: 30px;">Nenhum registro encontrado.</div>
                 {% else %}
+                    <div class="tabela-bancos-wrap" role="region" aria-label="Lista de bancos" tabindex="0">
                     <table>
                         <thead>
                             <tr>
@@ -2420,6 +2371,7 @@ HTML_LAYOUT = """
                             {% endfor %}
                         </tbody>
                     </table>
+                    </div>
                 {% endif %}
             {% endif %}
         </div>
@@ -2739,24 +2691,6 @@ HTML_LAYOUT = """
             .catch(() => alert('Não foi possível excluir. Verifique sua conexão.'));
         }
 
-        function marcarSemCnpjIgnorados() {
-            if (!confirm('Deseja marcar como IGNORADOS todos os lançamentos de lojas sem CNPJ cadastrado?')) return;
-            csrfFetch('/admin/lojas/ignorar-sem-cnpj', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({})
-            })
-            .then(r => r.json())
-            .then(data => {
-                if (data.sucesso) {
-                    alert(data.mensagem || 'Lojas atualizadas com sucesso!');
-                    location.reload();
-                } else {
-                    alert('Erro: ' + (data.mensagem || 'tente novamente.'));
-                }
-            })
-            .catch(() => alert('Não foi possível concluir a ação. Verifique sua conexão.'));
-        }
         {% endif %}
 
         // --- Edição inline da string de conexão (CNAME) ---
@@ -3174,8 +3108,9 @@ HTML_ADMIN = r"""
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <script src="{{ url_for('static', filename='csrf.js') }}"></script>
 <script src="{{ url_for('static', filename='admin-destino.js') }}" defer></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='admin-20260925-2') }}">
-<script src="{{ url_for('static', filename='ui.js', v='admin-20260925-2') }}" defer></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='menu-20261023-1') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='menu_navegacao.css', v='menu-20261023-1') }}">
+<script src="{{ url_for('static', filename='ui.js', v='menu-20261023-1') }}" defer></script>
 </head>
 <body class="admin-page">
     <!-- Skip link para acessibilidade -->
@@ -3184,23 +3119,15 @@ HTML_ADMIN = r"""
     <!-- Overlay para focus trap em modais -->
     <div class="focus-trap-overlay" aria-hidden="true"></div>
 
-    <!-- CÓDIGO CORRIGIDO COM O BOTÃO DE PERFIL -->
+    {% include 'menu_navegacao.html' %}
+
     <div class="header admin-header">
         <h2><i class="fa-solid fa-database me-2"></i>Gestão Administrativa de Databases - {{ servidor_atual }}</h2>
         <div class="admin-header-actions">
-            <!-- Nome do usuário logado -->
-            <span class="text-muted me-1"><i class="fa-solid fa-circle-user me-1"></i>{{ usuario_nome }}{% if session.get('eh_master') %} <span class="badge badge-danger">Master</span>{% endif %}</span>
             <!-- Botão de Gestão de Perfil / Alterar Senha -->
             <button type="button" onclick="abrirModalPerfil()" class="btn btn-warning">
                 <i class="fa-solid fa-user-gear me-1"></i> Perfil
             </button>
-            <a href="/servidor/DB01" class="btn btn-primary">Servidores</a>
-            <a href="/horarios" class="btn btn-primary">Horários</a>
-            <button id="theme-toggle" class="theme-toggle" aria-label="Alternar tema" title="Alternar tema claro/escuro">
-                <svg class="moon-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
-                <svg class="sun-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
-            </button>
-            <form action="/admin/logout" method="POST" class="form-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn btn-danger">Sair</button></form>
         </div>
     </div>
 
@@ -3453,7 +3380,7 @@ HTML_ADMIN = r"""
                     </div>
                 </div>
                 <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between mt-3 pt-2 border-top">
-                    <div class="d-flex gap-2">
+                    <div class="d-flex gap-2 flex-wrap">
                         <button type="submit" class="btn btn-primary btn-sm" id="btnSalvarApi">
                             <i class="fa-solid fa-floppy-disk me-1"></i> Gravar no .env
                         </button>
@@ -3547,9 +3474,9 @@ HTML_ADMIN = r"""
 
     <!-- VISUALIZADOR COM DESTAQUE DE CORES E EDITOR DE TEXTO BRUTO -->
     <div class="card shadow-sm mb-4" id="secaoArquivo">
-        <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+        <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center flex-wrap gap-2">
             <span><i class="fa-solid fa-code me-2"></i>Exibição do Arquivo (databases.conf)</span>
-            <div>
+            <div class="d-flex gap-2 flex-wrap">
                 <button class="btn btn-sm btn-outline-info me-2" onclick="alternarModoEdicao()" id="btnModo">
                     <i class="fa-solid fa-pen"></i> Abrir Modo Edição Direta
                 </button>
@@ -4195,13 +4122,13 @@ HTML_ADMIN = r"""
         .catch(() => alert("Não foi possível salvar. Verifique sua conexão e tente novamente."));
     }
 
-    // Abre a modal automaticamente caso receba a mensagem para alterar a senha
-    window.onload = function() {
+    // Abre a modal de perfil automaticamente se ?perfil=1 ou caso receba a mensagem para alterar a senha
+    window.addEventListener('load', function() {
         const urlParams = new URLSearchParams(window.location.search);
-        if (urlParams.has('sucesso') && urlParams.get('sucesso').includes('Altere sua senha')) {
+        if (urlParams.get('perfil') === '1' || (urlParams.has('sucesso') && urlParams.get('sucesso').includes('Altere sua senha'))) {
             abrirModalPerfil();
         }
-    };
+    });
     </script>
 
     <!-- FIX: Bundle JS do Bootstrap (faltava) - necessário para os modais (ex: "Excluir" usuário) funcionarem -->
@@ -4220,8 +4147,9 @@ HTML_REDEFINIR = r"""
     <title>Redefinir Senha</title>
     <meta name="csrf-token" content="{{ csrf_token() }}">
     <script src="{{ url_for('static', filename='csrf.js') }}"></script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
-    <script src="{{ url_for('static', filename='ui.js') }}" defer></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='menu-20261023-1') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='menu_navegacao.css', v='menu-20261023-1') }}">
+    <script src="{{ url_for('static', filename='ui.js', v='menu-20261023-1') }}" defer></script>
 </head>
 <body>
     <!-- Skip link para acessibilidade -->
@@ -4230,7 +4158,9 @@ HTML_REDEFINIR = r"""
     <!-- Overlay para focus trap em modais -->
     <div class="focus-trap-overlay" aria-hidden="true"></div>
 
-    <main id="conteudo-principal" class="d-flex justify-center items-center" style="min-height: 100vh; padding: var(--space-4);">
+    {% include 'menu_navegacao.html' %}
+
+    <main id="conteudo-principal" class="d-flex justify-center items-center" style="min-height: calc(100vh - 80px); padding: var(--space-4);">
         <div class="card" style="width: 100%; max-width: 400px; padding: var(--space-6);">
             <h4 class="text-center" style="margin: 0 0 var(--space-5);">Redefinir Senha</h4>
             <form id="formRedefinir" onsubmit="executarRedefinicao(event)">
@@ -4308,8 +4238,9 @@ HTML_LOGIN = r"""
     <title>Acesso Admin</title>
     <meta name="csrf-token" content="{{ csrf_token() }}">
     <script src="{{ url_for('static', filename='csrf.js') }}"></script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
-    <script src="{{ url_for('static', filename='ui.js') }}" defer></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='menu-20261023-1') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='menu_navegacao.css', v='menu-20261023-1') }}">
+    <script src="{{ url_for('static', filename='ui.js', v='menu-20261023-1') }}" defer></script>
 </head>
 <body>
     <!-- Skip link para acessibilidade -->
@@ -4318,7 +4249,9 @@ HTML_LOGIN = r"""
     <!-- Overlay para focus trap em modais -->
     <div class="focus-trap-overlay" aria-hidden="true"></div>
 
-    <main id="conteudo-principal" class="d-flex justify-center items-center" style="min-height: 100vh; padding: var(--space-4);">
+    {% include 'menu_navegacao.html' %}
+
+    <main id="conteudo-principal" class="d-flex justify-center items-center" style="min-height: calc(100vh - 80px); padding: var(--space-4);">
         <div class="card" style="width: 100%; max-width: 380px; padding: var(--space-6);">
             <h3 class="text-center" style="margin: 0 0 var(--space-1);">🔐 Acesso Admin</h3>
             <p class="text-center text-muted" style="font-size: var(--font-size-sm); margin: 0 0 var(--space-5);">Gestão dos arquivos databases.conf</p>
@@ -4365,8 +4298,9 @@ HTML_ESQUECI_SENHA = r"""
     <title>Recuperar Senha</title>
     <meta name="csrf-token" content="{{ csrf_token() }}">
     <script src="{{ url_for('static', filename='csrf.js') }}"></script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
-    <script src="{{ url_for('static', filename='ui.js') }}" defer></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='menu-20261023-1') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='menu_navegacao.css', v='menu-20261023-1') }}">
+    <script src="{{ url_for('static', filename='ui.js', v='menu-20261023-1') }}" defer></script>
 </head>
 <body>
     <!-- Skip link para acessibilidade -->
@@ -4375,7 +4309,9 @@ HTML_ESQUECI_SENHA = r"""
     <!-- Overlay para focus trap em modais -->
     <div class="focus-trap-overlay" aria-hidden="true"></div>
 
-    <main id="conteudo-principal" class="d-flex justify-center items-center" style="min-height: 100vh; padding: var(--space-4);">
+    {% include 'menu_navegacao.html' %}
+
+    <main id="conteudo-principal" class="d-flex justify-center items-center" style="min-height: calc(100vh - 80px); padding: var(--space-4);">
         <div class="card" style="width: 100%; max-width: 380px; padding: var(--space-6);">
             <h3 class="text-center" style="margin: 0 0 var(--space-1);">🔑 Recuperar Senha</h3>
             <p class="text-center text-muted" style="font-size: var(--font-size-sm); margin: 0 0 var(--space-5);">Informe seu e-mail cadastrado para receber o link de redefinição.</p>
@@ -4412,7 +4348,7 @@ HTML_REGISTER = r"""
             --cor-fundo: #f8fafc; --cor-superficie: #ffffff; --cor-borda: #e2e8f0;
             --cor-sucesso: #16a34a; --cor-aviso: #d97706; --cor-perigo: #dc2626; --raio: 8px;
         }
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--cor-fundo); display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--cor-fundo); display: flex; flex-direction: column; min-height: 100vh; margin: 0; }
         .card-register { background: var(--cor-superficie); border: 1px solid var(--cor-borda); padding: 35px 30px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.06); width: 380px; }
         .btn-success { background-color: var(--cor-primaria) !important; border-color: var(--cor-primaria) !important; color: var(--cor-texto-invertido) !important; }
         .btn-success:hover { background-color: var(--cor-primaria-escura) !important; border-color: var(--cor-primaria-escura) !important; }
@@ -4421,8 +4357,9 @@ HTML_REGISTER = r"""
     </style>
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <script src="{{ url_for('static', filename='csrf.js') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
-<script src="{{ url_for('static', filename='ui.js') }}" defer></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='menu-20261023-1') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='menu_navegacao.css', v='menu-20261023-1') }}">
+<script src="{{ url_for('static', filename='ui.js', v='menu-20261023-1') }}" defer></script>
 </head>
 <body>
     <!-- Skip link para acessibilidade -->
@@ -4431,7 +4368,9 @@ HTML_REGISTER = r"""
     <!-- Overlay para focus trap em modais -->
     <div class="focus-trap-overlay" aria-hidden="true"></div>
 
-    <main id="conteudo-principal" class="d-flex justify-center items-center" style="min-height: 100vh; padding: var(--space-4);">
+    {% include 'menu_navegacao.html' %}
+
+    <main id="conteudo-principal" class="d-flex justify-center items-center" style="flex: 1; padding: var(--space-4);">
         <div class="card" style="width: 100%; max-width: 380px; padding: var(--space-6);">
             {% if pendente %}
                 <h3 class="text-center" style="margin: 0 0 var(--space-3);">⏳ Cadastro Recebido</h3>
@@ -5470,10 +5409,12 @@ HTML_IMPORTAR_LOJAS = r"""
     </style>
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <script src="{{ url_for('static', filename='csrf.js') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
-<script src="{{ url_for('static', filename='ui.js') }}" defer></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='menu-20261023-1') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='menu_navegacao.css', v='menu-20261023-1') }}">
+<script src="{{ url_for('static', filename='ui.js', v='menu-20261023-1') }}" defer></script>
 </head>
 <body>
+    {% include 'menu_navegacao.html' %}
     <div class="card-import" style="{% if duplicatas %}max-width: 1100px;{% endif %}">
         <h3 class="mb-1">📥 Importar Lojas (.xlsx)</h3>
         <p class="text-muted small">A planilha deve ter as colunas: <code>{{ colunas }}</code> em uma aba (a coluna <strong>CNAME</strong> é lida mas ignorada na importação). Se um alias já tiver lojas cadastradas, apenas as novas são adicionadas — identificadas pelo CNPJ (ou pelo LOJ_CODIGO quando a linha não tem CNPJ) — nada é apagado.</p>
@@ -5834,10 +5775,12 @@ HTML_ATUALIZAR_LOJAS_INFO = r"""
     </style>
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <script src="{{ url_for('static', filename='csrf.js') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
-<script src="{{ url_for('static', filename='ui.js') }}" defer></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='menu-20261023-1') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='menu_navegacao.css', v='menu-20261023-1') }}">
+<script src="{{ url_for('static', filename='ui.js', v='menu-20261023-1') }}" defer></script>
 </head>
 <body>
+    {% include 'menu_navegacao.html' %}
     <div class="card-atualizar">
         <h3 class="mb-1">🔄 Atualizar CodInfo e Situação (.xlsx)</h3>
         <p class="text-muted small">
@@ -6743,16 +6686,14 @@ HTML_BACKUPS_FTP = """
     </style>
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <script src="{{ url_for('static', filename='csrf.js') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='ui.css') }}">
-<script src="{{ url_for('static', filename='ui.js') }}" defer></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='ui.css', v='menu-20261023-1') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='menu_navegacao.css', v='menu-20261023-1') }}">
+<script src="{{ url_for('static', filename='ui.js', v='menu-20261023-1') }}" defer></script>
 </head>
 <body>
+    {% include 'menu_navegacao.html' %}
     <div class="topo">
         <h2>💽 Status de Backups FTP</h2>
-        <div style="display:flex; gap:8px;">
-            <a href="/" class="btn">⬅ Voltar</a>
-            <a href="/backups-ftp?atualizar=1{% if filtro %}&filtro={{ filtro }}{% endif %}" class="btn">🔄 Atualizar</a>
-        </div>
     </div>
 
     {% if msg_sucesso %}

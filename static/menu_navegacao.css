@@ -1,0 +1,185 @@
+/* Componente Unificado de Navegação - InfoMonitorDBClientes */
+.navegacao-servidores {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  padding: var(--space-2, 8px) 0;
+  flex-wrap: wrap;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.seletor-servidor {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  color: var(--cor-texto-suave, #64748b);
+  font-size: var(--font-size-sm, 0.875rem);
+}
+
+.seletor-servidor select {
+  max-width: 100%;
+  height: 40px;
+  padding: var(--space-2, 8px) var(--space-4, 16px) var(--space-2, 8px) var(--space-3, 12px);
+  border: 1px solid var(--cor-borda, #e2e8f0);
+  border-radius: var(--raio-lg, 8px);
+  background: var(--cor-superficie, #ffffff);
+  color: var(--cor-texto, #1e293b);
+  font: inherit;
+  font-weight: 600;
+}
+
+.navegacao-servidores > .btn,
+.navegacao-servidores > .menu-acoes > summary.btn,
+.menu-direita > .btn,
+.menu-direita > .menu-acoes > summary.btn {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  width: auto;
+}
+
+/* Grupo direito agrupado (Atualizar | Tema | Conta) */
+.menu-direita {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.menu-direita .menu-painel {
+  left: auto;
+  right: 0;
+}
+
+.menu-painel {
+  max-width: min(250px, calc(100vw - 16px));
+  box-sizing: border-box;
+}
+
+/* Botão de atualizar (só ↻) */
+.btn-atualizar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+  height: 40px;
+  padding: 0 var(--space-2, 8px);
+  font-size: 1.25em;
+  font-weight: 700;
+  line-height: 1;
+  width: auto;
+}
+
+/* Botão de conta quando deslogado: exibe silhueta de perfil via SVG inline (um único ícone) */
+a.btn.menu-conta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+  height: 40px;
+  padding: 0 var(--space-2, 8px);
+  text-decoration: none;
+  width: auto;
+}
+
+a.btn.menu-conta svg.icone-perfil {
+  display: block;
+  width: 18px;
+  height: 18px;
+}
+
+/* Truncamento elegante para nome do usuário logado (especificidade alta para vencer ui.css) */
+.navegacao-servidores .menu-conta .nome-conta,
+.menu-conta .nome-conta {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.selo-master {
+  margin-left: var(--space-1, 4px);
+  font-size: 0.7rem;
+  padding: 1px 5px;
+  background: var(--cor-aviso, #f59e0b);
+  color: #1e293b;
+  border-radius: var(--raio-sm, 4px);
+  font-weight: 700;
+}
+
+/* P1 e P2: Breakpoint mobile <= 700px */
+@media (max-width: 700px) {
+  .navegacao-servidores {
+    gap: var(--space-1, 4px);
+    position: relative;
+  }
+  .navegacao-servidores > details.menu-acoes {
+    position: static;
+  }
+  .navegacao-servidores > details.menu-acoes > .menu-painel {
+    left: 0;
+    right: 0;
+    width: auto;
+    max-width: 100%;
+  }
+  .navegacao-servidores .menu-direita {
+    flex: 1 1 100%;
+    min-width: 0;
+    flex-shrink: 1;
+    justify-content: flex-end;
+    margin-left: auto;
+  }
+  .menu-direita details.menu-acoes {
+    position: relative;
+  }
+  .menu-direita details.menu-acoes > .menu-painel {
+    left: auto;
+    right: 0;
+    width: auto;
+    min-width: 180px;
+    max-width: calc(100vw - 16px);
+  }
+  .menu-conta,
+  .menu-conta > summary.btn {
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+  .navegacao-servidores .menu-conta .nome-conta,
+  .menu-conta .nome-conta {
+    max-width: 90px;
+  }
+  .navegacao-servidores > .btn,
+  .navegacao-servidores > .menu-acoes > summary.btn,
+  .menu-direita > .btn,
+  .menu-direita > .menu-acoes > summary.btn,
+  .btn-atualizar,
+  a.btn.menu-conta {
+    width: auto !important;
+  }
+  .seletor-servidor select {
+    max-width: 140px;
+  }
+
+  /* O1: Wrapper com rolagem horizontal apenas em mobile <= 700px para preservar sticky desktop */
+  .tabela-bancos-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    width: 100%;
+    max-width: 100%;
+  }
+}
+
+@media (max-width: 360px) {
+  .seletor-servidor select {
+    max-width: 110px;
+  }
+  .navegacao-servidores .menu-conta .nome-conta,
+  .menu-conta .nome-conta {
+    max-width: 65px;
+  }
+}

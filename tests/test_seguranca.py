@@ -14,7 +14,98 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from flask import Flask, render_template_string
+from html.parser import HTMLParser
+from urllib.parse import parse_qs, urlsplit
 from werkzeug.security import generate_password_hash
+
+
+class _No:
+    def __init__(self, tag, attrs, pai=None):
+        self.tag, self.attrs, self.pai, self.filhos, self.textos = tag, dict(attrs), pai, [], []
+
+    def descendentes(self):
+        for filho in self.filhos:
+            yield filho
+            yield from filho.descendentes()
+
+    def texto(self):
+        partes = list(self.textos) + [f.texto() for f in self.filhos]
+        return ' '.join(' '.join(partes).split())
+
+    def ancestrais(self):
+        no = self.pai
+        while no is not None:
+            yield no
+            no = no.pai
+
+
+class _Dom(HTMLParser):
+    """Árvore mínima do HTML para testar o menu pelo comportamento, sem depender de classes ou espaços."""
+    VAZIOS = {'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr'}
+
+    def __init__(self, html):
+        super().__init__()
+        self.raiz = self.atual = _No('#doc', {})
+        self.feed(html)
+
+    def handle_starttag(self, tag, attrs):
+        no = _No(tag, attrs, self.atual)
+        self.atual.filhos.append(no)
+        if tag not in self.VAZIOS:
+            self.atual = no
+
+    def handle_startendtag(self, tag, attrs):
+        self.atual.filhos.append(_No(tag, attrs, self.atual))
+
+    def handle_endtag(self, tag):
+        no = self.atual
+        while no is not self.raiz and no.tag != tag:
+            no = no.pai
+        if no is not self.raiz:
+            self.atual = no.pai
+
+    def handle_data(self, data):
+        if data.strip():
+            self.atual.textos.append(data)
+
+
+def _menus(html):
+    """Menus comuns: <nav> que contém a lista de Bancos."""
+    raiz = _Dom(html).raiz
+    return [no for no in raiz.descendentes() if no.tag == 'nav' and any(
+        d.tag == 'select' and d.attrs.get('aria-label') == 'Bancos' for d in no.descendentes())]
+
+
+def _menu_unico(teste, html):
+    menus = _menus(html)
+    teste.assertEqual(len(menus), 1, 'a página deve ter exatamente um menu comum')
+    return menus[0]
+
+
+def _submenu(menu, rotulo):
+    """Retorna o <details> cujo <summary> tem o rótulo, ou None."""
+    for no in menu.descendentes():
+        if no.tag == 'summary' and no.texto() == rotulo:
+            return no.pai
+    return None
+
+
+def _links(no):
+    return [d for d in no.descendentes() if d.tag == 'a']
+
+
+def _conta(menu):
+    for no in menu.descendentes():
+        if no.tag == 'a' and urlsplit(no.attrs.get('href', '')).path == '/admin/login':
+            return no
+        if no.tag == 'form' and no.attrs.get('action') == '/admin/logout':
+            return next(a for a in no.ancestrais() if a.tag == 'details')
+    return None
+
+
+def _atualizar(menu):
+    return next((no for no in menu.descendentes()
+                 if no.attrs.get('aria-label') == 'Atualizar dados do servidor'), None)
 
 
 class SegurancaTest(unittest.TestCase):
@@ -453,16 +544,243 @@ class SegurancaTest(unittest.TestCase):
         self.assertNotIn("prompt('Confirme sua senha", html)
 
     def test_menus_usam_rotulos_e_aviso_de_permissao(self):
-        html_horarios = self.horarios.HTML_INTERFACE
-        html_servidores = self.bancos.HTML_LAYOUT
-        self.assertNotIn('Servidores Firebird', html_horarios)
-        self.assertNotIn('Área de Gestão', html_horarios)
-        self.assertIn('🖥️ Servidores', html_horarios)
-        self.assertIn('🗄️ Gestão de Bancos', html_horarios)
-        self.assertIn('🔑 Login', html_horarios)
-        self.assertIn("avisarSemPermissao('Gestão de Bancos')", html_horarios)
-        self.assertIn('class="btn menu-conta">Entrar</a>', html_servidores)
-        self.assertIn("avisarSemPermissao('Importação de Lojas')", html_servidores)
+        visitante = self.app.test_client()
+        with self._dados_simulados():
+            for caminho in ('/todos', '/horarios'):
+                with self.subTest(caminho=caminho):
+                    html = visitante.get(caminho).get_data(as_text=True)
+                    menu = _menu_unico(self, html)
+                    for antigo in ('Servidores Firebird', 'Área de Gestão', 'Visualização', '🔑 Login',
+                                   'ReformaTributária', 'Sair da Edição'):
+                        self.assertNotIn(antigo, menu.texto())
+        usuario_id = self._criar_usuario_sem_permissao()
+        try:
+            cliente = self._cliente_logado(usuario_id)
+            with self._dados_simulados():
+                gerenciar = _submenu(_menu_unico(self, cliente.get('/todos').text), 'Gerenciar')
+            self.assertIsNotNone(gerenciar)
+            avisos = ' '.join(no.attrs.get('onclick', '') for no in gerenciar.descendentes())
+            self.assertIn("avisarSemPermissao('Gestão de Bancos')", avisos)
+            self.assertIn("avisarSemPermissao('Importação de Lojas')", avisos)
+            self.assertFalse(any(urlsplit(a.attrs.get('href', '')).path.startswith('/admin')
+                                 for a in _links(gerenciar)))
+        finally:
+            self._remover_usuario(usuario_id)
+
+    # --- Menu de navegação comum (templates/menu_navegacao.html) ---------------------------
+
+    def _dados_simulados(self):
+        banco = dict(alias='cliente-teste', servidor='DB01', porta='3050', arquivo_existe=True,
+                     tamanho_bytes=1024, tamanho_str='1 KB', cname_string='dbteste.example.invalid:3050/cliente',
+                     status_inatividade={'status': 'normal'}, timestamp=1, data_criacao='01/09/2026', lojas=[])
+        status = dict(erro=None, clientes=[], total_ok=0, total_erro=0, total_atrasado=0, ultima_atualizacao=None)
+        stack = ExitStack()
+        stack.enter_context(patch.dict(self.bancos.SERVIDORES, {'DB01': dict(rotulo='DB01')}))
+        stack.enter_context(patch.object(self.bancos, 'obter_metricas_servidores', return_value=[]))
+        stack.enter_context(patch.object(self.bancos, 'obter_dados_servidor_linux', return_value=([banco], 1024, [])))
+        stack.enter_context(patch.object(self.bancos, 'buscar_em_todos_servidores', return_value=([banco], 1024, [])))
+        stack.enter_context(patch.object(self.bancos, 'obter_status_backups_ftp', return_value=status))
+        return stack
+
+    def _criar_usuario_sem_permissao(self, nome='Sem permissão menu'):
+        """Usuário ativo, não master e sem permissões; o nome exibido vem do banco."""
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            return conn.execute(
+                'INSERT INTO usuarios (nome, email, senha_hash, eh_master, ativo) VALUES (?, ?, ?, 0, 1)',
+                (nome, f'menu-{os.urandom(4).hex()}@example.invalid', generate_password_hash(self.password)),
+            ).lastrowid
+
+    def _remover_usuario(self, usuario_id):
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            conn.execute('DELETE FROM usuarios WHERE id = ?', (usuario_id,))
+
+    def _cliente_logado(self, usuario_id, nome='Sem permissão menu', master=False):
+        cliente = self.app.test_client()
+        cliente.get('/admin/login')
+        with cliente.session_transaction() as sessao:
+            sessao.update(logged_in=True, user_id=usuario_id, user_nome=nome, eh_master=master)
+        return cliente
+
+    def _paginas_com_menu(self):
+        with closing(self.horarios.get_db()) as conn, conn:
+            evento = conn.execute("INSERT INTO eventos (data_evento, nome) VALUES ('2030-01-02', 'Evento menu')").lastrowid
+            funcionario = conn.execute("INSERT INTO funcionarios (nome, ativo) VALUES ('Pessoa menu', 1)").lastrowid
+            ausencia = conn.execute("INSERT INTO ausencias (funcionario_id, motivo, data_inicio, data_fim) "
+                                    "VALUES (?, 'Férias', '2030-01-02', '2030-01-03')", (funcionario,)).lastrowid
+        self.addCleanup(self._apagar_evento_funcionario, evento, funcionario, ausencia)
+        publicas = ['/', '/servidor/DB01', '/todos', '/inativos', '/orfaos', '/historico', '/backups-ftp',
+                    '/horarios', '/certificados', '/cnpj', '/admin/login', '/admin/esqueci-senha',
+                    '/admin/register', '/admin/redefinir-senha/token-invalido']
+        logadas = ['/admin', '/admin/importar-lojas', '/admin/atualizar-lojas-info',
+                   f'/horarios/editar_evento/{evento}', f'/horarios/editar_funcionario/{funcionario}',
+                   f'/horarios/editar_ausencia/{ausencia}']
+        return publicas, logadas
+
+    def _apagar_evento_funcionario(self, evento, funcionario, ausencia):
+        with closing(self.horarios.get_db()) as conn, conn:
+            conn.execute('DELETE FROM ausencias WHERE id = ?', (ausencia,))
+            conn.execute('DELETE FROM eventos WHERE id = ?', (evento,))
+            conn.execute('DELETE FROM funcionarios WHERE id = ?', (funcionario,))
+
+    def test_menu_comum_unico_com_um_tema_em_todas_as_paginas(self):
+        publicas, logadas = self._paginas_com_menu()
+        visitante = self.app.test_client()
+        casos = [(visitante, caminho) for caminho in publicas] + \
+                [(self.client, caminho) for caminho in publicas + logadas]
+        with self._dados_simulados():
+            for cliente, caminho in casos:
+                logado = cliente is self.client
+                with self.subTest(caminho=caminho, logado=logado):
+                    resposta = cliente.get(caminho)
+                    self.assertEqual(resposta.status_code, 200)
+                    html = resposta.get_data(as_text=True)
+                    menu = _menu_unico(self, html)
+                    nos = list(_Dom(html).raiz.descendentes())
+                    self.assertEqual(sum(no.attrs.get('id') == 'theme-toggle' for no in nos), 1)
+                    self.assertFalse(any('dataset.theme' in no.attrs.get('onclick', '') for no in nos),
+                                     'tema deve ser controlado só pelo ui.js')
+                    folhas = [urlsplit(no.attrs.get('href', '')).path for no in nos
+                              if no.tag == 'link' and no.attrs.get('rel') == 'stylesheet']
+                    self.assertIn('/static/ui.css', folhas)
+                    self.assertEqual(folhas.count('/static/menu_navegacao.css'), 1)
+                    self.assertLess(folhas.index('/static/ui.css'), folhas.index('/static/menu_navegacao.css'))
+                    self.assertTrue(any(no.tag == 'script' and urlsplit(no.attrs.get('src', '')).path == '/static/ui.js'
+                                        for no in nos))
+                    self.assertEqual(_submenu(menu, 'Gerenciar') is not None, logado)
+                    if any('marcarSemCnpjIgnorados' in no.attrs.get('onclick', '') for no in menu.descendentes()):
+                        # A ação do Gerenciar faz POST via ui.js: a página precisa fornecer o token CSRF.
+                        self.assertTrue(any(no.tag == 'meta' and no.attrs.get('name') == 'csrf-token'
+                                            and no.attrs.get('content') for no in nos))
+                        self.assertTrue(any(no.tag == 'script' and urlsplit(no.attrs.get('src', '')).path == '/static/csrf.js'
+                                            for no in nos))
+
+    def test_acao_ignorar_sem_cnpj_do_menu_usa_contrato_do_endpoint(self):
+        js = (Path(self.original_dir) / 'static' / 'ui.js').read_text(encoding='utf-8')
+        cabecalhos = set(re.findall(r"X-CSRF[-\w]*", js))
+        self.assertLessEqual(cabecalhos, {'X-CSRF-Token'}, 'o servidor só aceita X-CSRF-Token')
+        resposta = self.client.post('/admin/lojas/ignorar-sem-cnpj', json={}, headers={'X-CSRF-Token': self.token})
+        chaves = set(resposta.get_json())
+        usadas = set(re.findall(r"\bdata\.(\w+)", js))
+        self.assertIn('sucesso', chaves & usadas, 'ui.js deve decidir pelo campo sucesso do endpoint')
+        self.assertIn('mensagem', chaves & usadas)
+        self.assertEqual(self.client.post('/admin/lojas/ignorar-sem-cnpj', json={}).status_code, 400)
+
+    def test_menu_ordem_e_grupo_direito(self):
+        visitante = self.app.test_client()
+        with self._dados_simulados():
+            for cliente, logado in ((visitante, False), (self.client, True)):
+                with self.subTest(logado=logado):
+                    menu = _menu_unico(self, cliente.get('/todos').text)
+                    nos = list(menu.descendentes())
+                    bancos = next(no for no in nos if no.tag == 'select')
+                    horarios = next(no for no in nos if no.tag == 'a' and no.attrs.get('href') == '/horarios'
+                                    and 'Horários' in no.texto() and not any(a.tag == 'details' for a in no.ancestrais()))
+                    transcritor = next(no for no in nos if no.tag == 'a' and ':8501' in no.attrs.get('href', '')
+                                       and not any(a.tag == 'details' for a in no.ancestrais()))
+                    atualizar, tema, conta = _atualizar(menu), next(no for no in nos if no.attrs.get('id') == 'theme-toggle'), _conta(menu)
+                    sequencia = [bancos, _submenu(menu, 'Consultas'), _submenu(menu, 'Links'), horarios, transcritor]
+                    if logado:
+                        sequencia.append(_submenu(menu, 'Gerenciar'))
+                    sequencia += [atualizar, tema, conta]
+                    self.assertNotIn(None, sequencia)
+                    posicoes = [nos.index(no) for no in sequencia]
+                    self.assertEqual(posicoes, sorted(posicoes))
+                    self.assertNotIn('Visualização', menu.texto())
+                    self.assertEqual(bancos.attrs.get('title'), 'Bancos')
+                    grupo = next(a for a in atualizar.ancestrais() if tema in a.descendentes() and conta in a.descendentes())
+                    self.assertIsNot(grupo, menu, 'Atualizar, Tema e Conta devem ficar agrupados')
+                    self.assertNotIn(bancos, list(grupo.descendentes()))
+
+    def test_menu_links_externos_em_nova_aba(self):
+        with self._dados_simulados():
+            menu = _menu_unico(self, self.app.test_client().get('/todos').text)
+        links = _submenu(menu, 'Links')
+        consultas = _submenu(menu, 'Consultas')
+        self.assertIsNotNone(links)
+        self.assertEqual(links.tag, consultas.tag)
+        anchors = _links(links)
+        for rotulo in ('TEF-SiTEF', 'SmartPOS', 'Downloads', 'Reforma Tributária'):
+            with self.subTest(rotulo=rotulo):
+                link = next((a for a in anchors if rotulo in a.texto()), None)
+                self.assertIsNotNone(link)
+                self.assertEqual(link.attrs.get('target'), '_blank')
+                self.assertIn('noopener', link.attrs.get('rel', '').split())
+                self.assertEqual(sum(a.attrs.get('href') == link.attrs['href'] for a in _links(menu)), 1)
+
+    def test_menu_atualizar_so_icone_preserva_filtros(self):
+        with self._dados_simulados():
+            menu = _menu_unico(self, self.app.test_client().get(
+                '/todos?busca=cliente&ordem=tamanho&filtro=sem_lojas').text)
+        atualizar = _atualizar(menu)
+        self.assertIsNotNone(atualizar)
+        self.assertEqual(atualizar.texto(), '↻')
+        self.assertEqual(atualizar.attrs.get('title'), 'Atualizar dados do servidor')
+        consulta = parse_qs(urlsplit(atualizar.attrs.get('href', '')).query)
+        self.assertEqual(consulta.get('atualizar'), ['1'])
+        self.assertEqual(consulta.get('busca'), ['cliente'])
+        self.assertEqual(consulta.get('ordem'), ['tamanho'])
+        self.assertEqual(consulta.get('filtro'), ['sem_lojas'])
+
+    def test_menu_conta_deslogado_e_logado(self):
+        with self._dados_simulados():
+            menu = _menu_unico(self, self.app.test_client().get('/todos').text)
+            conta = _conta(menu)
+            self.assertEqual(conta.tag, 'a')
+            self.assertEqual(conta.attrs.get('title'), 'Entrar')
+            self.assertEqual(conta.attrs.get('aria-label'), 'Entrar')
+            self.assertEqual(conta.texto(), '', 'deslogado mostra só o ícone de perfil')
+            self.assertTrue(any(no.tag == 'svg' for no in conta.descendentes()))
+            self.assertFalse(any(no.tag == 'form' for no in menu.descendentes()))
+
+            menu = _menu_unico(self, self.client.get('/todos').text)
+        conta = _conta(menu)
+        self.assertEqual(conta.tag, 'details')
+        self.assertIn(self.bancos.nome_para_assinatura('Teste'), conta.texto())
+        self.assertFalse(any(urlsplit(a.attrs.get('href', '')).path == '/admin/login' for a in _links(menu)))
+        sair = next(no for no in conta.descendentes() if no.tag == 'form')
+        self.assertEqual(sair.attrs.get('method', '').upper(), 'POST')
+        self.assertTrue(any(no.attrs.get('name') == 'csrf_token' and no.attrs.get('value')
+                            for no in sair.descendentes()))
+
+    def test_menu_gerenciar_so_acoes_administrativas(self):
+        with self._dados_simulados():
+            menu = _menu_unico(self, self.client.get('/todos').text)
+        gerenciar = _submenu(menu, 'Gerenciar')
+        self.assertIsNotNone(gerenciar)
+        hrefs_gerenciar = {a.attrs.get('href') for a in _links(gerenciar)}
+        self.assertTrue(any(urlsplit(h).path == '/admin' for h in hrefs_gerenciar))
+        self.assertIn('/admin/importar-lojas', hrefs_gerenciar)
+        publicos = {a.attrs.get('href') for a in _links(menu) if gerenciar not in a.ancestrais()}
+        self.assertFalse(hrefs_gerenciar & publicos, 'Gerenciar não pode repetir links públicos')
+        self.assertFalse(any(urlsplit(h).netloc for h in hrefs_gerenciar), 'sem links externos em Gerenciar')
+        self.assertFalse(any('relatorio-clientes-lojas' in h for h in hrefs_gerenciar))
+
+    def test_menu_permissao_lida_do_banco_e_nome_escapado(self):
+        nome = '<img src=x onerror=alert(1)>'
+        usuario_id = self._criar_usuario_sem_permissao(nome)
+        try:
+            cliente = self._cliente_logado(usuario_id, nome=nome)
+            with self._dados_simulados():
+                html = cliente.get('/horarios').text
+                self.assertFalse(any('onerror' in no.attrs for no in _Dom(html).raiz.descendentes()),
+                                 'nome do usuário deve ser escapado')
+                self.assertIn('&lt;img', html)
+                gerenciar = _submenu(_menu_unico(self, html), 'Gerenciar')
+                self.assertFalse(any(urlsplit(a.attrs.get('href', '')).path.startswith('/admin')
+                                     for a in _links(gerenciar)))
+                with closing(self.bancos.get_db_connection()) as conn, conn:
+                    conn.execute('UPDATE usuarios SET perm_gestao_bancos = 1 WHERE id = ?', (usuario_id,))
+                gerenciar = _submenu(_menu_unico(self, cliente.get('/horarios').text), 'Gerenciar')
+                self.assertTrue(any(urlsplit(a.attrs.get('href', '')).path == '/admin' for a in _links(gerenciar)))
+                with closing(self.bancos.get_db_connection()) as conn, conn:
+                    conn.execute('UPDATE usuarios SET ativo = 0, perm_gestao_bancos = 1 WHERE id = ?', (usuario_id,))
+                resposta = cliente.get('/horarios')
+                if resposta.status_code == 200:
+                    gerenciar = _submenu(_menu_unico(self, resposta.text), 'Gerenciar')
+                    self.assertFalse(gerenciar and any(urlsplit(a.attrs.get('href', '')).path == '/admin'
+                                                       for a in _links(gerenciar)))
+        finally:
+            self._remover_usuario(usuario_id)
 
     def test_menu_horarios_mantem_usuario_sem_permissao_na_pagina(self):
         with closing(self.horarios.get_db()) as conn, conn:
@@ -1663,7 +1981,8 @@ O cliente loja-critica esta a mais de 1 dia sem bkp - status ERRO 2026-10-09 10:
                     response = client.get(path)
                     self.assertEqual(response.status_code, 200)
                     self.assertNotIn(b'segredo-nao-publicar', response.data)
-                    self.assertNotIn(b'<summary class="btn">Gerenciar</summary>', response.data)
+                    if path != '/api/historico':
+                        self.assertIsNone(_submenu(_menu_unico(self, response.get_data(as_text=True)), 'Gerenciar'))
                     controles = Controles()
                     controles.feed(response.get_data(as_text=True))
                     self.assertFalse(any(tag == 'form' and attrs.get('method', '').upper() == 'POST'
