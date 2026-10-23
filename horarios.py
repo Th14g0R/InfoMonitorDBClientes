@@ -546,11 +546,15 @@ HTML_INTERFACE = """
 
     <div class="nav-bar">
         <h2 style="margin: 0;">🗓️ Controle de Horários, Cobertura e Rodízio</h2>
-        <div class="d-flex items-center gap-2">
+        <div class="d-flex items-center gap-2 flex-wrap">
             <a href="{{ url_for('bancos.exibir_servidor') }}" class="btn btn-primary">🖥️ Servidores</a>
             <a href="/certificados" class="btn btn-primary">Certificados</a>
             <a href="/cnpj" class="btn btn-primary" title="Consulta de CNPJs na Receita Federal">🔍 CNPJ</a>
             <a href="http://{{ request.host.split(':')[0] }}:8501" target="_blank" rel="noopener noreferrer" class="btn btn-secondary" title="Transcrição e Auditoria de Chamadas Call Center">🎧 Transcritor Call Center</a>
+            <a href="https://consultatefsuporte.nevesalisson87.workers.dev/" target="_blank" rel="noopener noreferrer" class="btn btn-secondary" title="TEF-SiTEF">💳 TEF-SiTEF</a>
+            <a href="https://smartpos-infobrasil-436598344590.us-east1.run.app/" target="_blank" rel="noopener noreferrer" class="btn btn-secondary" title="SmartPOS">📱 SmartPOS</a>
+            <a href="https://guia.infobrasilsistemas.com.br/infobrasilsistemas/areadosuporte/principal.html" target="_blank" rel="noopener noreferrer" class="btn btn-secondary" title="Downloads">📥 Downloads</a>
+            <a href="https://notas-de-credito-e-debito.vercel.app/" target="_blank" rel="noopener noreferrer" class="btn btn-secondary" title="ReformaTributária">📄 ReformaTributária</a>
             {% if not session.get('logged_in') %}
                 <a href="{{ url_for('bancos.admin_login', next='/admin') }}" class="btn btn-bancos">🗄️ Gestão de Bancos</a>
             {% elif usuario_tem_permissao('perm_gestao_bancos') %}
