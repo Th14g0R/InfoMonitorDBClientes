@@ -1,4 +1,9 @@
-from flask import Blueprint, render_template, render_template_string, request, redirect, url_for, session, flash, jsonify
+from flask import Blueprint, render_template, render_template_string, request, redirect, url_for, session, flash, jsonify, send_file
+import io
+import logging
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 import sqlite3
 import functools
 from html import escape
@@ -988,6 +993,9 @@ HTML_INTERFACE = """
             </select></label>
             <button class="btn btn-bancos" type="submit">Filtrar ausências</button>
             <a href="/horarios#secao-ausencias" class="btn btn-secondary">Limpar filtros</a>
+            {% if pode_editar_horarios() %}
+            <a href="{{ url_for('horarios.exportar_ausencias', ausencia_inicio=ausencia_inicio, ausencia_fim=ausencia_fim, ausencia_motivo=ausencia_motivo) }}" class="btn btn-secondary">📥 Exportar Ausências (Excel)</a>
+            {% endif %}
         </form>
         <div class="lista-rolagem" tabindex="0" role="region" aria-label="Lista com rolagem"><table>
             <thead>
@@ -2346,6 +2354,208 @@ def excluir_ausencia(id):
         flash(f"Erro ao excluir ausência: {str(e)}", "danger")
 
     return redirect(destino)
+
+DIAS_SEMANA_PT = {
+    0: 'Segunda-feira',
+    1: 'Terça-feira',
+    2: 'Quarta-feira',
+    3: 'Quinta-feira',
+    4: 'Sexta-feira',
+    5: 'Sábado',
+    6: 'Domingo',
+}
+
+def sanitizar_texto_excel(valor):
+    if valor is None:
+        return ''
+    s = str(valor)
+    if s and s[0] in ('=', '+', '-', '@'):
+        return "'" + s
+    return s
+
+def gerar_planilha_ausencias(conn, ausencia_inicio=None, ausencia_fim=None, ausencia_motivo=None):
+    """Gera planilha Excel (.xlsx) contendo as ausências diárias expandidas e formatadas."""
+    ausencia_inicio = (ausencia_inicio or '').strip()
+    ausencia_fim = (ausencia_fim or '').strip()
+    ausencia_motivo = (ausencia_motivo or '').strip()
+
+    filtro_ausencias = bool(ausencia_inicio or ausencia_fim or ausencia_motivo)
+    cursor = conn.cursor()
+
+    if filtro_ausencias:
+        limite_inicio = ausencia_inicio or '0001-01-01'
+        limite_fim = ausencia_fim or '9999-12-31'
+        cursor.execute("""
+            SELECT a.id, f.nome, a.motivo, a.data_inicio, a.data_fim, a.hora_inicio, a.hora_fim
+            FROM ausencias a
+            JOIN funcionarios f ON f.id = a.funcionario_id
+            WHERE a.data_fim >= ? AND a.data_inicio <= ? AND (? = '' OR a.motivo = ?)
+            ORDER BY a.data_inicio ASC, f.nome ASC
+        """, (limite_inicio, limite_fim, ausencia_motivo, ausencia_motivo))
+    else:
+        hoje_iso = date.today().isoformat()
+        cursor.execute("""
+            SELECT a.id, f.nome, a.motivo, a.data_inicio, a.data_fim, a.hora_inicio, a.hora_fim
+            FROM ausencias a
+            JOIN funcionarios f ON f.id = a.funcionario_id
+            WHERE a.data_fim >= ?
+            ORDER BY a.data_inicio ASC, f.nome ASC
+        """, (hoje_iso,))
+
+    registros = cursor.fetchall()
+
+    if filtro_ausencias:
+        recorte_inicio = ausencia_inicio or '0001-01-01'
+        recorte_fim = ausencia_fim or '9999-12-31'
+    else:
+        recorte_inicio = date.today().isoformat()
+        recorte_fim = '9999-12-31'
+
+    linhas_expandidas = []
+    for reg in registros:
+        a_id = reg[0]
+        f_nome = reg[1]
+        motivo = reg[2]
+        dt_in_str = reg[3]
+        dt_fim_str = reg[4]
+        h_in = (reg[5] or '').strip()
+        h_out = (reg[6] or '').strip()
+
+        start_str = max(dt_in_str, recorte_inicio)
+        end_str = min(dt_fim_str, recorte_fim)
+        if start_str > end_str:
+            continue
+
+        d_cur = date.fromisoformat(start_str)
+        d_fim = date.fromisoformat(end_str)
+
+        if h_in and h_out:
+            horario_txt = f"{h_in} - {h_out}"
+        else:
+            horario_txt = "Dia Inteiro"
+
+        while d_cur <= d_fim:
+            linhas_expandidas.append((d_cur, f_nome, motivo, horario_txt, a_id))
+            if d_cur == d_fim:
+                break
+            d_cur += timedelta(days=1)
+
+    linhas_expandidas.sort(key=lambda item: (item[0], item[1].lower(), item[4]))
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Ausências"
+    ws.views.sheetView[0].showGridLines = True
+
+    cabecalho = ["Data", "Dia da semana", "Funcionário", "Motivo", "Horário"]
+    fonte_cabecalho = Font(name='Segoe UI', size=11, bold=True, color='FFFFFF')
+    fill_cabecalho = PatternFill(start_color='1F4E79', end_color='1F4E79', fill_type='solid')
+    borda_fina = Border(
+        left=Side(style='thin', color='CBD5E1'),
+        right=Side(style='thin', color='CBD5E1'),
+        top=Side(style='thin', color='CBD5E1'),
+        bottom=Side(style='thin', color='CBD5E1')
+    )
+    alinhamento_centro = Alignment(horizontal='center', vertical='center')
+    alinhamento_esquerda = Alignment(horizontal='left', vertical='center')
+    fonte_dados = Font(name='Segoe UI', size=10, color='1E293B')
+
+    for col_idx, texto in enumerate(cabecalho, 1):
+        cell = ws.cell(row=1, column=col_idx, value=texto)
+        cell.font = fonte_cabecalho
+        cell.fill = fill_cabecalho
+        cell.alignment = alinhamento_centro
+        cell.border = borda_fina
+    ws.row_dimensions[1].height = 24
+    ws.freeze_panes = 'A2'
+
+    linha_idx = 1
+    for d_obj, f_nome, motivo, horario_txt, _ in linhas_expandidas:
+        linha_idx += 1
+        dia_semana_txt = DIAS_SEMANA_PT.get(d_obj.weekday(), '')
+        nome_limpo = sanitizar_texto_excel(f_nome)
+        motivo_limpo = sanitizar_texto_excel(motivo)
+
+        c1 = ws.cell(row=linha_idx, column=1, value=d_obj)
+        c1.number_format = 'dd/mm/yyyy'
+        c1.font = fonte_dados
+        c1.alignment = alinhamento_centro
+        c1.border = borda_fina
+
+        c2 = ws.cell(row=linha_idx, column=2, value=dia_semana_txt)
+        c2.font = fonte_dados
+        c2.alignment = alinhamento_centro
+        c2.border = borda_fina
+
+        c3 = ws.cell(row=linha_idx, column=3, value=nome_limpo)
+        c3.font = fonte_dados
+        c3.alignment = alinhamento_esquerda
+        c3.border = borda_fina
+
+        c4 = ws.cell(row=linha_idx, column=4, value=motivo_limpo)
+        c4.font = fonte_dados
+        c4.alignment = alinhamento_esquerda
+        c4.border = borda_fina
+
+        c5 = ws.cell(row=linha_idx, column=5, value=horario_txt)
+        c5.font = fonte_dados
+        c5.alignment = alinhamento_centro
+        c5.border = borda_fina
+
+        ws.row_dimensions[linha_idx].height = 20
+
+    max_col_letra = get_column_letter(len(cabecalho))
+    ws.auto_filter.ref = f"A1:{max_col_letra}{max(linha_idx, 1)}"
+
+    for col in ws.columns:
+        col_letter = get_column_letter(col[0].column)
+        max_len = 0
+        for cell in col:
+            val = str(cell.value or '')
+            if len(val) > max_len:
+                max_len = len(val)
+        ws.column_dimensions[col_letter].width = min(max(max_len + 4, 12), 40)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+@horarios_bp.route('/horarios/exportar_ausencias')
+@login_required
+def exportar_ausencias():
+    ausencia_inicio = request.args.get('ausencia_inicio', '').strip()
+    ausencia_fim = request.args.get('ausencia_fim', '').strip()
+    ausencia_motivo = request.args.get('ausencia_motivo', '').strip()
+
+    try:
+        for valor in (ausencia_inicio, ausencia_fim):
+            if valor:
+                validar_data(valor)
+        if ausencia_inicio and ausencia_fim and ausencia_inicio > ausencia_fim:
+            raise ValueError()
+    except ValueError:
+        return 'Informe um período válido.', 400
+
+    try:
+        with closing(get_db()) as conn:
+            buffer = gerar_planilha_ausencias(
+                conn,
+                ausencia_inicio=ausencia_inicio,
+                ausencia_fim=ausencia_fim,
+                ausencia_motivo=ausencia_motivo
+            )
+    except Exception:
+        logging.getLogger(__name__).exception('Falha ao exportar ausências')
+        return 'Não foi possível exportar as ausências no momento.', 500
+
+    nome_arquivo = f"ausencias_dia_a_dia_{date.today():%Y%m%d}.xlsx"
+    return send_file(
+        buffer,
+        as_attachment=True,
+        download_name=nome_arquivo,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
 
 @horarios_bp.route('/horarios/excluir_dia_inteiro/<data_sabado>', methods=['POST'])
 @login_required

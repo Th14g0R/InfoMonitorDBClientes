@@ -2563,6 +2563,362 @@ O cliente loja-critica esta a mais de 1 dia sem bkp - status ERRO 2026-10-09 10:
         self.assertTrue(res.headers.get('Location', '').startswith('/horarios') or res.headers.get('Location', '').startswith('http://localhost/horarios'))
 
 
+
+    # --- TESTES DE EXPORTAÇÃO EXCEL DE AUSÊNCIAS (/horarios/exportar_ausencias) ---
+
+    @staticmethod
+    def _mapear_colunas_ausencias(ws):
+        header = [str(c.value or '').strip().lower() for c in ws[1]]
+        col_data = next(i for i, h in enumerate(header) if 'data' in h)
+        col_func = next(i for i, h in enumerate(header) if any(k in h for k in ('func', 'téc', 'tec', 'pessoa', 'nome')))
+        col_motivo = next(i for i, h in enumerate(header) if 'motivo' in h)
+        col_horario = next(i for i, h in enumerate(header) if 'hor' in h)
+        return col_data, col_func, col_motivo, col_horario
+
+    @staticmethod
+    def _data_iso(valor):
+        if isinstance(valor, (datetime, date)):
+            return valor.strftime('%Y-%m-%d')
+        s = str(valor or '').strip()
+        if '/' in s:
+            partes = s.split('/')
+            if len(partes) == 3:
+                return f"{partes[2]}-{partes[1].zfill(2)}-{partes[0].zfill(2)}"
+        return s
+
+    def test_exportar_ausencias_permissoes_e_autenticacao(self):
+        # 1. Anônimo: negado/redirect para login (302 ou 401)
+        visitante = self.app.test_client()
+        resp_anon = visitante.get('/horarios/exportar_ausencias')
+        self.assertIn(resp_anon.status_code, (302, 401))
+        if resp_anon.status_code == 302:
+            self.assertIn('/admin/login', resp_anon.headers.get('Location', ''))
+
+        # 2. Usuário autenticado SEM perm_horarios e NÃO master: 403 Forbidden
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            uid_sem_perm = conn.execute(
+                'INSERT INTO usuarios (nome, email, senha_hash, eh_master, ativo, perm_horarios) VALUES (?, ?, ?, 0, 1, 0)',
+                ('Sem Permissao', 'semperm_exp@example.invalid', generate_password_hash(self.password))
+            ).lastrowid
+            uid_com_perm = conn.execute(
+                'INSERT INTO usuarios (nome, email, senha_hash, eh_master, ativo, perm_horarios) VALUES (?, ?, ?, 0, 1, 1)',
+                ('Com Permissao', 'comperm_exp@example.invalid', generate_password_hash(self.password))
+            ).lastrowid
+        try:
+            client_sem_perm = self.app.test_client()
+            with client_sem_perm.session_transaction() as sess:
+                sess.update(logged_in=True, user_id=uid_sem_perm, eh_master=False)
+            resp_sem_perm = client_sem_perm.get('/horarios/exportar_ausencias')
+            self.assertEqual(resp_sem_perm.status_code, 403)
+
+            # 3. Usuário autenticado COM perm_horarios: 200 OK
+            client_com_perm = self.app.test_client()
+            with client_com_perm.session_transaction() as sess:
+                sess.update(logged_in=True, user_id=uid_com_perm, eh_master=False)
+            resp_com_perm = client_com_perm.get('/horarios/exportar_ausencias')
+            self.assertEqual(resp_com_perm.status_code, 200)
+
+            # 4. Usuário Master (self.client): 200 OK
+            resp_master = self.client.get('/horarios/exportar_ausencias')
+            self.assertEqual(resp_master.status_code, 200)
+        finally:
+            with closing(self.bancos.get_db_connection()) as conn, conn:
+                conn.execute('DELETE FROM usuarios WHERE id IN (?, ?)', (uid_sem_perm, uid_com_perm))
+
+    def test_exportar_ausencias_excel_mime_e_anexo(self):
+        resp = self.client.get('/horarios/exportar_ausencias')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.content_type, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        disp = resp.headers.get('Content-Disposition', '')
+        self.assertIn('attachment;', disp)
+        self.assertIn('.xlsx', disp)
+        hoje_ymd = date.today().strftime('%Y%m%d')
+        self.assertIn(f'ausencias_dia_a_dia_{hoje_ymd}.xlsx', disp)
+
+    def test_exportar_ausencias_3_dias_inclusivos_e_horarios_parcial_e_dia_inteiro(self):
+        import openpyxl
+        with closing(self.horarios.get_db()) as conn, conn:
+            f_id = conn.execute("INSERT INTO funcionarios (nome, ativo) VALUES ('Tecnico Expansao Teste', 1)").lastrowid
+            # Ausência 1: 3 dias inclusivos com horário parcial (08:00 às 12:00)
+            conn.execute(
+                "INSERT INTO ausencias (funcionario_id, motivo, data_inicio, data_fim, hora_inicio, hora_fim) "
+                "VALUES (?, 'Treinamento Parcial', '2030-06-03', '2030-06-05', '08:00', '12:00')",
+                (f_id,)
+            )
+            # Ausência 2: 1 dia sem horário (Dia Inteiro)
+            conn.execute(
+                "INSERT INTO ausencias (funcionario_id, motivo, data_inicio, data_fim, hora_inicio, hora_fim) "
+                "VALUES (?, 'Folga Total', '2030-06-06', '2030-06-06', '', '')",
+                (f_id,)
+            )
+        try:
+            resp = self.client.get('/horarios/exportar_ausencias?ausencia_inicio=2030-06-03&ausencia_fim=2030-06-06')
+            self.assertEqual(resp.status_code, 200)
+            wb = openpyxl.load_workbook(io.BytesIO(resp.data))
+            ws = wb.active
+            col_data, col_func, col_motivo, col_horario = self._mapear_colunas_ausencias(ws)
+
+            linhas = [
+                row for row in ws.iter_rows(min_row=2)
+                if row[col_func].value == 'Tecnico Expansao Teste'
+            ]
+
+            # Deve conter exatamente 4 linhas (3 dias inclusivos + 1 dia)
+            self.assertEqual(len(linhas), 4, f"Esperado 4 linhas diárias, obteve {len(linhas)}")
+
+            # 3 dias inclusivos parciais (08:00 - 12:00)
+            linhas_parciais = [r for r in linhas if r[col_motivo].value == 'Treinamento Parcial']
+            self.assertEqual(len(linhas_parciais), 3)
+            datas_parciais = [self._data_iso(r[col_data].value) for r in linhas_parciais]
+            self.assertEqual(datas_parciais, ['2030-06-03', '2030-06-04', '2030-06-05'])
+            for r in linhas_parciais:
+                self.assertEqual(str(r[col_horario].value).strip(), '08:00 - 12:00')
+
+            # 1 dia completo: Dia Inteiro
+            linhas_totais = [r for r in linhas if r[col_motivo].value == 'Folga Total']
+            self.assertEqual(len(linhas_totais), 1)
+            self.assertEqual(self._data_iso(linhas_totais[0][col_data].value), '2030-06-06')
+            self.assertEqual(str(linhas_totais[0][col_horario].value).strip(), 'Dia Inteiro')
+        finally:
+            with closing(self.horarios.get_db()) as conn, conn:
+                conn.execute("DELETE FROM ausencias WHERE funcionario_id = ?", (f_id,))
+                conn.execute("DELETE FROM funcionarios WHERE id = ?", (f_id,))
+
+    def test_exportar_ausencias_recorte_intervalo_filtro_e_motivo_exato(self):
+        import openpyxl
+        with closing(self.horarios.get_db()) as conn, conn:
+            f_id = conn.execute("INSERT INTO funcionarios (nome, ativo) VALUES ('Tecnico Recorte Teste', 1)").lastrowid
+            # Ausência de 10 dias (01/07 a 10/07) com Motivo A
+            conn.execute(
+                "INSERT INTO ausencias (funcionario_id, motivo, data_inicio, data_fim) "
+                "VALUES (?, 'Motivo A', '2030-07-01', '2030-07-10')",
+                (f_id,)
+            )
+            # Ausência com Motivo B no mesmo intervalo
+            conn.execute(
+                "INSERT INTO ausencias (funcionario_id, motivo, data_inicio, data_fim) "
+                "VALUES (?, 'Motivo B', '2030-07-01', '2030-07-10')",
+                (f_id,)
+            )
+        try:
+            # Filtro com recorte de 3 dias (04/07 a 06/07) e motivo exato 'Motivo A'
+            resp = self.client.get(
+                '/horarios/exportar_ausencias?ausencia_inicio=2030-07-04&ausencia_fim=2030-07-06&ausencia_motivo=Motivo A'
+            )
+            self.assertEqual(resp.status_code, 200)
+            wb = openpyxl.load_workbook(io.BytesIO(resp.data))
+            ws = wb.active
+            col_data, col_func, col_motivo, _ = self._mapear_colunas_ausencias(ws)
+
+            linhas = [
+                row for row in ws.iter_rows(min_row=2)
+                if row[col_func].value == 'Tecnico Recorte Teste'
+            ]
+            self.assertEqual(len(linhas), 3, f"Esperado 3 dias recortados pelo filtro, obteve {len(linhas)}")
+
+            datas_recortadas = [self._data_iso(r[col_data].value) for r in linhas]
+            self.assertEqual(datas_recortadas, ['2030-07-04', '2030-07-05', '2030-07-06'])
+
+            for r in linhas:
+                self.assertEqual(r[col_motivo].value, 'Motivo A')
+        finally:
+            with closing(self.horarios.get_db()) as conn, conn:
+                conn.execute("DELETE FROM ausencias WHERE funcionario_id = ?", (f_id,))
+                conn.execute("DELETE FROM funcionarios WHERE id = ?", (f_id,))
+
+    def test_exportar_ausencias_ordenacao_data_e_nome_crescente(self):
+        import openpyxl
+        with closing(self.horarios.get_db()) as conn, conn:
+            f_z = conn.execute("INSERT INTO funcionarios (nome, ativo) VALUES ('Zulmira Ordenacao', 1)").lastrowid
+            f_a = conn.execute("INSERT INTO funcionarios (nome, ativo) VALUES ('Ana Ordenacao', 1)").lastrowid
+            # 2030-08-11: Zulmira e Ana
+            conn.execute("INSERT INTO ausencias (funcionario_id, motivo, data_inicio, data_fim) VALUES (?, 'Ordem', '2030-08-11', '2030-08-11')", (f_z,))
+            conn.execute("INSERT INTO ausencias (funcionario_id, motivo, data_inicio, data_fim) VALUES (?, 'Ordem', '2030-08-11', '2030-08-11')", (f_a,))
+            # 2030-08-10: Zulmira (dia anterior)
+            conn.execute("INSERT INTO ausencias (funcionario_id, motivo, data_inicio, data_fim) VALUES (?, 'Ordem', '2030-08-10', '2030-08-10')", (f_z,))
+        try:
+            resp = self.client.get('/horarios/exportar_ausencias?ausencia_inicio=2030-08-10&ausencia_fim=2030-08-11')
+            self.assertEqual(resp.status_code, 200)
+            wb = openpyxl.load_workbook(io.BytesIO(resp.data))
+            ws = wb.active
+            col_data, col_func, _, _ = self._mapear_colunas_ausencias(ws)
+
+            linhas = [
+                (self._data_iso(row[col_data].value), str(row[col_func].value))
+                for row in ws.iter_rows(min_row=2)
+                if 'Ordenacao' in str(row[col_func].value)
+            ]
+            self.assertEqual(len(linhas), 3)
+
+            # Ordem crescente por data e depois por nome
+            self.assertEqual(linhas[0], ('2030-08-10', 'Zulmira Ordenacao'))
+            self.assertEqual(linhas[1], ('2030-08-11', 'Ana Ordenacao'))
+            self.assertEqual(linhas[2], ('2030-08-11', 'Zulmira Ordenacao'))
+        finally:
+            with closing(self.horarios.get_db()) as conn, conn:
+                conn.execute("DELETE FROM ausencias WHERE funcionario_id IN (?, ?)", (f_z, f_a))
+                conn.execute("DELETE FROM funcionarios WHERE id IN (?, ?)", (f_z, f_a))
+
+    def test_exportar_ausencias_datas_invalidas_retorna_400(self):
+        # 1. Formato de data inválido no início
+        r1 = self.client.get('/horarios/exportar_ausencias?ausencia_inicio=data-invalida')
+        self.assertEqual(r1.status_code, 400)
+
+        # 2. Formato de data inválido no fim
+        r2 = self.client.get('/horarios/exportar_ausencias?ausencia_fim=2026-99-99')
+        self.assertEqual(r2.status_code, 400)
+
+        # 3. Data início posterior a data fim
+        r3 = self.client.get('/horarios/exportar_ausencias?ausencia_inicio=2026-12-10&ausencia_fim=2026-12-01')
+        self.assertEqual(r3.status_code, 400)
+
+    def test_exportar_ausencias_vazio_mantem_cabecalho(self):
+        import openpyxl
+        resp = self.client.get(
+            '/horarios/exportar_ausencias?ausencia_inicio=2099-01-01&ausencia_fim=2099-01-02&ausencia_motivo=InexistenteTotal'
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.content_type, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        wb = openpyxl.load_workbook(io.BytesIO(resp.data))
+        ws = wb.active
+        self.assertGreaterEqual(ws.max_row, 1)
+        cabecalho = [str(c.value).lower() for c in ws[1] if c.value is not None]
+        self.assertTrue(any('data' in c for c in cabecalho), "Cabeçalho deve conter coluna de Data")
+        self.assertTrue(any('motivo' in c for c in cabecalho), "Cabeçalho deve conter coluna de Motivo")
+        self.assertEqual(ws.max_row, 1, "Não deve haver linhas de dados quando não há registros correspondentes")
+
+    def test_exportar_ausencias_sem_filtros_vigentes_futuras(self):
+        import openpyxl
+        hoje = date.today()
+        passado_inicio = (hoje - timedelta(days=20)).isoformat()
+        passado_fim = (hoje - timedelta(days=10)).isoformat()
+        futuro_inicio = (hoje + timedelta(days=5)).isoformat()
+        futuro_fim = (hoje + timedelta(days=6)).isoformat()
+
+        with closing(self.horarios.get_db()) as conn, conn:
+            f_id = conn.execute("INSERT INTO funcionarios (nome, ativo) VALUES ('Tecnico Vigente Futuro', 1)").lastrowid
+            conn.execute(
+                "INSERT INTO ausencias (funcionario_id, motivo, data_inicio, data_fim) VALUES (?, 'Ausencia Passada', ?, ?)",
+                (f_id, passado_inicio, passado_fim)
+            )
+            conn.execute(
+                "INSERT INTO ausencias (funcionario_id, motivo, data_inicio, data_fim) VALUES (?, 'Ausencia Futura', ?, ?)",
+                (f_id, futuro_inicio, futuro_fim)
+            )
+        try:
+            # Sem query string: deve filtrar vigentes/futuras (igual à tela)
+            resp = self.client.get('/horarios/exportar_ausencias')
+            self.assertEqual(resp.status_code, 200)
+            wb = openpyxl.load_workbook(io.BytesIO(resp.data))
+            ws = wb.active
+            _, col_func, col_motivo, _ = self._mapear_colunas_ausencias(ws)
+
+            motivos_exportados = [
+                row[col_motivo].value for row in ws.iter_rows(min_row=2)
+                if row[col_func].value == 'Tecnico Vigente Futuro'
+            ]
+            self.assertIn('Ausencia Futura', motivos_exportados, "Ausência futura deve estar presente")
+            self.assertNotIn('Ausencia Passada', motivos_exportados, "Ausência encerrada no passado não deve constar")
+        finally:
+            with closing(self.horarios.get_db()) as conn, conn:
+                conn.execute("DELETE FROM ausencias WHERE funcionario_id = ?", (f_id,))
+                conn.execute("DELETE FROM funcionarios WHERE id = ?", (f_id,))
+
+    def test_exportar_ausencias_formula_injection_como_texto(self):
+        import openpyxl
+        with closing(self.horarios.get_db()) as conn, conn:
+            f_id = conn.execute("INSERT INTO funcionarios (nome, ativo) VALUES ('=SUM(1,1)', 1)").lastrowid
+            conn.execute(
+                "INSERT INTO ausencias (funcionario_id, motivo, data_inicio, data_fim) VALUES (?, '+CMD()', '2030-05-10', '2030-05-10')",
+                (f_id,)
+            )
+        try:
+            resp = self.client.get('/horarios/exportar_ausencias?ausencia_inicio=2030-05-10&ausencia_fim=2030-05-10')
+            self.assertEqual(resp.status_code, 200)
+            wb = openpyxl.load_workbook(io.BytesIO(resp.data))
+            ws = wb.active
+            _, col_func, col_motivo, _ = self._mapear_colunas_ausencias(ws)
+
+            linhas = [
+                row for row in ws.iter_rows(min_row=2)
+                if '=SUM(1,1)' in str(row[col_func].value)
+            ]
+            self.assertTrue(len(linhas) >= 1, "Linha com payload de fórmula deve ser exportada.")
+            for row in linhas:
+                self.assertNotEqual(row[col_func].data_type, 'f', "Célula de funcionário não pode ser fórmula ('f')")
+                self.assertNotEqual(row[col_motivo].data_type, 'f', "Célula de motivo não pode ser fórmula ('f')")
+        finally:
+            with closing(self.horarios.get_db()) as conn, conn:
+                conn.execute("DELETE FROM ausencias WHERE funcionario_id = ?", (f_id,))
+                conn.execute("DELETE FROM funcionarios WHERE id = ?", (f_id,))
+
+    def test_exportar_ausencias_botao_na_interface_apenas_autorizados_e_filtros_escapados(self):
+        # 1. Usuário Master (autorizado): botão deve ser exibido com filtros escapados
+        resp_master = self.client.get(
+            '/horarios?ausencia_motivo=F%C3%A9rias&ausencia_inicio=2026-10-01&ausencia_fim=2026-10-31'
+        )
+        self.assertEqual(resp_master.status_code, 200)
+        self.assertIn('/horarios/exportar_ausencias', resp_master.text)
+        self.assertTrue(
+            'ausencia_motivo=F%C3%A9rias' in resp_master.text or 'ausencia_motivo=Férias' in resp_master.text,
+            "Parâmetros de filtro devem estar presentes no link de exportação"
+        )
+        self.assertIn('ausencia_inicio=2026-10-01', resp_master.text)
+
+        # 2. Usuário anônimo: botão de exportação NÃO deve estar visível
+        visitante = self.app.test_client()
+        resp_anon = visitante.get('/horarios')
+        self.assertEqual(resp_anon.status_code, 200)
+        self.assertNotIn('/horarios/exportar_ausencias', resp_anon.text)
+
+        # 3. Usuário logado SEM permissão perm_horarios e NÃO master: botão NÃO deve estar visível
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            uid_sem_perm = conn.execute(
+                'INSERT INTO usuarios (nome, email, senha_hash, eh_master, ativo, perm_horarios) VALUES (?, ?, ?, 0, 1, 0)',
+                ('Sem Permissao UI', 'semperm_ui@example.invalid', generate_password_hash(self.password))
+            ).lastrowid
+        try:
+            client_sem_perm = self.app.test_client()
+            with client_sem_perm.session_transaction() as sess:
+                sess.update(logged_in=True, user_id=uid_sem_perm, eh_master=False)
+            resp_sem_perm = client_sem_perm.get('/horarios')
+            self.assertEqual(resp_sem_perm.status_code, 200)
+            self.assertNotIn('/horarios/exportar_ausencias', resp_sem_perm.text)
+        finally:
+            with closing(self.bancos.get_db_connection()) as conn, conn:
+                conn.execute('DELETE FROM usuarios WHERE id = ?', (uid_sem_perm,))
+
+
+    def test_exportar_ausencias_regressao_data_maxima_sem_500(self):
+        import openpyxl
+        with closing(self.horarios.get_db()) as conn, conn:
+            f_id = conn.execute("INSERT INTO funcionarios (nome, ativo) VALUES ('Tecnico Data Maxima', 1)").lastrowid
+            conn.execute(
+                "INSERT INTO ausencias (funcionario_id, motivo, data_inicio, data_fim) VALUES (?, 'Limite Data', '9999-12-31', '9999-12-31')",
+                (f_id,)
+            )
+        try:
+            resp = self.client.get('/horarios/exportar_ausencias?ausencia_inicio=9999-12-31&ausencia_fim=9999-12-31')
+            self.assertEqual(resp.status_code, 200)
+            wb = openpyxl.load_workbook(io.BytesIO(resp.data))
+            ws = wb.active
+            col_data, col_func, _, _ = self._mapear_colunas_ausencias(ws)
+            linhas = [r for r in ws.iter_rows(min_row=2) if r[col_func].value == 'Tecnico Data Maxima']
+            self.assertEqual(len(linhas), 1)
+            self.assertEqual(self._data_iso(linhas[0][col_data].value), '9999-12-31')
+        finally:
+            with closing(self.horarios.get_db()) as conn, conn:
+                conn.execute("DELETE FROM ausencias WHERE funcionario_id = ?", (f_id,))
+                conn.execute("DELETE FROM funcionarios WHERE id = ?", (f_id,))
+
+    def test_exportar_ausencias_regressao_erro_500_sem_vazar_marcador_interno(self):
+        with patch.object(self.horarios, 'gerar_planilha_ausencias', side_effect=RuntimeError('marcador-interno')):
+            resp = self.client.get('/horarios/exportar_ausencias')
+            self.assertEqual(resp.status_code, 500)
+            self.assertNotIn('marcador-interno', resp.text)
+            self.assertIn('Não foi possível exportar as ausências', resp.text)
+
+
 if __name__ == '__main__':
     unittest.main()
 
