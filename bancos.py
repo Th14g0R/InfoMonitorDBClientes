@@ -1406,7 +1406,8 @@ def _obter_dados_servidor_linux(nome_servidor, info_servidor, busca=None, buscar
 
         if varrer_orfaos:
             diretorio_base = diretorio_base_servidor(nome_servidor)
-            cmd_find = f"find {shlex.quote(diretorio_base)} -type f \\( -name '*.fdb' -o -name '*.fbk' -o -name '*.bak' \\)"
+            caminho_lost_found = posixpath.join(diretorio_base, 'lost+found')
+            cmd_find = f"find {shlex.quote(diretorio_base)} -path {shlex.quote(caminho_lost_found)} -prune -o -type f \\( -name '*.fdb' -o -name '*.fbk' -o -name '*.bak' \\) -print"
             timeout_find = int(os.getenv('TIMEOUT_FIND_ORFAOS', str(TIMEOUT_FIND_ORFAOS)))
             try:
                 stdin, stdout, stderr = ssh.exec_command(cmd_find, timeout=timeout_find)

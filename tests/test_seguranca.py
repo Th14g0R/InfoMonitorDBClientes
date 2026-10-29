@@ -331,6 +331,84 @@ class SegurancaTest(unittest.TestCase):
         self.assertIn('/opt/infobrasil/3.0', cmd_chamado)
         self.assertEqual(timeout_chamado, 45)
 
+    def test_orfaos_find_poda_caminho_exato_lost_found_e_salva_historico(self):
+        arquivo_conf = MagicMock()
+        arquivo_conf.__enter__.return_value.read.return_value = b'db = /opt/infobrasil/db.fdb\n'
+        sftp = MagicMock()
+        sftp.open.return_value = arquivo_conf
+        sftp.stat.return_value = MagicMock(st_size=1000, st_mtime=1)
+        stdout = MagicMock()
+        stdout.read.return_value = b'/opt/infobrasil/orfao.fdb\n'
+        stdout.channel.recv_exit_status.return_value = 0
+        stderr = MagicMock()
+        stderr.read.return_value = b''
+        ssh = MagicMock()
+        ssh.open_sftp.return_value = sftp
+        ssh.exec_command.return_value = (MagicMock(), stdout, stderr)
+        info = {'ip': 'localhost', 'porta_fb': 3050}
+
+        # 1. Valida que DB01 poda exatamente /opt/infobrasil/lost+found
+        self.bancos.limpar_cache_global()
+        with patch.object(self.bancos, 'conectar_ssh', return_value=ssh):
+            dados, total_bytes, orfaos = self.bancos.obter_dados_servidor_linux(
+                'DB01', info, modo_busca_unificada=True, varrer_orfaos=True
+            )
+        ssh.exec_command.assert_called_once()
+        cmd_db01 = ssh.exec_command.call_args[0][0]
+        self.assertIn(f"-path {shlex.quote('/opt/infobrasil/lost+found')} -prune -o", cmd_db01)
+        self.assertTrue(cmd_db01.endswith('-print'))
+        self.assertNotIn('erro', dados[0])
+        self.assertEqual(len(orfaos), 1)
+
+        # 2. Valida que DB05 poda o caminho exato sob seu diretório base
+        ssh.exec_command.reset_mock()
+        self.bancos.limpar_cache_global()
+        with patch.object(self.bancos, 'conectar_ssh', return_value=ssh):
+            self.bancos.obter_dados_servidor_linux(
+                'DB05', info, modo_busca_unificada=True, varrer_orfaos=True
+            )
+        ssh.exec_command.assert_called_once()
+        cmd_db05 = ssh.exec_command.call_args[0][0]
+        self.assertIn(f"-path {shlex.quote('/opt/infobrasil/3.0/lost+found')} -prune -o", cmd_db05)
+
+        # 3. Valida que salvar_historico_diario persiste o servidor com sucesso quando a varredura é podada
+        caminho_db = str(Path(self.temp.name) / 'historico-poda.db')
+        with patch.dict(self.bancos.SERVIDORES, {'DB01': info}, clear=True), \
+                patch.object(self.bancos, 'DB_HISTORICO', caminho_db), \
+                patch.object(self.bancos, 'conectar_ssh', return_value=ssh):
+            self.bancos.init_db_historico()
+            self.bancos.salvar_historico_diario()
+        with closing(sqlite3.connect(caminho_db)) as conn:
+            registros = conn.execute(
+                'SELECT servidor, total_bytes, qtd_bancos FROM historico_servidores WHERE servidor = ?',
+                ('DB01',)
+            ).fetchall()
+        self.assertEqual(len(registros), 1)
+        self.assertEqual(registros[0][0], 'DB01')
+        self.assertEqual(registros[0][1], 2000)  # 1000 do banco + 1000 do orfao
+        self.assertEqual(registros[0][2], 1)
+
+        # 4. Regressão: erro real fora de lost+found (exit_status != 0) continua sendo rejeitado e não salva snapshot parcial
+        stdout_falha = MagicMock()
+        stdout_falha.read.return_value = b''
+        stdout_falha.channel.recv_exit_status.return_value = 1
+        stderr_falha = MagicMock()
+        stderr_falha.read.return_value = b"find: '/opt/infobrasil/outro_diretorio': Permission denied"
+        ssh_falha = MagicMock()
+        ssh_falha.open_sftp.return_value = sftp
+        ssh_falha.exec_command.return_value = (MagicMock(), stdout_falha, stderr_falha)
+
+        caminho_db_falha = str(Path(self.temp.name) / 'historico-falha-preservada.db')
+        self.bancos.limpar_cache_global()
+        with patch.dict(self.bancos.SERVIDORES, {'DB01': info}, clear=True), \
+                patch.object(self.bancos, 'DB_HISTORICO', caminho_db_falha), \
+                patch.object(self.bancos, 'conectar_ssh', return_value=ssh_falha):
+            self.bancos.init_db_historico()
+            self.bancos.salvar_historico_diario()
+        with closing(sqlite3.connect(caminho_db_falha)) as conn:
+            qtd_falha = conn.execute('SELECT COUNT(*) FROM historico_servidores').fetchone()[0]
+        self.assertEqual(qtd_falha, 0)
+
     def test_csrf_missing_invalid_and_foreign_session(self):
         for token in (None, 'invalid', 'á', 'b' * 64):
             with self.subTest(token=token):
