@@ -1,4 +1,4 @@
-from flask import Blueprint, render_template, render_template_string, request, redirect, url_for, session, flash, jsonify, send_file
+from flask import Blueprint, render_template, render_template_string, request, redirect, url_for, session, flash, jsonify, send_file, abort
 import io
 import logging
 import openpyxl
@@ -924,7 +924,10 @@ HTML_INTERFACE = """
                                 {% endif %}
                             </div>
                             {% if pode_editar_horarios() %}
-                                <div>
+                                <div style="display: flex; gap: 4px; align-items: center;">
+                                    <a href="/horarios/editar_item_escala_domingo/{{ d[0] }}" class="btn-icon btn-icon-warning" title="Editar Plantão" aria-label="Editar escala de domingo">
+                                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                                    </a>
                                     <form action="/horarios/excluir_escala_domingo/{{ d[0] }}" method="POST" class="form-inline">
                                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                                         <button type="submit" class="btn-icon btn-icon-danger" onclick="return confirm('Remover escala deste domingo?')" title="Remover" aria-label="Remover escala">
@@ -2881,6 +2884,218 @@ def excluir_escala_domingo(id):
         flash(f"Erro ao excluir escala de domingo: {str(e)}", "danger")
 
     return redirect(destino)
+
+
+def _obter_opcoes_funcionarios_domingo(conn, f_id_selecionado):
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, nome
+        FROM funcionarios
+        WHERE ativo = 1 AND participa_sobreaviso_domingo = 1
+        ORDER BY prioridade ASC, nome ASC
+    """)
+    elegiveis = cursor.fetchall()
+
+    opts = []
+    encontrado = False
+    f_id_sel_int = None
+    try:
+        if f_id_selecionado is not None and str(f_id_selecionado).strip():
+            f_id_sel_int = int(f_id_selecionado)
+    except (ValueError, TypeError):
+        f_id_sel_int = None
+
+    for f in elegiveis:
+        sel = 'selected' if (f_id_sel_int is not None and f[0] == f_id_sel_int) else ''
+        if sel:
+            encontrado = True
+        opts.append(f'<option value="{f[0]}" {sel}>{escape(f[1])}</option>')
+
+    if f_id_sel_int is not None and not encontrado:
+        cursor.execute("SELECT id, nome FROM funcionarios WHERE id = ?", (f_id_sel_int,))
+        func_atual = cursor.fetchone()
+        if func_atual:
+            opts.insert(0, f'<option value="{func_atual[0]}" selected>{escape(func_atual[1])} (Sem habilitação — selecione outro funcionário)</option>')
+
+    return "".join(opts)
+
+
+def _render_form_editar_escala_domingo(item_id, data_domingo, funcionario_id, observacao, erro_msg=None, status_code=200):
+    with closing(get_db()) as conn:
+        opts_funcs = _obter_opcoes_funcionarios_domingo(conn, funcionario_id)
+
+    erro_html = ""
+    if erro_msg:
+        erro_html = f'<div class="alert alert-danger" style="margin-bottom: 15px; padding: 10px 14px; border-radius: 6px; background: #fde8e8; border: 1px solid #f8b4b4; color: #9b1c1c; font-size: 0.9rem;">{escape(erro_msg)}</div>'
+
+    val_data = escape(str(data_domingo or ''))
+    val_obs = escape(str(observacao if observacao is not None else 'Sobreaviso TEF'))
+
+    html = f"""<!doctype html>
+<html lang="pt-BR">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="{csrf_token()}">
+    <title>Editar Plantão de Domingo — InfoMonitor</title>
+    <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
+    <link rel="stylesheet" href="/static/ui.css">
+    <link rel="stylesheet" href="/static/menu_navegacao.css">
+    <script src="/static/csrf.js"></script>
+    <script src="/static/ui.js" defer></script>
+</head>
+<body style="background: var(--cor-fundo, #f4f6f9); min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 20px;">
+    <div style="max-width: 500px; margin: 40px auto; background: var(--cor-superficie, #ffffff); border: 1px solid var(--cor-borda, #e2e8f0); border-radius: 8px; padding: 24px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
+        <h3 style="margin-top: 0; margin-bottom: 16px; color: #d35400; font-size: 1.2rem; display: flex; align-items: center; gap: 8px;">
+            ✏️ Editar Plantão de Domingo (TEF)
+        </h3>
+        {erro_html}
+        <form method="POST" action="/horarios/editar_item_escala_domingo/{item_id}" style="display: grid; gap: 14px;">
+            <input type="hidden" name="csrf_token" value="{csrf_token()}">
+            <div>
+                <label style="display: block; font-size: 0.85em; font-weight: 600; margin-bottom: 6px;">Domingo:</label>
+                <input type="date" name="data_domingo" value="{val_data}" required class="form-control" style="width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 6px;">
+            </div>
+            <div>
+                <label style="display: block; font-size: 0.85em; font-weight: 600; margin-bottom: 6px;">Técnico / Colaborador (Sobreaviso TEF):</label>
+                <select name="funcionario_id" required class="form-select" style="width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 6px;">
+                    {opts_funcs}
+                </select>
+            </div>
+            <div>
+                <label style="display: block; font-size: 0.85em; font-weight: 600; margin-bottom: 6px;">Observação (Opcional, máx. 500 caracteres):</label>
+                <input type="text" name="observacao" value="{val_obs}" maxlength="500" class="form-control" style="width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 6px;">
+            </div>
+            <div style="display: flex; gap: 10px; margin-top: 8px;">
+                <button type="submit" class="btn btn-primary" style="flex: 1;">Salvar Alteração</button>
+                <a href="/horarios?data_inicio_domingo={val_data}&data_fim_domingo={val_data}#secao-escala-domingo" class="btn btn-secondary" style="flex: 1; text-align: center; text-decoration: none;">Cancelar</a>
+            </div>
+        </form>
+    </div>
+</body>
+</html>"""
+    return html, status_code
+
+
+@horarios_bp.route('/horarios/editar_item_escala_domingo/<int:id>', methods=['GET', 'POST'])
+@login_required
+def editar_item_escala_domingo(id):
+    if not pode_editar_horarios():
+        flash("Acesso não autorizado.", "danger")
+        return redirect('/horarios#secao-escala-domingo')
+
+    with closing(get_db()) as conn:
+        item = conn.execute(
+            "SELECT id, data_domingo, funcionario_id, horario, observacao FROM escala_domingo WHERE id = ?",
+            (id,)
+        ).fetchone()
+
+    if not item:
+        abort(404)
+
+    if request.method == 'GET':
+        return _render_form_editar_escala_domingo(
+            item['id'], item['data_domingo'], item['funcionario_id'], item['observacao'] or 'Sobreaviso TEF'
+        )
+
+    # POST
+    nova_data = request.form.get('data_domingo', '').strip()
+    funcionario_id_raw = request.form.get('funcionario_id', '').strip()
+    nova_obs = request.form.get('observacao', '').strip()
+    if not nova_obs:
+        nova_obs = 'Sobreaviso TEF'
+
+    try:
+        dt = validar_data(nova_data)
+        if dt.weekday() != 6:
+            return _render_form_editar_escala_domingo(
+                id, nova_data, funcionario_id_raw, nova_obs,
+                f"A data selecionada ({dt.strftime('%d/%m/%Y')}) não é um domingo!", 400
+            )
+    except Exception:
+        return _render_form_editar_escala_domingo(
+            id, nova_data, funcionario_id_raw, nova_obs,
+            "Data inválida informada.", 400
+        )
+
+    try:
+        f_id = int(funcionario_id_raw)
+    except (ValueError, TypeError):
+        return _render_form_editar_escala_domingo(
+            id, nova_data, funcionario_id_raw, nova_obs,
+            "Selecione um funcionário válido.", 400
+        )
+
+    with closing(get_db()) as conn:
+        func = conn.execute(
+            "SELECT id, ativo, participa_sobreaviso_domingo FROM funcionarios WHERE id = ?",
+            (f_id,)
+        ).fetchone()
+    if not func or not func['ativo'] or not func['participa_sobreaviso_domingo']:
+        return _render_form_editar_escala_domingo(
+            id, nova_data, f_id, nova_obs,
+            "O funcionário deve estar ativo e participar do Sobreaviso TEF.", 400
+        )
+
+    if len(nova_obs) > 500:
+        return _render_form_editar_escala_domingo(
+            id, nova_data, f_id, nova_obs,
+            "A observação deve ter no máximo 500 caracteres.", 400
+        )
+
+    # Transação atômica BEGIN IMMEDIATE
+    with closing(get_db()) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        item_atual = conn.execute(
+            "SELECT id, data_domingo, funcionario_id, horario, observacao, registrado_por FROM escala_domingo WHERE id = ?",
+            (id,)
+        ).fetchone()
+        if not item_atual:
+            conn.rollback()
+            abort(404)
+
+        ocupado = conn.execute(
+            "SELECT id FROM escala_domingo WHERE data_domingo = ? AND id != ?",
+            (nova_data, id)
+        ).fetchone()
+        if ocupado:
+            conn.rollback()
+            return _render_form_editar_escala_domingo(
+                id, nova_data, f_id, nova_obs,
+                "Já existe um plantão de domingo cadastrado para esta data.", 409
+            )
+
+        autor = session.get('usuario') or str(session.get('user_id', 'sistema'))
+        horario_preservado = item_atual['horario'] or 'Sobreaviso TEF'
+
+        conn.execute("""
+            UPDATE escala_domingo
+            SET data_domingo = ?, funcionario_id = ?, observacao = ?, registrado_por = ?
+            WHERE id = ?
+        """, (nova_data, f_id, nova_obs, autor, id))
+        conn.commit()
+
+    # Auditoria após commit
+    registrar_acao_admin('editar_item_escala_domingo', {
+        'escala_id': id,
+        'antes': {
+            'data_domingo': item_atual['data_domingo'],
+            'funcionario_id': item_atual['funcionario_id'],
+            'horario': item_atual['horario'],
+            'observacao': item_atual['observacao'],
+            'registrado_por': item_atual['registrado_por'],
+        },
+        'depois': {
+            'data_domingo': nova_data,
+            'funcionario_id': f_id,
+            'horario': horario_preservado,
+            'observacao': nova_obs,
+            'registrado_por': autor,
+        }
+    })
+
+    flash("Plantão de Sobreaviso de domingo atualizado com sucesso!", "success")
+    return redirect(url_for('horarios.ver_horarios', data_inicio_domingo=nova_data, data_fim_domingo=nova_data) + '#secao-escala-domingo')
 
 
 @horarios_bp.route('/horarios/login', methods=['GET', 'POST'])

@@ -2918,7 +2918,347 @@ O cliente loja-critica esta a mais de 1 dia sem bkp - status ERRO 2026-10-09 10:
             self.assertNotIn('marcador-interno', resp.text)
             self.assertIn('Não foi possível exportar as ausências', resp.text)
 
+    def test_editar_item_escala_domingo_sucesso_e_auditoria(self):
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            f1 = conn.execute(
+                "INSERT INTO funcionarios (nome, prioridade, ativo, participa_sobreaviso_domingo) VALUES (?, 'P1', 1, 1)",
+                ('Tecnico TEF Alfa',),
+            ).lastrowid
+            f2 = conn.execute(
+                "INSERT INTO funcionarios (nome, prioridade, ativo, participa_sobreaviso_domingo) VALUES (?, 'P1', 1, 1)",
+                ('Tecnico TEF Beta',),
+            ).lastrowid
+            escala_id = conn.execute(
+                "INSERT INTO escala_domingo (data_domingo, funcionario_id, horario, observacao) VALUES (?, ?, 'Sobreaviso TEF', ?)",
+                ('2026-10-18', f1, 'Plantao Inicial'),
+            ).lastrowid
+
+        try:
+            # 1. GET carrega formulário preenchido com dados atuais
+            resp_get = self.client.get(f'/horarios/editar_item_escala_domingo/{escala_id}')
+            self.assertEqual(resp_get.status_code, 200)
+            self.assertIn('2026-10-18', resp_get.text)
+            self.assertIn('Plantao Inicial', resp_get.text)
+            self.assertIn(f'value="{f1}"', resp_get.text)
+            self.assertIn('name="csrf_token"', resp_get.text)
+
+            # 2. POST sucesso alterando data para outro domingo e funcionário
+            with patch('horarios.registrar_acao_admin') as mock_admin:
+                dados = dict(
+                    csrf_token=self.token,
+                    data_domingo='2026-10-25',
+                    funcionario_id=str(f2),
+                    observacao='Plantao Modificado',
+                )
+                resp_post = self.client.post(f'/horarios/editar_item_escala_domingo/{escala_id}', data=dados)
+                self.assertEqual(resp_post.status_code, 302)
+                loc = resp_post.headers.get('Location', '')
+                self.assertIn('data_inicio_domingo=2026-10-25', loc)
+                self.assertIn('data_fim_domingo=2026-10-25', loc)
+                self.assertTrue(loc.endswith('#secao-escala-domingo'), f"URL deve terminar com #secao-escala-domingo: {loc}")
+
+                # Checa banco: mesmo ID preservado, horario mantido, novos dados persistidos
+                with closing(self.bancos.get_db_connection()) as conn:
+                    row = conn.execute(
+                        "SELECT id, data_domingo, funcionario_id, horario, observacao FROM escala_domingo WHERE id = ?",
+                        (escala_id,),
+                    ).fetchone()
+                self.assertIsNotNone(row)
+                self.assertEqual(row['id'], escala_id)
+                self.assertEqual(row['data_domingo'], '2026-10-25')
+                self.assertEqual(row['funcionario_id'], f2)
+                self.assertEqual(row['horario'], 'Sobreaviso TEF')
+                self.assertEqual(row['observacao'], 'Plantao Modificado')
+
+                # Auditoria antes/depois: validação de contrato exato
+                self.assertTrue(mock_admin.called, "registrar_acao_admin deve ser chamado na edicao")
+                acao, detalhes = mock_admin.call_args[0]
+                self.assertEqual(acao, 'editar_item_escala_domingo')
+                self.assertEqual(detalhes['escala_id'], escala_id)
+                self.assertIn('antes', detalhes)
+                self.assertIn('depois', detalhes)
+                self.assertEqual(detalhes['antes']['data_domingo'], '2026-10-18')
+                self.assertEqual(int(detalhes['antes']['funcionario_id']), f1)
+                self.assertEqual(detalhes['depois']['data_domingo'], '2026-10-25')
+                self.assertEqual(int(detalhes['depois']['funcionario_id']), f2)
+
+            # 3. Observação vazia assume padrão 'Sobreaviso TEF'
+            resp_obs_padrao = self.client.post(
+                f'/horarios/editar_item_escala_domingo/{escala_id}',
+                data=dict(csrf_token=self.token, data_domingo='2026-10-25', funcionario_id=str(f1), observacao=''),
+            )
+            self.assertEqual(resp_obs_padrao.status_code, 302)
+            with closing(self.bancos.get_db_connection()) as conn:
+                obs_banco = conn.execute("SELECT observacao FROM escala_domingo WHERE id = ?", (escala_id,)).fetchone()[0]
+            self.assertEqual(obs_banco, 'Sobreaviso TEF')
+
+        finally:
+            with closing(self.bancos.get_db_connection()) as conn, conn:
+                conn.execute("DELETE FROM escala_domingo WHERE id = ?", (escala_id,))
+                conn.execute("DELETE FROM funcionarios WHERE id IN (?, ?)", (f1, f2))
+
+    def test_editar_item_escala_domingo_colisao_data_ocupada_409(self):
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            f1 = conn.execute(
+                "INSERT INTO funcionarios (nome, prioridade, ativo, participa_sobreaviso_domingo) VALUES (?, 'P1', 1, 1)",
+                ('Tecnico Colisao 1',),
+            ).lastrowid
+            f2 = conn.execute(
+                "INSERT INTO funcionarios (nome, prioridade, ativo, participa_sobreaviso_domingo) VALUES (?, 'P1', 1, 1)",
+                ('Tecnico Colisao 2',),
+            ).lastrowid
+            e1 = conn.execute(
+                "INSERT INTO escala_domingo (data_domingo, funcionario_id, horario, observacao) VALUES (?, ?, 'Sobreaviso TEF', ?)",
+                ('2026-10-18', f1, 'Escala 1'),
+            ).lastrowid
+            e2 = conn.execute(
+                "INSERT INTO escala_domingo (data_domingo, funcionario_id, horario, observacao) VALUES (?, ?, 'Sobreaviso TEF', ?)",
+                ('2026-10-25', f2, 'Escala 2'),
+            ).lastrowid
+
+        try:
+            # Tentativa de mover e1 para 2026-10-25 (ocupada por e2) -> deve retornar 409
+            resp = self.client.post(
+                f'/horarios/editar_item_escala_domingo/{e1}',
+                data=dict(
+                    csrf_token=self.token,
+                    data_domingo='2026-10-25',
+                    funcionario_id=str(f1),
+                    observacao='Tentativa de Sobreposicao',
+                ),
+            )
+            self.assertEqual(resp.status_code, 409)
+            # Deve manter valores digitados no formulário
+            self.assertIn('2026-10-25', resp.text)
+            self.assertIn('Tentativa de Sobreposicao', resp.text)
+
+            # Nenhum dos 2 registros muda no banco
+            with closing(self.bancos.get_db_connection()) as conn:
+                row1 = conn.execute("SELECT data_domingo, funcionario_id, observacao FROM escala_domingo WHERE id = ?", (e1,)).fetchone()
+                row2 = conn.execute("SELECT data_domingo, funcionario_id, observacao FROM escala_domingo WHERE id = ?", (e2,)).fetchone()
+
+            self.assertEqual(row1['data_domingo'], '2026-10-18')
+            self.assertEqual(row1['funcionario_id'], f1)
+            self.assertEqual(row1['observacao'], 'Escala 1')
+
+            self.assertEqual(row2['data_domingo'], '2026-10-25')
+            self.assertEqual(row2['funcionario_id'], f2)
+            self.assertEqual(row2['observacao'], 'Escala 2')
+
+        finally:
+            with closing(self.bancos.get_db_connection()) as conn, conn:
+                conn.execute("DELETE FROM escala_domingo WHERE id IN (?, ?)", (e1, e2))
+                conn.execute("DELETE FROM funcionarios WHERE id IN (?, ?)", (f1, f2))
+
+    def test_editar_item_escala_domingo_validacao_domingo_e_observacao_400(self):
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            f = conn.execute(
+                "INSERT INTO funcionarios (nome, prioridade, ativo, participa_sobreaviso_domingo) VALUES (?, 'P1', 1, 1)",
+                ('Tecnico Valida Domingo',),
+            ).lastrowid
+            e = conn.execute(
+                "INSERT INTO escala_domingo (data_domingo, funcionario_id, horario, observacao) VALUES (?, ?, 'Sobreaviso TEF', ?)",
+                ('2026-10-18', f, 'Original'),
+            ).lastrowid
+
+        try:
+            # 1. Data que não é domingo (2026-10-17 é sábado) -> 400
+            resp_sab = self.client.post(
+                f'/horarios/editar_item_escala_domingo/{e}',
+                data=dict(csrf_token=self.token, data_domingo='2026-10-17', funcionario_id=str(f), observacao='Dia Sabado'),
+            )
+            self.assertEqual(resp_sab.status_code, 400)
+            self.assertIn('2026-10-17', resp_sab.text)
+            self.assertIn('Dia Sabado', resp_sab.text)
+
+            # 2. Data em formato inválido -> 400
+            resp_inv = self.client.post(
+                f'/horarios/editar_item_escala_domingo/{e}',
+                data=dict(csrf_token=self.token, data_domingo='invalida', funcionario_id=str(f), observacao='Invalida'),
+            )
+            self.assertEqual(resp_inv.status_code, 400)
+
+            # 3. Funcionário ID inválido ('abc') -> 400
+            resp_func_abc = self.client.post(
+                f'/horarios/editar_item_escala_domingo/{e}',
+                data=dict(csrf_token=self.token, data_domingo='2026-10-18', funcionario_id='abc', observacao='Id Invalido'),
+            )
+            self.assertEqual(resp_func_abc.status_code, 400)
+
+            # 4. Observação com mais de 500 caracteres -> 400
+            obs_longa = 'A' * 501
+            resp_obs = self.client.post(
+                f'/horarios/editar_item_escala_domingo/{e}',
+                data=dict(csrf_token=self.token, data_domingo='2026-10-18', funcionario_id=str(f), observacao=obs_longa),
+            )
+            self.assertEqual(resp_obs.status_code, 400)
+
+            # Banco intacto
+            with closing(self.bancos.get_db_connection()) as conn:
+                row = conn.execute("SELECT data_domingo, observacao FROM escala_domingo WHERE id = ?", (e,)).fetchone()
+            self.assertEqual(row['data_domingo'], '2026-10-18')
+            self.assertEqual(row['observacao'], 'Original')
+
+        finally:
+            with closing(self.bancos.get_db_connection()) as conn, conn:
+                conn.execute("DELETE FROM escala_domingo WHERE id = ?", (e,))
+                conn.execute("DELETE FROM funcionarios WHERE id = ?", (f,))
+
+    def test_editar_item_escala_domingo_elegibilidade_funcionario(self):
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            f_elegivel = conn.execute(
+                "INSERT INTO funcionarios (nome, prioridade, ativo, participa_sobreaviso_domingo) VALUES (?, 'P1', 1, 1)",
+                ('Tecnico Elegivel',),
+            ).lastrowid
+            f_inativo = conn.execute(
+                "INSERT INTO funcionarios (nome, prioridade, ativo, participa_sobreaviso_domingo) VALUES (?, 'P1', 0, 1)",
+                ('Tecnico Inativo',),
+            ).lastrowid
+            f_sem_tef = conn.execute(
+                "INSERT INTO funcionarios (nome, prioridade, ativo, participa_sobreaviso_domingo) VALUES (?, 'P1', 1, 0)",
+                ('Tecnico Sem TEF',),
+            ).lastrowid
+            e = conn.execute(
+                "INSERT INTO escala_domingo (data_domingo, funcionario_id, horario, observacao) VALUES (?, ?, 'Sobreaviso TEF', ?)",
+                ('2026-10-18', f_elegivel, 'Escala Elegivel'),
+            ).lastrowid
+
+        try:
+            # 1. POST rejeita funcionário inativo -> 400
+            resp_inat = self.client.post(
+                f'/horarios/editar_item_escala_domingo/{e}',
+                data=dict(csrf_token=self.token, data_domingo='2026-10-18', funcionario_id=str(f_inativo), observacao='Inativo'),
+            )
+            self.assertEqual(resp_inat.status_code, 400)
+
+            # 2. POST rejeita funcionário sem sobreaviso TEF -> 400
+            resp_sem_tef = self.client.post(
+                f'/horarios/editar_item_escala_domingo/{e}',
+                data=dict(csrf_token=self.token, data_domingo='2026-10-18', funcionario_id=str(f_sem_tef), observacao='Sem TEF'),
+            )
+            self.assertEqual(resp_sem_tef.status_code, 400)
+
+            # 3. GET preserva seleção do atual mesmo se ele tiver ficado inelegível
+            with closing(self.bancos.get_db_connection()) as conn, conn:
+                conn.execute("UPDATE escala_domingo SET funcionario_id = ? WHERE id = ?", (f_inativo, e))
+
+            resp_get = self.client.get(f'/horarios/editar_item_escala_domingo/{e}')
+            self.assertEqual(resp_get.status_code, 200)
+            self.assertIn(f'value="{f_inativo}" selected', resp_get.text)
+            self.assertIn('Tecnico Inativo', resp_get.text)
+
+        finally:
+            with closing(self.bancos.get_db_connection()) as conn, conn:
+                conn.execute("DELETE FROM escala_domingo WHERE id = ?", (e,))
+                conn.execute("DELETE FROM funcionarios WHERE id IN (?, ?, ?)", (f_elegivel, f_inativo, f_sem_tef))
+
+    def test_editar_item_escala_domingo_inexistente_404(self):
+        id_inexistente = 999999
+        # 1. GET em ID inexistente -> 404
+        resp_get = self.client.get(f'/horarios/editar_item_escala_domingo/{id_inexistente}')
+        self.assertEqual(resp_get.status_code, 404)
+
+        # 2. POST em ID inexistente -> 404
+        resp_post = self.client.post(
+            f'/horarios/editar_item_escala_domingo/{id_inexistente}',
+            data=dict(csrf_token=self.token, data_domingo='2026-10-18', funcionario_id='1', observacao='Teste'),
+        )
+        self.assertEqual(resp_post.status_code, 404)
+
+    def test_editar_item_escala_domingo_permissoes_csrf_e_escaping(self):
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            f = conn.execute(
+                "INSERT INTO funcionarios (nome, prioridade, ativo, participa_sobreaviso_domingo) VALUES (?, 'P1', 1, 1)",
+                ('Tecnico <script>alert("xss")</script>',),
+            ).lastrowid
+            e = conn.execute(
+                "INSERT INTO escala_domingo (data_domingo, funcionario_id, horario, observacao) VALUES (?, ?, 'Sobreaviso TEF', ?)",
+                ('2026-10-18', f, '"><svg onload=alert(1)>'),
+            ).lastrowid
+            uid_sem_perm = conn.execute(
+                'INSERT INTO usuarios (nome, email, senha_hash, eh_master, ativo, perm_horarios) VALUES (?, ?, ?, 0, 1, 0)',
+                ('Sem Permissao Edicao', 'sempermedit@example.invalid', generate_password_hash(self.password)),
+            ).lastrowid
+
+        try:
+            # 1. Acesso anônimo (visitante não autenticado) restrito
+            visitante = self.app.test_client()
+            resp_anon_get = visitante.get(f'/horarios/editar_item_escala_domingo/{e}')
+            self.assertIn(resp_anon_get.status_code, (302, 401, 403))
+
+            # POST anônimo sem token é interceptado pelo CSRF global retornando 400
+            resp_anon_post = visitante.post(f'/horarios/editar_item_escala_domingo/{e}', data={})
+            self.assertEqual(resp_anon_post.status_code, 400)
+
+            # POST anônimo com token CSRF válido obtido da sessão é barrado pela autenticação (302 para login)
+            visitante.get('/admin/login')
+            with visitante.session_transaction() as v_sess:
+                token_anon = v_sess.get('_csrf_token') or 'token-anon-valido'
+                v_sess['_csrf_token'] = token_anon
+            resp_anon_post_com_csrf = visitante.post(
+                f'/horarios/editar_item_escala_domingo/{e}',
+                data=dict(csrf_token=token_anon, data_domingo='2026-10-25', funcionario_id=str(f), observacao='Anonimo'),
+            )
+            self.assertIn(resp_anon_post_com_csrf.status_code, (302, 401, 403))
+
+            # 2. Usuário logado SEM permissão (perm_horarios=0, eh_master=0)
+            client_sem_perm = self.app.test_client()
+            client_sem_perm.get('/admin/login')
+            token_sem_perm = 'csrf-token-sem-perm'
+            with client_sem_perm.session_transaction() as sess:
+                sess['_csrf_token'] = token_sem_perm
+                sess.update(logged_in=True, user_id=uid_sem_perm, eh_master=False)
+
+            resp_sem_perm_get = client_sem_perm.get(f'/horarios/editar_item_escala_domingo/{e}')
+            self.assertIn(resp_sem_perm_get.status_code, (302, 403))
+            resp_sem_perm_post = client_sem_perm.post(
+                f'/horarios/editar_item_escala_domingo/{e}',
+                data=dict(csrf_token=token_sem_perm, data_domingo='2026-10-25', funcionario_id=str(f), observacao='Sem Perm'),
+            )
+            self.assertIn(resp_sem_perm_post.status_code, (302, 403))
+
+            # 3. Proteção CSRF global: POST sem token retorna 400
+            resp_csrf = self.client.post(
+                f'/horarios/editar_item_escala_domingo/{e}',
+                data=dict(data_domingo='2026-10-25', funcionario_id=str(f), observacao='Sem CSRF'),
+            )
+            self.assertEqual(resp_csrf.status_code, 400)
+
+            # Confirma no banco que tentativas sem permissão e sem CSRF mantêm data e observação intactas
+            with closing(self.bancos.get_db_connection()) as conn:
+                row_intacto = conn.execute(
+                    "SELECT data_domingo, observacao, funcionario_id FROM escala_domingo WHERE id = ?", (e,)
+                ).fetchone()
+            self.assertEqual(row_intacto['data_domingo'], '2026-10-18')
+            self.assertEqual(row_intacto['observacao'], '"><svg onload=alert(1)>')
+            self.assertEqual(row_intacto['funcionario_id'], f)
+
+            # 4. Escaping de payloads XSS no HTML
+            resp_get = self.client.get(f'/horarios/editar_item_escala_domingo/{e}')
+            self.assertEqual(resp_get.status_code, 200)
+            self.assertNotIn('<script>alert("xss")</script>', resp_get.text)
+            self.assertNotIn('"><svg onload=alert(1)>', resp_get.text)
+
+            # 5. Botão/link de edição presente no cartão de domingo para quem tem permissão e ausente para anônimo/sem permissão
+            # Consulta com ?modo_domingo=todos para incluir domingos passados e futuros sem restrição de filtro padrão
+            resp_lista_master = self.client.get('/horarios?modo_domingo=todos')
+            self.assertEqual(resp_lista_master.status_code, 200)
+            self.assertIn(f'/horarios/editar_item_escala_domingo/{e}', resp_lista_master.text)
+
+            resp_lista_anon = visitante.get('/horarios?modo_domingo=todos')
+            self.assertEqual(resp_lista_anon.status_code, 200)
+            self.assertNotIn(f'/horarios/editar_item_escala_domingo/{e}', resp_lista_anon.text)
+
+            resp_lista_sem_perm = client_sem_perm.get('/horarios?modo_domingo=todos')
+            self.assertEqual(resp_lista_sem_perm.status_code, 200)
+            self.assertNotIn(f'/horarios/editar_item_escala_domingo/{e}', resp_lista_sem_perm.text)
+
+        finally:
+            with closing(self.bancos.get_db_connection()) as conn, conn:
+                conn.execute("DELETE FROM escala_domingo WHERE id = ?", (e,))
+                conn.execute("DELETE FROM funcionarios WHERE id = ?", (f,))
+                conn.execute("DELETE FROM usuarios WHERE id = ?", (uid_sem_perm,))
+
 
 if __name__ == '__main__':
     unittest.main()
-
