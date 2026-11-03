@@ -33,7 +33,7 @@
         <div>
           <h3 style="margin: 0;">🌐 Subdomínios Monitorados</h3>
           <p class="text-muted" style="margin-top: var(--space-1); margin-bottom: 0;">
-            Verificação automática aos domingos às 00h (Fortaleza), com alertas para vencimentos nos próximos {{ alerta_dias }} dias. Falhas no envio são tentadas novamente na próxima verificação.
+            Verificação automática às segundas e quintas às 00h (Fortaleza), com alertas para vencimentos nos próximos {{ alerta_dias }} dias. Falhas no envio são tentadas novamente na próxima verificação.
           </p>
         </div>
       </div>
@@ -87,9 +87,9 @@
               <td>{{ formatar_data(item.expira_em) }}</td>
               <td>
                 {% if item.dias is not none %}
-                  {% if item.dias <= 15 %}
+                  {% if item.dias <= 3 %}
                     <span class="badge badge-danger">{{ item.dias }} dias</span>
-                  {% elif item.dias <= 35 %}
+                  {% elif item.dias <= alerta_dias %}
                     <span class="badge badge-warning">{{ item.dias }} dias</span>
                   {% else %}
                     <span class="badge badge-success">{{ item.dias }} dias</span>

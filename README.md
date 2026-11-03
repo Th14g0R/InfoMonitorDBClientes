@@ -242,11 +242,11 @@ A página pública `/certificados` também está disponível nos menus de Servid
 Os oito subdomínios iniciais são cadastrados automaticamente na inicialização, sem substituir registros existentes.
 O Master pode adicionar subdomínios e verificar manualmente; outros usuários precisam da permissão **Certificados**, concedida em Gestão de Bancos.
 
-O agendador verifica todos os domingos às 00h no horário de Fortaleza.
+O agendador verifica todas as segundas e quintas às 00h no horário de Fortaleza.
 Falhas de consulta ou SMTP permitem nova tentativa na próxima verificação automática ou manual.
-Vencimentos em até 35 dias geram um e-mail agrupado para `atendimento@nossatelecom.com.br`,
+Vencimentos em até 7 dias geram um e-mail agrupado para `atendimento@nossatelecom.com.br`,
 com assunto **Certificado vencendo**, validade de cada subdomínio e assinatura **Suporte Infobrasil**.
-Um envio aceito pelo SMTP fica registrado; a mesma validade não gera alertas duplicados.
+Um envio aceito pelo SMTP fica registrado; a mesma validade não gera alertas duplicados, exceto se o aviso anterior foi enviado antes da janela de 7 dias.
 O registro confirma aceitação pelo SMTP, sem garantir leitura ou entrega na caixa de entrada.
 As configurações são as mesmas do CNAME: `SMTP_SERVER`, `SMTP_PORT`, `SMTP_USER` e `SMTP_PASS`.
 O serviço precisa permanecer ativo para executar a rotina; reinicie-o após aplicar esta atualização.

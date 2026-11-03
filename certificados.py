@@ -19,7 +19,7 @@ from flask import current_app, flash, jsonify, redirect, render_template, reques
 from seguranca import destino_redirect_seguro, registrar_acao_admin
 
 LOGGER = logging.getLogger(__name__)
-ALERTA_DIAS = 35
+ALERTA_DIAS = 7
 FUSO_LOCAL = ZoneInfo('America/Fortaleza')
 DOMINIOS = (
     'info-api', 'api-tray', 'api-oto', 'api-anotai',
@@ -125,14 +125,18 @@ class MonitorCertificados:
     def verificar(self, manual=False):
         instante = agora()
         local = instante.astimezone(FUSO_LOCAL)
-        semana = (local - timedelta(days=(local.weekday() + 1) % 7)).date().isoformat()
+        dia = local.weekday()
+        if dia < 3:
+            semana = (local - timedelta(days=dia)).date().isoformat()
+        else:
+            semana = (local - timedelta(days=dia - 3)).date().isoformat()
         with closing(self.conectar()) as conn, conn:
             conn.execute('BEGIN IMMEDIATE')
             rotina = conn.execute('SELECT * FROM certificados_rotina WHERE id=1').fetchone()
             if rotina['bloqueio_ate'] and rotina['bloqueio_ate'] > instante.isoformat():
                 return 'Uma verificação já está em andamento ou foi executada recentemente.'
             if not manual and rotina['semana'] == semana:
-                return 'Verificação semanal já concluída.'
+                return 'Verificação deste período já concluída.'
             conn.execute('UPDATE certificados_rotina SET bloqueio_ate=? WHERE id=1', ((instante + timedelta(minutes=30)).isoformat(),))
             dominios = conn.execute('SELECT dominio FROM certificados ORDER BY dominio').fetchall()
         concluida = False
@@ -150,9 +154,11 @@ class MonitorCertificados:
                     conn.execute('UPDATE certificados SET expira_em=COALESCE(?, expira_em), status=?, verificado_em=? WHERE dominio=?',
                                  (expira, status, agora().isoformat(), item['dominio']))
             with closing(self.conectar()) as conn:
+                limite_alerta = (agora() + timedelta(days=ALERTA_DIAS)).isoformat()
                 pendentes = conn.execute('''SELECT * FROM certificados WHERE expira_em IS NOT NULL
-                    AND expira_em <= ? AND (email_expiracao IS NULL OR email_expiracao != expira_em)''',
-                    ((agora() + timedelta(days=ALERTA_DIAS)).isoformat(),)).fetchall()
+                    AND expira_em <= ? AND (email_expiracao IS NULL OR email_expiracao != expira_em
+                    OR email_em IS NULL OR julianday(email_em) < julianday(expira_em) - ?)''',
+                    (limite_alerta, ALERTA_DIAS)).fetchall()
             resultado = 'Verificação concluída.'
             if pendentes:
                 enviado = False
@@ -303,5 +309,5 @@ def configurar_certificados(bp, conectar, tem_permissao, scheduler):
                 methods=['GET']
             )
 
-    scheduler.add_job(monitor.verificar, 'cron', day_of_week='sun', hour=0, minute=0, timezone='America/Fortaleza',
+    scheduler.add_job(monitor.verificar, 'cron', day_of_week='mon,thu', hour=0, minute=0, timezone='America/Fortaleza',
                       id='certificados_semanal', replace_existing=True, max_instances=1, coalesce=True)
