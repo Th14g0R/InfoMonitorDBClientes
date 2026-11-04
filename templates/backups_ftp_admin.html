@@ -1,0 +1,141 @@
+<!-- Modal de Gestão Administrativa de Backups FTP (Apenas Master) -->
+<div id="modal-backups-ftp-admin" class="ftp-admin-modal-overlay" style="display: none;" aria-hidden="true" role="dialog" aria-labelledby="ftp-modal-titulo">
+    <div class="ftp-admin-modal-card">
+        <div class="ftp-admin-modal-header">
+            <h3 id="ftp-modal-titulo" style="margin: 0; font-size: 1.15em; display: flex; align-items: center; gap: 8px;">
+                ⚙ Rotinas de Backup — <span id="ftp-modal-alias" style="color: var(--cor-primaria, #2563eb);"></span>
+            </h3>
+            <button type="button" class="ftp-admin-btn-close" id="btn-fechar-modal-ftp" aria-label="Fechar painel">&times;</button>
+        </div>
+
+        <!-- Seletor de Clientes (União do Feed + Banco SQLite) para Master navegar livremente -->
+        <div id="ftp-seletor-cliente-bloco" style="display: flex; gap: 8px; align-items: center; margin-bottom: 12px; padding: 6px 10px; background: var(--cor-fundo, #f8fafc); border: 1px solid var(--cor-borda, #e2e8f0); border-radius: 6px; flex-wrap: wrap;">
+            <label for="ftp-select-cliente" style="font-size: 0.82em; font-weight: 600; color: var(--cor-texto-suave, #64748b);">Cliente:</label>
+            <select id="ftp-select-cliente" class="ftp-input" style="flex: 1; min-width: 180px; padding: 4px 8px; font-size: 0.88em;"></select>
+            <button type="button" class="btn btn-sm" id="btn-novo-cliente-manual" title="Cadastrar rotina para outro cliente digitando o alias">➕ Outro Alias</button>
+        </div>
+
+        <div id="ftp-admin-alerta" style="display: none; padding: 10px 14px; margin-bottom: 12px; border-radius: 6px; font-size: 0.88em;"></div>
+
+        <!-- Visão 1: Listagem de Rotinas do Cliente -->
+        <div id="ftp-visao-rotinas">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                <span style="font-size: 0.88em; color: var(--cor-texto-suave, #64748b);">Processos e credenciais configurados para este cliente:</span>
+                <button type="button" class="btn btn-sm btn-disparo" id="btn-criar-nova-rotina">
+                    ➕ Nova Rotina
+                </button>
+            </div>
+            <div id="ftp-container-cards-rotinas" style="display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; padding-right: 4px;">
+                <!-- Carregado dinamicamente via backups_ftp_admin.js via DOM seguro (textContent) -->
+            </div>
+        </div>
+
+        <!-- Visão 2: Formulário de Criação/Edição de Rotina -->
+        <div id="ftp-visao-form-rotina" style="display: none;">
+            <h4 id="ftp-form-titulo" style="margin-top: 0; margin-bottom: 12px; font-size: 1em; color: var(--cor-texto, #1e293b);">Nova Rotina</h4>
+            <input type="hidden" id="ftp-rotina-id" value="">
+            <input type="hidden" id="ftp-rotina-revision" value="0">
+
+            <div class="ftp-form-grid">
+                <div>
+                    <label for="ftp-campo-nome">Nome da Rotina / Processo *</label>
+                    <input type="text" id="ftp-campo-nome" class="ftp-input" placeholder="Ex: FTP Principal Cobian" required>
+                </div>
+                <div>
+                    <label for="ftp-campo-servidor">Servidor / Host</label>
+                    <input type="text" id="ftp-campo-servidor" class="ftp-input" placeholder="Ex: ftp.cliente.com.br">
+                </div>
+                <div>
+                    <label for="ftp-campo-porta">Porta</label>
+                    <input type="text" id="ftp-campo-porta" class="ftp-input" placeholder="21" style="max-width: 90px;">
+                </div>
+                <div>
+                    <label for="ftp-campo-usuario">Usuário</label>
+                    <input type="text" id="ftp-campo-usuario" class="ftp-input" placeholder="Ex: backup_user">
+                </div>
+                <div class="ftp-campo-senha-bloco">
+                    <label for="ftp-campo-senha">Senha de Acesso (Nova Senha)</label>
+                    <div style="display: flex; gap: 6px; align-items: center;">
+                        <input type="password" id="ftp-campo-senha" class="ftp-input" placeholder="Deixe em branco para manter a atual" style="flex: 1;">
+                        <button type="button" class="btn btn-sm" id="btn-revelar-senha-form" title="Revelar senha atual (auditado)" style="display: none;">👁 Revelar</button>
+                        <button type="button" class="btn btn-sm" id="btn-copiar-senha-form" title="Copiar senha atual (auditado)" style="display: none;">📋 Copiar</button>
+                    </div>
+                    <!-- Span Read-Only isolado para visualização temporária da senha por 20s (NUNCA altera o input de nova senha) -->
+                    <div id="ftp-senha-revelada-box" style="display: none; margin-top: 6px; padding: 6px 10px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 4px; font-size: 0.85em; font-family: monospace;">
+                        <span style="color: var(--cor-texto-suave, #64748b); font-family: sans-serif; font-size: 0.8em; margin-right: 6px;">Senha Atual:</span>
+                        <strong id="ftp-senha-revelada-texto" style="color: var(--cor-primaria, #2563eb); user-select: all;"></strong>
+                    </div>
+                    <div id="ftp-senha-status-info" style="font-size: 0.78em; color: var(--cor-texto-suave, #64748b); margin-top: 4px;"></div>
+                    <label id="lbl-remover-senha" style="display: none; font-size: 0.82em; color: var(--cor-perigo, #dc2626); margin-top: 4px; cursor: pointer;">
+                        <input type="checkbox" id="ftp-chk-remover-senha"> Remover senha cadastrada
+                    </label>
+                </div>
+                <div>
+                    <label for="ftp-campo-responsavel">Responsável / Contato</label>
+                    <input type="text" id="ftp-campo-responsavel" class="ftp-input" placeholder="Ex: João TI Local">
+                </div>
+                <div>
+                    <label for="ftp-campo-lancamento">Data de Lançamento / Ativação</label>
+                    <input type="date" id="ftp-campo-lancamento" class="ftp-input">
+                </div>
+                <div style="grid-column: 1 / -1;">
+                    <label for="ftp-campo-notas">Notas / Observações Operacionais</label>
+                    <textarea id="ftp-campo-notas" class="ftp-input" rows="2" placeholder="Observações técnicas..."></textarea>
+                </div>
+            </div>
+
+            <!-- Campos Extras Chave/Valor Flexíveis -->
+            <div style="margin-top: 14px; border-top: 1px dashed var(--cor-borda, #e2e8f0); padding-top: 10px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <span style="font-size: 0.85em; font-weight: 600;">Campos Extras (Chave/Valor Privados):</span>
+                    <button type="button" class="btn btn-sm" id="btn-add-campo-extra" style="font-size: 0.78em;">➕ Adicionar Campo</button>
+                </div>
+                <div id="ftp-container-extras" style="display: flex; flex-direction: column; gap: 6px;"></div>
+            </div>
+
+            <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; border-top: 1px solid var(--cor-borda, #e2e8f0); padding-top: 12px;">
+                <button type="button" class="btn" id="btn-cancelar-form-rotina">Cancelar</button>
+                <button type="button" class="btn btn-disparo" id="btn-salvar-rotina">Salvar Rotina</button>
+            </div>
+        </div>
+
+        <!-- Visão 3: Painel de Listas Cobian (.list / .lst) -->
+        <div id="ftp-visao-listas-cobian" style="display: none; margin-top: 14px; border-top: 2px solid var(--cor-borda, #e2e8f0); padding-top: 14px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <h4 style="margin: 0; font-size: 0.95em;">📄 Listas de Tarefas Cobian (.list / .lst)</h4>
+                <button type="button" class="btn btn-sm" id="btn-fechar-visao-listas">Voltar para Rotinas</button>
+            </div>
+
+            <div id="ftp-upload-list-box" style="background: var(--cor-fundo, #f8fafc); border: 1px dashed var(--cor-borda, #e2e8f0); border-radius: 6px; padding: 12px; margin-bottom: 12px;">
+                <span style="font-size: 0.85em; font-weight: 600; display: block; margin-bottom: 6px;">Enviar Nova Versão (.list / .lst máx 2 MiB):</span>
+                <div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+                    <input type="file" id="ftp-input-arquivo-list" accept=".list,.lst" class="ftp-input" style="flex: 1; padding: 4px;">
+                    <input type="text" id="ftp-input-comentario-list" class="ftp-input" placeholder="Comentário da versão (opcional)" style="flex: 1;">
+                    <button type="button" class="btn btn-sm btn-disparo" id="btn-enviar-arquivo-list">Upload e Versionar</button>
+                </div>
+            </div>
+
+            <div id="ftp-tabela-versoes-container">
+                <!-- Tabela de até 10 versões recentes renderizada via textContent -->
+            </div>
+        </div>
+
+        <!-- Sub-Modal: Inspecionar Conteúdo de Versão Cobian (DOM-safe textContent) -->
+        <div id="modal-sub-ver-conteudo-list" class="ftp-submodal-overlay" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="submodal-list-titulo">
+            <div class="ftp-submodal-card">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <h4 id="submodal-list-titulo" style="margin: 0; font-size: 0.95em;">Conteúdo da Lista Cobian</h4>
+                    <button type="button" class="ftp-admin-btn-close" id="btn-fechar-submodal-conteudo">&times;</button>
+                </div>
+                <div id="ftp-aviso-submodal" style="font-size: 0.78em; color: var(--cor-texto-suave, #64748b); margin-bottom: 8px;">
+                    Visualização somente-leitura sanitizada. Download bruto desabilitado.
+                </div>
+                <pre id="ftp-pre-conteudo-list" class="ftp-codigo-pre"></pre>
+                <div style="text-align: right; margin-top: 10px;">
+                    <button type="button" class="btn btn-sm" id="btn-fechar-submodal-conteudo-rodape">Fechar Visualização</button>
+                </div>
+            </div>
+        </div>
+
+    </div>
+</div>

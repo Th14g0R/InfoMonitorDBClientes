@@ -1,0 +1,147 @@
+/* Estilos Administrativos de Backups FTP (Apenas Perfil Master) */
+
+.ftp-admin-modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(15, 23, 42, 0.65);
+    backdrop-filter: blur(2px);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 9999;
+    padding: 16px;
+    box-sizing: border-box;
+}
+
+.ftp-admin-modal-card {
+    background: var(--cor-superficie, #ffffff);
+    border: 1px solid var(--cor-borda, #e2e8f0);
+    border-radius: var(--raio, 8px);
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.2), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+    width: 100%;
+    max-width: 680px;
+    max-height: 90vh;
+    overflow-y: auto;
+    padding: 20px 24px;
+    box-sizing: border-box;
+    position: relative;
+}
+
+.ftp-admin-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--cor-borda, #e2e8f0);
+    padding-bottom: 12px;
+    margin-bottom: 16px;
+}
+
+.ftp-admin-btn-close {
+    background: transparent;
+    border: none;
+    font-size: 1.5em;
+    color: var(--cor-texto-suave, #64748b);
+    cursor: pointer;
+    line-height: 1;
+    padding: 0 4px;
+}
+.ftp-admin-btn-close:hover {
+    color: var(--cor-perigo, #dc2626);
+}
+
+.ftp-form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+@media (max-width: 580px) {
+    .ftp-form-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+.ftp-input {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--cor-borda, #cbd5e1);
+    border-radius: 6px;
+    font-size: 0.88em;
+    font-family: inherit;
+    box-sizing: border-box;
+    background: var(--cor-superficie, #ffffff);
+    color: var(--cor-texto, #1e293b);
+}
+.ftp-input:focus {
+    outline: none;
+    border-color: var(--cor-primaria, #2563eb);
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+
+.ftp-card-rotina {
+    background: var(--cor-fundo, #f8fafc);
+    border: 1px solid var(--cor-borda, #e2e8f0);
+    border-radius: 6px;
+    padding: 12px 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 10px;
+}
+
+.ftp-card-rotina-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.ftp-card-rotina-acoes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+
+.ftp-submodal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(15, 23, 42, 0.75);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 10000;
+    padding: 16px;
+    box-sizing: border-box;
+}
+
+.ftp-submodal-card {
+    background: #ffffff;
+    border-radius: 8px;
+    width: 100%;
+    max-width: 760px;
+    max-height: 85vh;
+    padding: 18px 20px;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+}
+
+.ftp-codigo-pre {
+    background: #0f172a;
+    color: #e2e8f0;
+    padding: 14px;
+    border-radius: 6px;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 0.82em;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-all;
+    overflow-y: auto;
+    flex: 1;
+    margin: 0;
+    max-height: 55vh;
+}

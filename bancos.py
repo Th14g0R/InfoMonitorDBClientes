@@ -1,4 +1,4 @@
-from flask import Blueprint, render_template, render_template_string, request, jsonify, session, redirect, url_for, flash, g, current_app
+from flask import Blueprint, render_template, render_template_string, request, jsonify, session, redirect, url_for, flash, g, current_app, make_response
 import paramiko
 import posixpath
 import shlex
@@ -104,6 +104,11 @@ PAGINAS_PUBLICAS = {
 def proteger_gestao():
     if request.endpoint in PAGINAS_PUBLICAS or g.get('usuario_atual'):
         return
+    if request.path.startswith('/admin/backups-ftp/') and request.endpoint != 'bancos.disparar_alerta_backups_manual':
+        resp = redirect(url_for('bancos.admin_login', next='/backups-ftp'))
+        resp.headers['Cache-Control'] = 'no-store, private'
+        resp.headers['Vary'] = 'Cookie'
+        return resp
     if request.is_json or request.path.startswith('/api/'):
         return jsonify(erro='Autenticação necessária.'), 401
     return redirect(url_for('bancos.admin_login', next=request.path))
@@ -1074,6 +1079,11 @@ scheduler.add_job(
     coalesce=True
 )
 configurar_certificados(bancos_bp, get_db_connection, tem_permissao, scheduler)
+try:
+    from backups_ftp_admin import configurar_backups_ftp_admin
+    configurar_backups_ftp_admin(bancos_bp, lambda: get_db_connection(), obter_status_backups_ftp)
+except Exception as _e_ftp_admin:
+    LOGGER.warning("Não foi possível inicializar backups_ftp_admin: %s", _e_ftp_admin)
 scheduler.start()
 
 def calcular_runway_disco(servidor, tamanho_gb_atual, capacidade_total_gb=100):
@@ -6603,6 +6613,10 @@ HTML_BACKUPS_FTP = """
 <head>
     <meta charset="UTF-8">
     <title>Status de Backups FTP</title>
+    {% if eh_master %}
+    <link rel="stylesheet" href="{{ url_for('static', filename='backups_ftp_admin.css') }}">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    {% endif %}
     <style>
         :root {
             --cor-primaria: #2563eb; --cor-texto: #1e293b; --cor-texto-suave: #64748b;
@@ -6762,6 +6776,11 @@ HTML_BACKUPS_FTP = """
             <a href="/backups-ftp?filtro=ok" class="btn {% if filtro == 'ok' %}ativo{% endif %}">✅ OK</a>
             <a href="/backups-ftp?filtro=atrasado" class="btn {% if filtro == 'atrasado' %}ativo{% endif %}">🕒 Atrasados</a>
             <a href="/backups-ftp?filtro=sem_arquivo" class="btn {% if filtro == 'sem_arquivo' %}ativo{% endif %}">❌ Sem arquivo</a>
+            {% if eh_master %}
+            <button type="button" class="btn btn-disparo btn-gerenciar-ftp" data-alias="" style="margin-left: auto;">
+                ⚙ Painel de Rotinas Privadas
+            </button>
+            {% endif %}
         </div>
 
         <div class="grid-clientes">
@@ -6781,6 +6800,13 @@ HTML_BACKUPS_FTP = """
                         {% elif c.status == 'SEM_ARQUIVO' %}❌ Sem arquivo
                         {% else %}❌ Erro{% endif %}
                     </span>
+                    {% if eh_master %}
+                    <div style="margin-top: 8px; border-top: 1px dashed var(--cor-borda); padding-top: 6px;">
+                        <button type="button" class="btn btn-sm btn-gerenciar-ftp" data-alias="{{ c.alias }}" style="width: 100%; justify-content: center; font-size: 0.78em; padding: 4px 8px;">
+                            ⚙ Gerenciar Rotinas
+                        </button>
+                    </div>
+                    {% endif %}
                 </div>
             {% else %}
                 <p style="color: var(--cor-texto-suave);">Nenhum cliente encontrado para este filtro.</p>
@@ -6849,6 +6875,10 @@ HTML_BACKUPS_FTP = """
             {% endif %}
         </div>
     {% endif %}
+    {% if eh_master %}
+    {% include 'backups_ftp_admin.html' %}
+    <script src="{{ url_for('static', filename='backups_ftp_admin.js') }}"></script>
+    {% endif %}
 </body>
 </html>
 """
@@ -6892,8 +6922,9 @@ def exibir_backups_ftp():
     clientes = sorted(clientes, key=lambda c: c['alias'].lower())
 
     pode_disparar = bool(session.get('logged_in') and (session.get('eh_master') or tem_permissao('perm_servidores')))
+    eh_master = bool(session.get('logged_in') and session.get('eh_master'))
 
-    return render_template_string(
+    html = render_template_string(
         HTML_BACKUPS_FTP,
         status=status,
         clientes=clientes,
@@ -6902,10 +6933,19 @@ def exibir_backups_ftp():
         historico_emails=historico_emails,
         analise=analise,
         pode_disparar=pode_disparar,
+        eh_master=eh_master,
         horario_alerta=obter_horario_agendado_alerta_backups(),
         msg_sucesso=msg_sucesso,
         msg_erro=msg_erro
     )
+
+    if eh_master:
+        resp = make_response(html)
+        resp.headers['Cache-Control'] = 'no-store, private'
+        resp.headers['Vary'] = 'Cookie'
+        return resp
+
+    return html
 
 
 @bancos_bp.route('/admin/backups-ftp/disparar-alerta', methods=['POST'])

@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mockup Estático — Backups FTP com Card Admin</title>
+    <style>
+        :root {
+            --cor-primaria: #2563eb;
+            --cor-texto: #1e293b;
+            --cor-texto-suave: #64748b;
+            --cor-fundo: #f8fafc;
+            --cor-superficie: #ffffff;
+            --cor-borda: #e2e8f0;
+            --cor-sucesso: #16a34a;
+            --cor-aviso: #d97706;
+            --cor-perigo: #dc2626;
+            --raio: 8px;
+            --raio-sm: 4px;
+        }
+        * { box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: var(--cor-fundo);
+            color: var(--cor-texto);
+            margin: 0;
+            padding: 24px;
+        }
+        .container { max-width: 960px; margin: 0 auto; }
+        .banner-mockup {
+            background: #eff6ff;
+            border: 1px solid #bfdbfe;
+            color: #1e40af;
+            padding: 12px 16px;
+            border-radius: var(--raio);
+            margin-bottom: 20px;
+            font-size: 0.88rem;
+        }
+        .topo {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 12px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            border-radius: var(--raio-sm);
+            border: 1px solid var(--cor-borda);
+            background: #ffffff;
+            color: var(--cor-texto);
+            cursor: pointer;
+            text-decoration: none;
+        }
+        .btn[disabled] { opacity: 0.6; cursor: not-allowed; }
+        .btn-primary { background: var(--cor-primaria); color: #ffffff; border-color: var(--cor-primaria); }
+        .card-cliente {
+            background: var(--cor-superficie);
+            border: 1px solid var(--cor-borda);
+            border-left: 4px solid var(--cor-sucesso);
+            border-radius: var(--raio);
+            padding: 16px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+            max-width: 480px;
+        }
+        .card-header-flex {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+        }
+        .alias { font-weight: 700; font-size: 1.05rem; }
+        .info { color: var(--cor-texto-suave); font-size: 0.85rem; margin-top: 4px; }
+        .btn-icon {
+            background: #fffbeb;
+            color: #b45309;
+            border: 1px solid #fde68a;
+            border-radius: var(--raio-sm);
+            width: 28px;
+            height: 28px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            padding: 0;
+        }
+        .badge-status {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 0.72em;
+            font-weight: 700;
+            margin-top: 8px;
+            background: #f0fdf4;
+            color: #166534;
+        }
+        .secao-privada-card {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px dashed var(--cor-borda);
+            background: #fcfdfe;
+            border-radius: var(--raio-sm);
+            padding: 8px 10px;
+            font-size: 0.82rem;
+        }
+        .rotina-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 4px 0;
+            border-bottom: 1px dotted var(--cor-borda);
+        }
+        .rotina-item:last-child { border-bottom: none; }
+        .tag-privada {
+            font-size: 0.72em;
+            background: #f1f5f9;
+            color: var(--cor-texto-suave);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: monospace;
+        }
+        .modal-estatico {
+            background: var(--cor-superficie);
+            border: 1px solid var(--cor-borda);
+            border-radius: var(--raio);
+            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+            margin-top: 24px;
+            overflow: hidden;
+            max-width: 620px;
+        }
+        .modal-header {
+            padding: 12px 18px;
+            background: var(--cor-fundo);
+            border-bottom: 1px solid var(--cor-borda);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .modal-title { margin: 0; font-size: 0.95rem; font-weight: 600; }
+        .modal-body { padding: 16px 18px; display: grid; gap: 12px; font-size: 0.85rem; }
+        .campo-linha { display: grid; grid-template-columns: 160px 1fr; gap: 10px; align-items: flex-start; }
+        .campo-label { font-weight: 500; font-size: 0.82rem; margin-top: 6px; }
+        .badge-hipotese {
+            font-size: 0.68em;
+            background: #fef3c7;
+            color: #92400e;
+            padding: 1px 5px;
+            border-radius: 3px;
+            font-weight: 600;
+            display: inline-block;
+            margin-left: 4px;
+        }
+        .input-mockup {
+            padding: 6px 10px;
+            border: 1px solid var(--cor-borda);
+            border-radius: var(--raio-sm);
+            font-size: 0.85rem;
+            color: var(--cor-texto);
+            background: #ffffff;
+            width: 100%;
+        }
+        .input-mockup[disabled] { background: #f8fafc; color: var(--cor-texto-suave); }
+        .modal-footer {
+            padding: 10px 18px;
+            border-top: 1px solid var(--cor-borda);
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="banner-mockup">
+            <strong>📐 Mockup Estático (Dados 100% Fictícios — Sem JS / Sem Backend):</strong>
+            Ilustra o card enriquecido com painel administrativo sob demanda, controles com ações de Revelar/Copiar (desabilitadas), campos rotulados como hipóteses e gestão de versões de arquivos Cobian <code>.list</code>.
+        </div>
+
+        <div class="topo">
+            <h2>💽 Status de Backups FTP (Visão Admin)</h2>
+            <button class="btn" disabled>⚡ Disparar Alerta Agora</button>
+        </div>
+
+        <!-- Exemplo de Card Admin Único -->
+        <div class="card-cliente">
+            <div class="card-header-flex">
+                <div>
+                    <div class="alias">CLIENTE-EXEMPLO-MATRIZ</div>
+                    <div class="info">🕒 2026-11-04 03:15 (há 9 horas) • 📁 /bkp/matriz.fbk</div>
+                </div>
+                <button type="button" class="btn-icon" title="Editar dados e rotinas do cliente" disabled>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                    </svg>
+                </button>
+            </div>
+            <span class="badge-status">✅ Em dia</span>
+
+            <!-- Painel Administrativo do Card (Carregado sob demanda via /admin/backups-ftp/...) -->
+            <div class="secao-privada-card">
+                <div style="font-weight: 600; margin-bottom: 6px; color: var(--cor-texto-suave);">Rotinas e Credenciais de Acesso (Múltiplos Processos):</div>
+                <div class="rotina-item">
+                    <span><strong>Rotina 1 (FTP Principal):</strong> <code>srv-ftp01.local:21</code> (usr: <code>bkp_matriz</code> • senha: <code>••••••••</code>)</span>
+                    <span class="tag-privada">Cobian: tarefas_matriz.list (v3)</span>
+                </div>
+                <div class="rotina-item">
+                    <span><strong>Rotina 2 (Storage Secundário):</strong> <code>192.168.10.50</code> (usr: <code>operador_sec</code> • senha: <code>••••••••</code>)</span>
+                    <span class="tag-privada">Cobian: espelho_banco.list (v1)</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Modelo Estático do Modal de Edição -->
+        <div class="modal-estatico">
+            <div class="modal-header">
+                <h4 class="modal-title">⚙️ Gestão de Credenciais e Rotinas — CLIENTE-EXEMPLO-MATRIZ</h4>
+                <span style="color: var(--cor-texto-suave); font-weight: bold; cursor: default;">✕</span>
+            </div>
+            <div class="modal-body">
+                <div class="campo-linha">
+                    <label class="campo-label">Alias do Cliente:</label>
+                    <input type="text" class="input-mockup" value="CLIENTE-EXEMPLO-MATRIZ" disabled>
+                </div>
+                <div class="campo-linha">
+                    <label class="campo-label">Rótulo / Processo:</label>
+                    <input type="text" class="input-mockup" value="Rotina 1 (FTP Principal)" disabled>
+                </div>
+                <div class="campo-linha">
+                    <label class="campo-label">Host / Endpoint <span class="badge-hipotese">Hipótese</span>:</label>
+                    <input type="text" class="input-mockup" value="srv-ftp01.local" disabled>
+                </div>
+                <div class="campo-linha">
+                    <label class="campo-label">Porta / Protocolo <span class="badge-hipotese">Hipótese</span>:</label>
+                    <input type="text" class="input-mockup" value="21 (FTP)" disabled>
+                </div>
+                <div class="campo-linha">
+                    <label class="campo-label">Usuário de Acesso <span class="badge-hipotese">Hipótese</span>:</label>
+                    <input type="text" class="input-mockup" value="bkp_matriz" disabled>
+                </div>
+                <div class="campo-linha">
+                    <label class="campo-label">Senha de Acesso:</label>
+                    <div style="display: flex; gap: 6px; width: 100%;">
+                        <input type="text" class="input-mockup" value="••••••••" disabled>
+                        <button class="btn" title="Exibe senha temporariamente via textContent" disabled>👁️ Revelar</button>
+                        <button class="btn" title="Copia senha para o clipboard via auditoria" disabled>📋 Copiar</button>
+                    </div>
+                </div>
+                <div class="campo-linha">
+                    <label class="campo-label">Observações / Notas:</label>
+                    <textarea class="input-mockup" rows="2" style="resize: none;" disabled placeholder="Notas operacionais sobre a rotina (Criptografadas em repouso)">Rotina configurada pelo suporte em 10/2026. Backup diário às 02:00.</textarea>
+                </div>
+                <div class="campo-linha">
+                    <label class="campo-label">Campos Flexíveis (JSON):</label>
+                    <div style="font-size: 0.8rem; background: #f8fafc; border: 1px solid var(--cor-borda); border-radius: var(--raio-sm); padding: 8px 10px; width: 100%;">
+                        <div style="color: var(--cor-texto-suave); margin-bottom: 4px;">Atributos extras mapeados da planilha (dispensam DDL):</div>
+                        <div>• <code>tipo_conexao</code>: <strong>"Passivo"</strong> (Criptografado)</div>
+                        <div>• <code>diretorio_remoto</code>: <strong>"/backups/diario"</strong> (Criptografado)</div>
+                        <div>• <code>notificar_erro</code>: <strong>"suporte@empresa.com.br"</strong> (Criptografado)</div>
+                    </div>
+                </div>
+                <div class="campo-linha">
+                    <label class="campo-label">Lista Cobian (.list):</label>
+                    <div style="display: grid; gap: 8px; width: 100%;">
+                        <div style="display: flex; gap: 6px; align-items: center;">
+                            <input type="file" class="input-mockup" style="font-size: 0.78rem;" disabled>
+                            <button class="btn" disabled>Upload .list</button>
+                        </div>
+                        <div style="font-size: 0.78rem; color: var(--cor-texto-suave); background: #fcfdfe; border: 1px dotted var(--cor-borda); padding: 6px 8px; border-radius: var(--raio-sm);">
+                            <div><strong>Versão Ativa:</strong> <code>tarefas_matriz.list</code> (v3 • 42 KB • UTF-16LE • SHA-256 verificado • enviado por: thiago em 04/11/2026)</div>
+                            <div style="margin-top: 4px;">
+                                <button type="button" disabled style="color: var(--cor-primaria);">📜 Inspecionar tarefas (auditado)</button>
+                                <button type="button" disabled style="color: var(--cor-texto-suave);">Ver histórico (3 versões anteriores)</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" disabled>Cancelar</button>
+                <button class="btn btn-primary" disabled>Salvar Alterações</button>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

@@ -43,6 +43,16 @@ nssm.exe
 servico-saida.log
 servico-erro.log
 *.log
+# Backups, uploads e segredos de tempo de execução
+backups/
+uploads/
+runtimeprivado/
+runtime_privado/
+dataprivada/
+data_privada/
+secrets/
+*.lst
+*.list
 *.bak
 *.zip
 *.7z
