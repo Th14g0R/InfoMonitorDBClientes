@@ -181,3 +181,35 @@
     cursor: pointer;
     margin: 0;
 }
+
+/* Grid de Detalhes da Rotina no Card */
+.ftp-rotina-detalhes-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 8px 14px;
+    margin: 10px 0;
+    font-size: 0.84em;
+}
+
+.ftp-rotina-detalhes-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.ftp-rotina-detalhes-item .rotulo {
+    font-weight: 600;
+    color: var(--cor-texto-suave, #64748b);
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+}
+
+.ftp-rotina-detalhes-item .valor {
+    color: var(--cor-texto, #1e293b);
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}

@@ -387,7 +387,9 @@
                 spanRot.textContent = rotulo;
                 const spanVal = document.createElement('span');
                 spanVal.className = 'valor';
-                spanVal.textContent = valor || '—';
+                spanVal.textContent = (valor !== undefined && valor !== null && String(valor).trim() !== '')
+                    ? String(valor)
+                    : (valor === 0 || valor === '0' ? '0' : '—');
                 item.appendChild(spanRot);
                 item.appendChild(spanVal);
                 grid.appendChild(item);
@@ -397,6 +399,26 @@
             addCampo('Usuário:', rotina.usuario || '—');
             addCampo('Responsável:', rotina.responsavel || '—');
             addCampo('Lançamento:', rotina.lancamento_em || '—');
+
+            // Campos Extras diretamente no grid via addCampo
+            const mapaSensiveis = rotina.extras_sensiveis || {};
+            const dadosExtrasObj = rotina.dados_extras || {};
+            const chavesExtras = (Array.isArray(rotina.extras_configurados) && rotina.extras_configurados.length > 0)
+                ? rotina.extras_configurados
+                : Object.keys(dadosExtrasObj);
+
+            chavesExtras.forEach(ch => {
+                const ehSensivel = (typeof mapaSensiveis[ch] === 'boolean') ? mapaSensiveis[ch] : true;
+                if (ehSensivel) {
+                    addCampo(`${ch}:`, '•••••••• (Confidencial)');
+                } else {
+                    const valClaro = dadosExtrasObj[ch];
+                    const valFormatado = (valClaro !== undefined && valClaro !== null && String(valClaro).trim() !== '')
+                        ? String(valClaro)
+                        : (valClaro === 0 || valClaro === '0' ? '0' : '—');
+                    addCampo(`${ch}:`, valFormatado);
+                }
+            });
 
             card.appendChild(grid);
 
