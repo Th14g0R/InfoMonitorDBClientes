@@ -69,8 +69,9 @@ class BackupsFtpAdminWebIntegrationTest(unittest.TestCase):
         # 5. Importa seguranca e backups_ftp_admin
         import seguranca
         cls.seguranca_mod = seguranca
-        from backups_ftp_admin import configurar_backups_ftp_admin
+        from backups_ftp_admin import configurar_backups_ftp_admin, cifrar_dado
         cls.configurar_backups_ftp_admin = configurar_backups_ftp_admin
+        cls.cifrar_dado = cifrar_dado
 
         # 6. Inicializa o banco de dados do sistema no DATA_DIR temporário
         cls.bancos_mod.init_db_sistema()
@@ -340,6 +341,7 @@ class BackupsFtpAdminWebIntegrationTest(unittest.TestCase):
             'lancamento_em': '2026-11-04',
             'notas': 'Rotina noturna às 23h',
             'dados_extras': {'pasta_remota': '/backups/cobian', 'timeout': '60'},
+            'extras_sensiveis': {'pasta_remota': True, 'timeout': False},
             'status': 1
         }
         resp_cria = self.client.post(
@@ -369,6 +371,9 @@ class BackupsFtpAdminWebIntegrationTest(unittest.TestCase):
         self.assertNotIn('senha', r)
         self.assertIn('pasta_remota', r['dados_extras'])
         self.assertIsNone(r['dados_extras']['pasta_remota'])
+        self.assertEqual(r['dados_extras']['timeout'], '60')
+        self.assertTrue(r['extras_sensiveis']['pasta_remota'])
+        self.assertFalse(r['extras_sensiveis']['timeout'])
 
         # 3. Atualização com revision válida (1 -> 2) e preservação de extra via null
         payload_update = {
@@ -380,7 +385,8 @@ class BackupsFtpAdminWebIntegrationTest(unittest.TestCase):
             'responsavel': 'Carlos TI',
             'lancamento_em': '2026-11-05',
             'notas': 'Rotina alterada para as 01h',
-            'dados_extras': {'pasta_remota': None, 'novo_extra': 'valor_novo'}
+            'dados_extras': {'pasta_remota': None, 'novo_extra': 'valor_novo'},
+            'extras_sensiveis': {'pasta_remota': True, 'novo_extra': False}
         }
         resp_up = self.client.put(
             f'/admin/backups-ftp/rotina/{rotina_id}',
@@ -825,6 +831,154 @@ class BackupsFtpAdminWebIntegrationTest(unittest.TestCase):
             self.assertEqual(rotina_depois['revision'], rev_ini)
         finally:
             conn.close()
+
+    # -------------------------------------------------------------------------
+    # Cenário 10: Checkbox Confidencial por Campo Extra (Toggles e Legado)
+    # -------------------------------------------------------------------------
+
+    def test_checkbox_confidencial_extras_toggles_e_legado(self):
+        """
+        Valida ciclo de vida do checkbox Confidencial em extras:
+        1. Criação com campos confidenciais (mascarados como None) e não-confidenciais (texto claro).
+        2. Toggle Confidencial -> Não-Confidencial com envio de null preserva o valor no banco e passa a exibi-lo em claro.
+        3. Registro de auditoria com acao='alterar_sensibilidade_extra'.
+        4. Toggle Não-Confidencial -> Confidencial com envio de null preserva o valor e reativa máscara / revelação auditada.
+        5. Formato legado sem flag de sensibilidade interpretado estritamente como sensivel=True.
+        """
+        self._login_master()
+        csrf = self._obter_csrf()
+
+        # 1. Criação com 1 campo confidencial e 1 não-confidencial
+        payload_cria = {
+            'cliente_alias': 'CLIENTE-ALFA',
+            'nome_rotina': 'Rotina Extras Hibridos',
+            'dados_extras': {
+                'token_secreto': 'SenhaSuperPrivada#99',
+                'pasta_destino': '/backups/publico'
+            },
+            'extras_sensiveis': {
+                'token_secreto': True,
+                'pasta_destino': False
+            }
+        }
+        resp_cria = self.client.post('/admin/backups-ftp/rotina', json=payload_cria, headers={'X-CSRF-Token': csrf})
+        self.assertEqual(resp_cria.status_code, 201)
+        data_cria = resp_cria.get_json()['rotina']
+        rotina_id = data_cria['id']
+        rev = data_cria['revision']
+
+        # Listagem inicial: confidencial vem None, não-confidencial vem valor claro
+        resp_list1 = self.client.get('/admin/backups-ftp/cliente/CLIENTE-ALFA/rotinas')
+        rot1 = [r for r in resp_list1.get_json()['rotinas'] if r['id'] == rotina_id][0]
+        self.assertIsNone(rot1['dados_extras']['token_secreto'])
+        self.assertEqual(rot1['dados_extras']['pasta_destino'], '/backups/publico')
+        self.assertTrue(rot1['extras_sensiveis']['token_secreto'])
+        self.assertFalse(rot1['extras_sensiveis']['pasta_destino'])
+
+        # 2. Toggle Confidencial -> Não-Confidencial:
+        # Envia null para token_secreto (preservando o valor já salvo) e extras_sensiveis=False
+        payload_toggle1 = {
+            'expected_revision': rev,
+            'nome_rotina': 'Rotina Extras Hibridos',
+            'dados_extras': {
+                'token_secreto': None,
+                'pasta_destino': '/backups/publico'
+            },
+            'extras_sensiveis': {
+                'token_secreto': False,
+                'pasta_destino': False
+            }
+        }
+        resp_toggle1 = self.client.put(f'/admin/backups-ftp/rotina/{rotina_id}', json=payload_toggle1, headers={'X-CSRF-Token': csrf})
+        self.assertEqual(resp_toggle1.status_code, 200)
+        rot_up1 = resp_toggle1.get_json()['rotina']
+        rev = rot_up1['revision']
+
+        # Agora token_secreto é retornado em texto claro com o valor original preservado!
+        self.assertEqual(rot_up1['dados_extras']['token_secreto'], 'SenhaSuperPrivada#99')
+        self.assertFalse(rot_up1['extras_sensiveis']['token_secreto'])
+
+        # Comprova auditoria de alteração de sensibilidade no SQLite
+        conn = self.bancos_mod.get_db_connection()
+        try:
+            audit_sens = conn.execute("""
+                SELECT * FROM backups_ftp_auditoria
+                WHERE rotina_id = ? AND acao = 'alterar_sensibilidade_extra'
+            """, (rotina_id,)).fetchall()
+            self.assertGreaterEqual(len(audit_sens), 1)
+            self.assertEqual(audit_sens[0]['campo_ou_segredo'], 'campo_extra')
+        finally:
+            conn.close()
+
+        # 3. Toggle Não-Confidencial -> Confidencial:
+        # pasta_destino passa a ser confidencial, enviando null para preservar valor
+        payload_toggle2 = {
+            'expected_revision': rev,
+            'nome_rotina': 'Rotina Extras Hibridos',
+            'dados_extras': {
+                'token_secreto': 'SenhaSuperPrivada#99',
+                'pasta_destino': None
+            },
+            'extras_sensiveis': {
+                'token_secreto': False,
+                'pasta_destino': True
+            }
+        }
+        resp_toggle2 = self.client.put(f'/admin/backups-ftp/rotina/{rotina_id}', json=payload_toggle2, headers={'X-CSRF-Token': csrf})
+        self.assertEqual(resp_toggle2.status_code, 200)
+        rot_up2 = resp_toggle2.get_json()['rotina']
+        self.assertIsNone(rot_up2['dados_extras']['pasta_destino'])
+        self.assertTrue(rot_up2['extras_sensiveis']['pasta_destino'])
+
+        # Revelação auditada recupera o valor preservado
+        resp_rev_pasta = self.client.post(
+            f'/admin/backups-ftp/rotina/{rotina_id}/revelar-extra',
+            json={'chave': 'pasta_destino'},
+            headers={'X-CSRF-Token': csrf}
+        )
+        self.assertEqual(resp_rev_pasta.status_code, 200)
+        self.assertEqual(resp_rev_pasta.get_json()['valor'], '/backups/publico')
+
+        # 4. Compatibilidade com Formato Legado (JSON simples sem estrutura de sensibilidade)
+        from backups_ftp_admin import cifrar_dado
+        conn = self.bancos_mod.get_db_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO backups_ftp_rotinas (
+                    cliente_alias, status, revision, criado_em, atualizado_em, atualizado_por
+                ) VALUES (?, 1, 1, '2026-11-05T10:00:00Z', '2026-11-05T10:00:00Z', 'master')
+            """, ('CLIENTE-ALFA',))
+            legada_id = cursor.lastrowid
+            cursor.execute("""
+                UPDATE backups_ftp_rotinas SET
+                    nome_rotina_cifrado = ?,
+                    dados_extras_json_cifrado = ?
+                WHERE id = ?
+            """, (
+                cifrar_dado('Rotina Legada Puro', f"rotina:{legada_id}:nome"),
+                cifrar_dado(json.dumps({'segredo_legado': 'ValorAntigo123'}), f"rotina:{legada_id}:extras"),
+                legada_id
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
+        resp_leg = self.client.get('/admin/backups-ftp/cliente/CLIENTE-ALFA/rotinas')
+        rot_leg = [r for r in resp_leg.get_json()['rotinas'] if r['id'] == legada_id][0]
+        # Campo legado é considerado sensível por default de segurança
+        self.assertIn('segredo_legado', rot_leg['extras_configurados'])
+        self.assertTrue(rot_leg['extras_sensiveis']['segredo_legado'])
+        self.assertIsNone(rot_leg['dados_extras']['segredo_legado'])
+
+        # Revelação do campo legado funciona perfeitamente
+        resp_rev_leg = self.client.post(
+            f'/admin/backups-ftp/rotina/{legada_id}/revelar-extra',
+            json={'chave': 'segredo_legado'},
+            headers={'X-CSRF-Token': csrf}
+        )
+        self.assertEqual(resp_rev_leg.status_code, 200)
+        self.assertEqual(resp_rev_leg.get_json()['valor'], 'ValorAntigo123')
 
 
 if __name__ == '__main__':

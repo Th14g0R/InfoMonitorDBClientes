@@ -204,6 +204,7 @@ class BackupsFtpAdminTest(unittest.TestCase):
             'lancamento_em': '2026-11-04',
             'notas': 'Rotina diária madrugada',
             'dados_extras': {'tipo_conexao': 'Passivo', 'token_api': 'tok_segredo_xyz'},
+            'extras_sensiveis': {'tipo_conexao': False, 'token_api': True},
             'status': 1
         }
 
@@ -214,18 +215,20 @@ class BackupsFtpAdminTest(unittest.TestCase):
         rotina_id = data_post['rotina']['id']
         self.assertEqual(data_post['rotina']['lancamento_em'], '2026-11-04')
 
-        # Máscara de extras: valores nunca são ecoados
-        self.assertEqual(data_post['rotina']['dados_extras'], {'tipo_conexao': None, 'token_api': None})
+        # Máscara de extras: valor confidencial é mascarado como None, não-confidencial retorna valor real
+        self.assertEqual(data_post['rotina']['dados_extras'], {'tipo_conexao': 'Passivo', 'token_api': None})
+        self.assertEqual(data_post['rotina']['extras_sensiveis'], {'tipo_conexao': False, 'token_api': True})
         self.assertEqual(sorted(data_post['rotina']['extras_configurados']), ['tipo_conexao', 'token_api'])
         self.assertNotIn('tok_segredo_xyz', json.dumps(data_post))
 
-        # Consulta listagem: valores reais também nunca são entregues
+        # Consulta listagem: valor confidencial permanece protegido como None
         resp_get = self.client.get('/admin/backups-ftp/cliente/CLIENTE-ALFA/rotinas')
         self.assertEqual(resp_get.status_code, 200)
         data_get = resp_get.get_json()
         r = data_get['rotinas'][0]
         self.assertEqual(r['lancamento_em'], '2026-11-04')
-        self.assertEqual(r['dados_extras'], {'tipo_conexao': None, 'token_api': None})
+        self.assertEqual(r['dados_extras'], {'tipo_conexao': 'Passivo', 'token_api': None})
+        self.assertEqual(r['extras_sensiveis'], {'tipo_conexao': False, 'token_api': True})
         self.assertEqual(sorted(r['extras_configurados']), ['tipo_conexao', 'token_api'])
         self.assertNotIn('tok_segredo_xyz', json.dumps(data_get))
 
@@ -642,6 +645,347 @@ class BackupsFtpAdminTest(unittest.TestCase):
             'cliente_alias': 12345
         })
         self.assertEqual(resp_bad_alias.status_code, 400)
+
+    # -------------------------------------------------------------
+    # 7. Checkbox Confidencial, Legado e Toggle em Ambos Sentidos
+    # -------------------------------------------------------------
+    def test_extras_confidencial_novo_campo_default_nao_sensivel(self):
+        """Novo campo de dados_extras tem default sensivel=False caso extras_sensiveis não seja enviado."""
+        self._login_master()
+
+        resp_post = self.client.post('/admin/backups-ftp/rotina', json={
+            'cliente_alias': 'CLIENTE-NOVOS-EXTRAS',
+            'nome_rotina': 'FTP Teste Novos Campos',
+            'dados_extras': {'porta_ssh': '2222', 'param_aberto': 'valor_visivel'}
+        })
+        self.assertEqual(resp_post.status_code, 201)
+        r = resp_post.get_json()['rotina']
+
+        # Default é sensivel=False para ambos os campos
+        self.assertEqual(r['extras_sensiveis'], {'porta_ssh': False, 'param_aberto': False})
+        self.assertEqual(r['dados_extras'], {'porta_ssh': '2222', 'param_aberto': 'valor_visivel'})
+        self.assertEqual(sorted(r['extras_configurados']), ['param_aberto', 'porta_ssh'])
+
+        # Na consulta GET, os valores não-sensíveis permanecem disponíveis em texto claro
+        resp_get = self.client.get('/admin/backups-ftp/cliente/CLIENTE-NOVOS-EXTRAS/rotinas')
+        self.assertEqual(resp_get.status_code, 200)
+        r_get = resp_get.get_json()['rotinas'][0]
+        self.assertEqual(r_get['dados_extras'], {'porta_ssh': '2222', 'param_aberto': 'valor_visivel'})
+        self.assertEqual(r_get['extras_sensiveis'], {'porta_ssh': False, 'param_aberto': False})
+
+    def test_extras_retrocompatibilidade_legado_sem_atributo_sempre_sensivel(self):
+        """Extras em formato legado ({chave: valor}) no banco são interpretados como sensivel=True."""
+        from backups_ftp_admin import cifrar_dado
+
+        self._login_master()
+
+        # Inserção direta simulando registro legado gravado no banco antes da feature de confidencialidade
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO backups_ftp_rotinas (
+                cliente_alias, status, revision, criado_em, atualizado_em, atualizado_por
+            ) VALUES ('CLIENTE-LEGADO', 1, 1, '2026-11-04T10:00:00Z', '2026-11-04T10:00:00Z', 'master')
+        """)
+        rid = cursor.lastrowid
+
+        payload_legado = {'token_legado': 'segredo_super_antigo', 'proxy_auth': 'usr:pwd'}
+        cifrado_legado = cifrar_dado(json.dumps(payload_legado), f"rotina:{rid}:extras")
+        cursor.execute("UPDATE backups_ftp_rotinas SET dados_extras_json_cifrado = ? WHERE id = ?", (cifrado_legado, rid))
+        self.conn.commit()
+
+        # Consulta listagem: chaves legadas devem ser interpretadas como sensivel=True e mascaradas com None
+        resp_get = self.client.get('/admin/backups-ftp/cliente/CLIENTE-LEGADO/rotinas')
+        self.assertEqual(resp_get.status_code, 200)
+        r = resp_get.get_json()['rotinas'][0]
+        self.assertEqual(r['extras_sensiveis'], {'token_legado': True, 'proxy_auth': True})
+        self.assertEqual(r['dados_extras'], {'token_legado': None, 'proxy_auth': None})
+        self.assertEqual(sorted(r['extras_configurados']), ['proxy_auth', 'token_legado'])
+
+        # Revelação do campo legado funciona perfeitamente
+        resp_rev = self.client.post(f'/admin/backups-ftp/rotina/{rid}/revelar-extra', json={'chave': 'token_legado'})
+        self.assertEqual(resp_rev.status_code, 200)
+        self.assertEqual(resp_rev.get_json()['valor'], 'segredo_super_antigo')
+
+    def test_extras_toggle_sensibilidade_ambos_sentidos_preserva_valor_e_audita(self):
+        """
+        Alternar sensibilidade (True <-> False) preserva o valor atual mesmo com input None/mascarado
+        e gera registro na auditoria (alterar_sensibilidade_extra) sem vazar a chave ou valor.
+        """
+        self._login_master()
+
+        # 1. Cria rotina com campo confidencial (sensivel=True) e campo não-confidencial (sensivel=False)
+        resp_post = self.client.post('/admin/backups-ftp/rotina', json={
+            'cliente_alias': 'CLIENTE-TOGGLE',
+            'nome_rotina': 'Rotina Toggle',
+            'dados_extras': {'token_api': 'meu_token_secreto', 'host_destino': 'backup.lan'},
+            'extras_sensiveis': {'token_api': True, 'host_destino': False}
+        })
+        self.assertEqual(resp_post.status_code, 201)
+        rid = resp_post.get_json()['rotina']['id']
+
+        # -------------------------------------------------------------------
+        # Sentido A: Confidencial -> Não-Confidencial (True -> False)
+        # O operador envia token_api mascarado como None, mas com sensivel=False
+        # -------------------------------------------------------------------
+        resp_put_a = self.client.put(f'/admin/backups-ftp/rotina/{rid}', json={
+            'expected_revision': 1,
+            'dados_extras': {'token_api': None},
+            'extras_sensiveis': {'token_api': False}
+        })
+        self.assertEqual(resp_put_a.status_code, 200)
+        r_put_a = resp_put_a.get_json()['rotina']
+
+        # Valor original 'meu_token_secreto' deve ser preservado e agora exibido em texto claro
+        self.assertEqual(r_put_a['extras_sensiveis']['token_api'], False)
+        self.assertEqual(r_put_a['dados_extras']['token_api'], 'meu_token_secreto')
+
+        # Auditoria deve conter evento 'alterar_sensibilidade_extra'
+        cursor = self.conn.cursor()
+        auditorias_a = cursor.execute("""
+            SELECT campo_ou_segredo, acao, resultado FROM backups_ftp_auditoria
+            WHERE rotina_id = ? AND acao = 'alterar_sensibilidade_extra'
+        """, (rid,)).fetchall()
+        self.assertEqual(len(auditorias_a), 1)
+        self.assertEqual(auditorias_a[0]['campo_ou_segredo'], 'campo_extra')
+        self.assertEqual(auditorias_a[0]['resultado'], 'sucesso')
+
+        # Garante que nenhum segredo ou nome de chave foi gravado na tabela de auditoria
+        todas_audits = cursor.execute("SELECT * FROM backups_ftp_auditoria WHERE rotina_id = ?", (rid,)).fetchall()
+        for audit in todas_audits:
+            for val in audit:
+                self.assertNotIn('token_api', str(val))
+                self.assertNotIn('meu_token_secreto', str(val))
+
+        # -------------------------------------------------------------------
+        # Sentido B: Não-Confidencial -> Confidencial (False -> True)
+        # O operador altera host_destino de False para True com input None
+        # -------------------------------------------------------------------
+        resp_put_b = self.client.put(f'/admin/backups-ftp/rotina/{rid}', json={
+            'expected_revision': 2,
+            'dados_extras': {'host_destino': None},
+            'extras_sensiveis': {'host_destino': True}
+        })
+        self.assertEqual(resp_put_b.status_code, 200)
+        r_put_b = resp_put_b.get_json()['rotina']
+
+        # Agora host_destino é confidencial: mascarado com None
+        self.assertEqual(r_put_b['extras_sensiveis']['host_destino'], True)
+        self.assertEqual(r_put_b['dados_extras']['host_destino'], None)
+
+        # Revelar extra comprova que o valor 'backup.lan' foi rigorosamente preservado
+        resp_rev = self.client.post(f'/admin/backups-ftp/rotina/{rid}/revelar-extra', json={'chave': 'host_destino'})
+        self.assertEqual(resp_rev.status_code, 200)
+        self.assertEqual(resp_rev.get_json()['valor'], 'backup.lan')
+
+        # Segunda auditoria de alteração de sensibilidade registrada
+        auditorias_b = cursor.execute("""
+            SELECT COUNT(*) FROM backups_ftp_auditoria
+            WHERE rotina_id = ? AND acao = 'alterar_sensibilidade_extra'
+        """, (rid,)).fetchone()[0]
+        self.assertEqual(auditorias_b, 2)
+
+    def test_extras_armazenamento_cifrado_no_sqlite(self):
+        """Garante que a coluna dados_extras_json_cifrado não armazena valores em claro."""
+        self._login_master()
+
+        resp_post = self.client.post('/admin/backups-ftp/rotina', json={
+            'cliente_alias': 'CLIENTE-CIPHER-CHECK',
+            'nome_rotina': 'Rotina Cifra',
+            'dados_extras': {'chave_pub': 'valor_pub_123', 'chave_priv': 'super_secreto_456'},
+            'extras_sensiveis': {'chave_pub': False, 'chave_priv': True}
+        })
+        self.assertEqual(resp_post.status_code, 201)
+        rid = resp_post.get_json()['rotina']['id']
+
+        cursor = self.conn.cursor()
+        raw_db = cursor.execute("SELECT dados_extras_json_cifrado FROM backups_ftp_rotinas WHERE id = ?", (rid,)).fetchone()[0]
+
+        # Verifica envelope AEAD
+        env = json.loads(raw_db)
+        self.assertEqual(env.get('v'), 'v1')
+        self.assertEqual(env.get('kid'), 'v1')
+        self.assertIn('n', env)
+        self.assertIn('c', env)
+
+        # Não pode conter nem a chave sensível nem o valor sensível em texto claro
+        self.assertNotIn('super_secreto_456', raw_db)
+        self.assertNotIn('valor_pub_123', raw_db)
+
+    def test_extras_validacao_boolean_estrito_retorna_400(self):
+        """extras_sensiveis exige boolean estrito (true/false); tipos como str, int ou lista retornam 400."""
+        self._login_master()
+
+        # POST com string "true" em vez de boolean nativo -> 400
+        resp_post_str = self.client.post('/admin/backups-ftp/rotina', json={
+            'cliente_alias': 'CLIENTE-BOOL-CHECK',
+            'nome_rotina': 'FTP Bool Test',
+            'dados_extras': {'token': '123'},
+            'extras_sensiveis': {'token': 'true'}
+        })
+        self.assertEqual(resp_post_str.status_code, 400)
+        self.assertIn('booleano estrito', resp_post_str.get_json().get('erro', ''))
+
+        # POST com int 1 em vez de boolean nativo -> 400
+        resp_post_int = self.client.post('/admin/backups-ftp/rotina', json={
+            'cliente_alias': 'CLIENTE-BOOL-CHECK',
+            'nome_rotina': 'FTP Bool Test',
+            'dados_extras': {'token': '123'},
+            'extras_sensiveis': {'token': 1}
+        })
+        self.assertEqual(resp_post_int.status_code, 400)
+
+        # POST com boolean válido -> 201
+        resp_post_ok = self.client.post('/admin/backups-ftp/rotina', json={
+            'cliente_alias': 'CLIENTE-BOOL-CHECK',
+            'nome_rotina': 'FTP Bool Test',
+            'dados_extras': {'token': '123'},
+            'extras_sensiveis': {'token': True}
+        })
+        self.assertEqual(resp_post_ok.status_code, 201)
+        rid = resp_post_ok.get_json()['rotina']['id']
+
+        # PUT com string "false" -> 400
+        resp_put_str = self.client.put(f'/admin/backups-ftp/rotina/{rid}', json={
+            'expected_revision': 1,
+            'extras_sensiveis': {'token': 'false'}
+        })
+        self.assertEqual(resp_put_str.status_code, 400)
+
+        # PUT com null em extras_sensiveis -> mantém o boolean anterior (200)
+        resp_put_null = self.client.put(f'/admin/backups-ftp/rotina/{rid}', json={
+            'expected_revision': 1,
+            'extras_sensiveis': {'token': None}
+        })
+        self.assertEqual(resp_put_null.status_code, 200)
+        self.assertEqual(resp_put_null.get_json()['rotina']['extras_sensiveis']['token'], True)
+
+    def test_extras_edicao_para_vazio_em_nao_confidencial_e_preservacao_em_confidencial(self):
+        """
+        null preserva sempre;
+        vazio ("") preserva para confidencial carregado mascarado;
+        nao-confidencial aceita string vazia como edicao direta.
+        """
+        self._login_master()
+
+        # Cria com campo não-confidencial e campo confidencial
+        resp_post = self.client.post('/admin/backups-ftp/rotina', json={
+            'cliente_alias': 'CLIENTE-VAZIO',
+            'nome_rotina': 'FTP Teste Vazio',
+            'dados_extras': {'param_pub': 'texto_inicial', 'param_sec': 'segredo_inicial'},
+            'extras_sensiveis': {'param_pub': False, 'param_sec': True}
+        })
+        self.assertEqual(resp_post.status_code, 201)
+        rid = resp_post.get_json()['rotina']['id']
+
+        # 1. Campo não-confidencial: enviar "" edita diretamente para vazio
+        resp_put_1 = self.client.put(f'/admin/backups-ftp/rotina/{rid}', json={
+            'expected_revision': 1,
+            'dados_extras': {'param_pub': ''}
+        })
+        self.assertEqual(resp_put_1.status_code, 200)
+        r1 = resp_put_1.get_json()['rotina']
+        self.assertEqual(r1['dados_extras']['param_pub'], '')
+        self.assertEqual(r1['extras_sensiveis']['param_pub'], False)
+
+        # 2. Campo confidencial: enviar "" preserva o segredo gravado anteriormente (mascarado)
+        resp_put_2 = self.client.put(f'/admin/backups-ftp/rotina/{rid}', json={
+            'expected_revision': 2,
+            'dados_extras': {'param_sec': ''}
+        })
+        self.assertEqual(resp_put_2.status_code, 200)
+        # Confirma via revelar-extra que o segredo não foi limpo acidentalmente
+        resp_rev = self.client.post(f'/admin/backups-ftp/rotina/{rid}/revelar-extra', json={'chave': 'param_sec'})
+        self.assertEqual(resp_rev.status_code, 200)
+        self.assertEqual(resp_rev.get_json()['valor'], 'segredo_inicial')
+
+        # 3. Enviar null para campo não-confidencial preserva o valor atual (que agora é "")
+        resp_put_3 = self.client.put(f'/admin/backups-ftp/rotina/{rid}', json={
+            'expected_revision': 3,
+            'dados_extras': {'param_pub': None}
+        })
+        self.assertEqual(resp_put_3.status_code, 200)
+        self.assertEqual(resp_put_3.get_json()['rotina']['dados_extras']['param_pub'], '')
+
+        # 4. Atualiza param_pub para novo texto, e no PUT seguinte envia null -> preserva novo texto
+        resp_put_4 = self.client.put(f'/admin/backups-ftp/rotina/{rid}', json={
+            'expected_revision': 4,
+            'dados_extras': {'param_pub': 'novo_valor_pub'}
+        })
+        self.assertEqual(resp_put_4.status_code, 200)
+        self.assertEqual(resp_put_4.get_json()['rotina']['dados_extras']['param_pub'], 'novo_valor_pub')
+
+        resp_put_5 = self.client.put(f'/admin/backups-ftp/rotina/{rid}', json={
+            'expected_revision': 5,
+            'dados_extras': {'param_pub': None}
+        })
+        self.assertEqual(resp_put_5.status_code, 200)
+        self.assertEqual(resp_put_5.get_json()['rotina']['dados_extras']['param_pub'], 'novo_valor_pub')
+
+    def test_extras_json_cifrado_corrompido_retorna_503_sem_apagar_dados(self):
+        """JSON interno cifrado malformado ou corrompido retorna 503 sem apagar ou mutar os dados."""
+        from backups_ftp_admin import cifrar_dado
+
+        self._login_master()
+
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO backups_ftp_rotinas (
+                cliente_alias, status, revision, criado_em, atualizado_em, atualizado_por
+            ) VALUES ('CLIENTE-CORRUPTO', 1, 1, '2026-11-04T10:00:00Z', '2026-11-04T10:00:00Z', 'master')
+        """)
+        rid = cursor.lastrowid
+
+        # Plaintext com JSON inválido (não parseável)
+        cifrado_corrompido = cifrar_dado("{json_invalido_sem_fechar", f"rotina:{rid}:extras")
+        cursor.execute("UPDATE backups_ftp_rotinas SET dados_extras_json_cifrado = ? WHERE id = ?", (cifrado_corrompido, rid))
+        self.conn.commit()
+
+        # 1. GET rotinas deve retornar 503 com erro seguro
+        resp_get = self.client.get('/admin/backups-ftp/cliente/CLIENTE-CORRUPTO/rotinas')
+        self.assertEqual(resp_get.status_code, 503)
+
+        # 2. PUT não pode prosseguir nem mutar/apagar os dados
+        resp_put = self.client.put(f'/admin/backups-ftp/rotina/{rid}', json={
+            'expected_revision': 1,
+            'nome_rotina': 'Tentativa Mutacao'
+        })
+        self.assertEqual(resp_put.status_code, 503)
+
+        # 3. revelar-extra deve retornar 503
+        resp_rev = self.client.post(f'/admin/backups-ftp/rotina/{rid}/revelar-extra', json={'chave': 'qualquer'})
+        self.assertEqual(resp_rev.status_code, 503)
+
+    def test_extras_legado_dict_arbitrario_preserva_serializado_e_sensivel_true(self):
+        """Dict legado arbitrário é preservado serializado e marcado como sensivel=True para não expor legado."""
+        from backups_ftp_admin import cifrar_dado
+
+        self._login_master()
+
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO backups_ftp_rotinas (
+                cliente_alias, status, revision, criado_em, atualizado_em, atualizado_por
+            ) VALUES ('CLIENTE-DICT-LEGADO', 1, 1, '2026-11-04T10:00:00Z', '2026-11-04T10:00:00Z', 'master')
+        """)
+        rid = cursor.lastrowid
+
+        payload_legado_dict = {'config_complexa': {'host': 'srv01', 'porta': 8080}}
+        cifrado_legado = cifrar_dado(json.dumps(payload_legado_dict), f"rotina:{rid}:extras")
+        cursor.execute("UPDATE backups_ftp_rotinas SET dados_extras_json_cifrado = ? WHERE id = ?", (cifrado_legado, rid))
+        self.conn.commit()
+
+        # Listagem: sensivel=True e mascarado como None
+        resp_get = self.client.get('/admin/backups-ftp/cliente/CLIENTE-DICT-LEGADO/rotinas')
+        self.assertEqual(resp_get.status_code, 200)
+        r = resp_get.get_json()['rotinas'][0]
+        self.assertEqual(r['extras_sensiveis']['config_complexa'], True)
+        self.assertIsNone(r['dados_extras']['config_complexa'])
+
+        # Revelar: retorna o dict legado serializado como JSON
+        resp_rev = self.client.post(f'/admin/backups-ftp/rotina/{rid}/revelar-extra', json={'chave': 'config_complexa'})
+        self.assertEqual(resp_rev.status_code, 200)
+        valor_decifrado = resp_rev.get_json()['valor']
+        self.assertEqual(json.loads(valor_decifrado), {'host': 'srv01', 'porta': 8080})
 
 
 if __name__ == '__main__':

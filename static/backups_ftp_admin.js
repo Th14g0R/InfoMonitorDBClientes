@@ -542,7 +542,7 @@
     // Visão 2: Formulário de Rotina (Criar e Editar)
     // -------------------------------------------------------------------------
 
-    function criarLinhaCampoExtra(chave = '', valorPlaceholder = '', chaveExistente = false) {
+    function criarLinhaCampoExtra(chave = '', valorInicialOuPlaceholder = '', chaveExistente = false, ehSensivel = false) {
         const linha = document.createElement('div');
         linha.className = 'ftp-linha-campo-extra';
 
@@ -553,16 +553,39 @@
         inputChave.value = chave;
         if (chaveExistente) {
             inputChave.dataset.chaveOriginal = chave;
+            inputChave.dataset.eraSensivelOriginal = ehSensivel ? '1' : '0';
             inputChave.readOnly = true; // Chaves já salvas são estritamente read-only
         }
         linha.appendChild(inputChave);
 
-        // Input de valor protegido com type="password" para dados confidenciais
+        // Input de valor: type="password" se sensível, type="text" se não-sensível
         const inputValor = document.createElement('input');
-        inputValor.type = 'password';
+        inputValor.type = ehSensivel ? 'password' : 'text';
         inputValor.className = 'ftp-input extra-valor';
-        inputValor.placeholder = valorPlaceholder || 'Novo valor (em branco mantém)';
+        if (ehSensivel) {
+            inputValor.placeholder = chaveExistente ? '•••••••• (em branco mantém valor)' : (valorInicialOuPlaceholder || 'Valor confidencial');
+            inputValor.value = chaveExistente ? '' : (valorInicialOuPlaceholder || '');
+        } else {
+            inputValor.placeholder = 'Valor do campo';
+            inputValor.value = valorInicialOuPlaceholder || '';
+        }
         linha.appendChild(inputValor);
+
+        // Checkbox "Confidencial"
+        const labelSensivel = document.createElement('label');
+        labelSensivel.className = 'ftp-label-sensivel';
+        labelSensivel.title = 'Todos os extras são sempre cifrados no banco; este checkbox apenas oculta o valor na interface e exige revelação auditada.';
+
+        const checkboxSensivel = document.createElement('input');
+        checkboxSensivel.type = 'checkbox';
+        checkboxSensivel.className = 'extra-sensivel';
+        checkboxSensivel.checked = !!ehSensivel;
+        labelSensivel.appendChild(checkboxSensivel);
+
+        const spanTextoLabel = document.createElement('span');
+        spanTextoLabel.textContent = '🔒 Confidencial';
+        labelSensivel.appendChild(spanTextoLabel);
+        linha.appendChild(labelSensivel);
 
         // Span sibling read-only para exibição temporária de 20s do valor revelado (NUNCA auto-cola no input)
         const spanValorReveladoExtra = document.createElement('span');
@@ -577,14 +600,17 @@
         spanValorReveladoExtra.style.userSelect = 'all';
         linha.appendChild(spanValorReveladoExtra);
 
-        if (chaveExistente && rotinaAtual) {
-            let timerExtra = null;
+        let btnRevExtra = null;
+        let btnCopExtra = null;
+        let timerExtra = null;
 
-            const btnRevExtra = document.createElement('button');
+        if (chaveExistente && rotinaAtual) {
+            btnRevExtra = document.createElement('button');
             btnRevExtra.type = 'button';
-            btnRevExtra.className = 'btn btn-sm';
+            btnRevExtra.className = 'btn btn-sm btn-revelar-extra';
             btnRevExtra.title = 'Revelar valor do campo extra por 20s (auditado)';
             btnRevExtra.textContent = '👁';
+            btnRevExtra.style.display = ehSensivel ? 'inline-block' : 'none';
             btnRevExtra.addEventListener('click', async () => {
                 const genClique = geracaoRequisicao;
                 const idEsperado = rotinaAtual ? rotinaAtual.id : null;
@@ -594,8 +620,8 @@
                     body: JSON.stringify({ chave })
                 });
 
-                // Descarta se a tela mudou ou a rotina atual foi desassociada
-                if (genClique !== geracaoRequisicao || !rotinaAtual || rotinaAtual.id !== idEsperado) return;
+                // Descarta se a tela mudou, rotina desassociada, checkbox desmarcado ou linha removida do DOM
+                if (genClique !== geracaoRequisicao || !rotinaAtual || rotinaAtual.id !== idEsperado || !checkboxSensivel.checked || !linha.isConnected) return;
 
                 if (resRev.ok) {
                     if (timerExtra) clearTimeout(timerExtra);
@@ -614,11 +640,12 @@
             });
             linha.appendChild(btnRevExtra);
 
-            const btnCopExtra = document.createElement('button');
+            btnCopExtra = document.createElement('button');
             btnCopExtra.type = 'button';
-            btnCopExtra.className = 'btn btn-sm';
+            btnCopExtra.className = 'btn btn-sm btn-copiar-extra';
             btnCopExtra.title = 'Copiar valor do campo extra (auditado)';
             btnCopExtra.textContent = '📋';
+            btnCopExtra.style.display = ehSensivel ? 'inline-block' : 'none';
             btnCopExtra.addEventListener('click', async () => {
                 const genClique = geracaoRequisicao;
                 const idEsperado = rotinaAtual ? rotinaAtual.id : null;
@@ -628,7 +655,8 @@
                     body: JSON.stringify({ chave })
                 });
 
-                if (genClique !== geracaoRequisicao || !rotinaAtual || rotinaAtual.id !== idEsperado) return;
+                // Descarta se a tela mudou, rotina desassociada, checkbox desmarcado ou linha removida do DOM
+                if (genClique !== geracaoRequisicao || !rotinaAtual || rotinaAtual.id !== idEsperado || !checkboxSensivel.checked || !linha.isConnected) return;
 
                 if (resCop.ok) {
                     copiarTextoClipboard(resCop.data.valor, `Campo "${chave}" copiado! (Ação auditada)`);
@@ -639,12 +667,53 @@
             linha.appendChild(btnCopExtra);
         }
 
+        // Listener do Toggle do Checkbox Confidencial
+        checkboxSensivel.addEventListener('change', () => {
+            const sensivelAgora = checkboxSensivel.checked;
+            if (sensivelAgora) {
+                // Mudou para confidencial: mascara input com password
+                inputValor.type = 'password';
+                if (chaveExistente) {
+                    if (!inputValor.value) {
+                        inputValor.placeholder = '•••••••• (em branco mantém valor)';
+                    }
+                    if (btnRevExtra) btnRevExtra.style.display = 'inline-block';
+                    if (btnCopExtra) btnCopExtra.style.display = 'inline-block';
+                } else {
+                    inputValor.placeholder = 'Valor confidencial';
+                }
+            } else {
+                // Mudou para não-confidencial: input text visível
+                inputValor.type = 'text';
+                if (btnRevExtra) btnRevExtra.style.display = 'none';
+                if (btnCopExtra) btnCopExtra.style.display = 'none';
+                if (spanValorReveladoExtra) {
+                    spanValorReveladoExtra.style.display = 'none';
+                    spanValorReveladoExtra.textContent = '';
+                }
+                if (timerExtra) {
+                    clearTimeout(timerExtra);
+                    timerExtra = null;
+                }
+                if (chaveExistente) {
+                    // Se o campo era confidencial no banco e o input está em branco, NÃO buscar segredo sem auditoria!
+                    // O valor pré-existente será preservado (enviando null) e decifrado/convertido pelo backend ao salvar.
+                    if (!inputValor.value) {
+                        inputValor.placeholder = '(mantém valor ao salvar; ou digite novo)';
+                    }
+                } else {
+                    inputValor.placeholder = 'Valor do campo';
+                }
+            }
+        });
+
         const btnRemoverLinha = document.createElement('button');
         btnRemoverLinha.type = 'button';
         btnRemoverLinha.className = 'btn btn-sm btn-perigo';
         btnRemoverLinha.textContent = '✕';
         btnRemoverLinha.title = 'Remover este campo';
         btnRemoverLinha.addEventListener('click', () => {
+            if (timerExtra) clearTimeout(timerExtra);
             linha.remove();
         });
         linha.appendChild(btnRemoverLinha);
@@ -728,8 +797,18 @@
         // Campos Extras
         containerExtras.textContent = '';
         chavesExtrasOriginais = Array.isArray(rotina.extras_configurados) ? [...rotina.extras_configurados] : [];
+        const mapaSensiveis = rotina.extras_sensiveis || {};
+        const dadosExtrasObj = rotina.dados_extras || {};
+
         chavesExtrasOriginais.forEach(ch => {
-            criarLinhaCampoExtra(ch, '•••••••• (em branco mantém valor)', true);
+            // Se constar no mapa extras_sensiveis, usa o booleano; se for legado (ausente), default é true
+            const ehSensivel = (typeof mapaSensiveis[ch] === 'boolean') ? mapaSensiveis[ch] : true;
+            if (ehSensivel) {
+                criarLinhaCampoExtra(ch, '•••••••• (em branco mantém valor)', true, true);
+            } else {
+                const valorPlano = (dadosExtrasObj[ch] != null) ? String(dadosExtrasObj[ch]) : '';
+                criarLinhaCampoExtra(ch, valorPlano, true, false);
+            }
         });
 
         visaoRotinas.style.display = 'none';
@@ -757,18 +836,26 @@
 
         // Coleta de extras
         const extrasPayload = {};
+        const extrasSensiveisPayload = {};
         const chavesPresentesNoForm = [];
         const linhasExtras = containerExtras.querySelectorAll('.ftp-linha-campo-extra');
 
         linhasExtras.forEach(lin => {
             const inChave = lin.querySelector('.extra-chave');
             const inValor = lin.querySelector('.extra-valor');
+            const chkSensivel = lin.querySelector('.extra-sensivel');
             const chave = (inChave ? inChave.value : '').trim();
             if (chave) {
                 chavesPresentesNoForm.push(chave);
                 const valor = inValor ? inValor.value : '';
-                // Se estiver vazio e era um campo existente, envia null para preservar sem sobrescrever
-                if (!valor && lin.querySelector('.extra-chave[data-chave-original]')) {
+                const ehSensivel = chkSensivel ? Boolean(chkSensivel.checked) : false;
+
+                extrasSensiveisPayload[chave] = ehSensivel;
+
+                const eraExistente = Boolean(inChave && inChave.dataset.chaveOriginal);
+                const eraSensivelOriginal = Boolean(inChave && inChave.dataset.eraSensivelOriginal === '1');
+
+                if (eraExistente && !valor && eraSensivelOriginal) {
                     extrasPayload[chave] = null;
                 } else {
                     extrasPayload[chave] = valor;
@@ -796,6 +883,7 @@
                     lancamento_em: lancamento || null,
                     notas,
                     dados_extras: extrasPayload,
+                    extras_sensiveis: extrasSensiveisPayload,
                     status: 1
                 };
 
@@ -828,6 +916,7 @@
                     notas,
                     remover_senha: chkRemoverSenha.checked,
                     dados_extras: extrasPayload,
+                    extras_sensiveis: extrasSensiveisPayload,
                     remover_extras: removerExtras
                 };
 

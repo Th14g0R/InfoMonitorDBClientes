@@ -259,6 +259,67 @@ def _gravar_auditoria_na_transacao(cursor: sqlite3.Cursor, usuario_id: str, clie
 
 
 # ---------------------------------------------------------------------------
+# Normalização e Formatação de Dados Extras (Sensível / Não-Sensível)
+# ---------------------------------------------------------------------------
+
+def _deserializar_extras_internos(extras_str: str) -> dict[str, dict]:
+    """
+    Decodifica o JSON de extras e normaliza para o formato {'v': str, 's': bool}.
+    Formatos legados são interpretados como sensíveis (s=True).
+    Se extras_str não estiver vazio mas o JSON for inválido ou não for dict,
+    levanta ValueError para impedir que falha silenciosa apague os extras.
+    """
+    if not extras_str or not extras_str.strip():
+        return {}
+
+    try:
+        dados = json.loads(extras_str)
+    except Exception as e:
+        raise ValueError("Falha de integridade ao decodificar JSON interno de extras.") from e
+
+    if not isinstance(dados, dict):
+        raise ValueError("Payload interno de extras deve ser um objeto JSON.")
+
+    normalizado = {}
+    for k, item in dados.items():
+        chave = str(k)
+        # Reconhecimento estrito do formato interno: dict com chaves 'v' e 's' (sendo 's' bool estrito)
+        if isinstance(item, dict) and 'v' in item and 's' in item and type(item['s']) is bool:
+            valor = str(item['v']) if item['v'] is not None else ''
+            sensivel = item['s']
+            normalizado[chave] = {'v': valor, 's': sensivel}
+        elif isinstance(item, dict):
+            # Dict legado arbitrário: preservar serializado e s=True para não expor legado
+            normalizado[chave] = {'v': json.dumps(item), 's': True}
+        else:
+            # Formato legado primitivo: string/número -> sensivel = True por padrão
+            normalizado[chave] = {'v': str(item if item is not None else ''), 's': True}
+    return normalizado
+
+
+def _formatar_extras_para_resposta(extras_normalizados: dict[str, dict]):
+    """
+    Formata extras para payload de resposta JSON:
+    - dados_extras: {k: None se sensivel s=True senão v}
+    - extras_sensiveis: {k: bool(s)}
+    - extras_configurados: [k1, k2, ...]
+    """
+    dados_extras = {}
+    extras_sensiveis = {}
+    extras_configurados = list(extras_normalizados.keys())
+
+    for k, item in extras_normalizados.items():
+        sensivel = item['s']
+        extras_sensiveis[k] = sensivel
+        if sensivel:
+            dados_extras[k] = None
+        else:
+            dados_extras[k] = item['v']
+
+    return dados_extras, extras_sensiveis, extras_configurados
+
+
+# ---------------------------------------------------------------------------
 # Helpers de Resposta e Cabeçalhos HTTP
 # ---------------------------------------------------------------------------
 
@@ -456,19 +517,11 @@ def configurar_backups_ftp_admin(bp: Blueprint, conectar, obter_status):
                     lancamento_em = decifrar_dado(r['lancamento_em_cifrado'], f"rotina:{rid}:lancamento") if r['lancamento_em_cifrado'] else None
                     notas = decifrar_dado(r['notas_cifradas'], f"rotina:{rid}:notas")
                     extras_str = decifrar_dado(r['dados_extras_json_cifrado'], f"rotina:{rid}:extras")
+                    extras_normalizados = _deserializar_extras_internos(extras_str)
                 except Exception:
                     return _resposta_com_headers({'erro': 'Falha de integridade ao decifrar dados da rotina.'}, 503)
 
-                extras_dict = {}
-                if extras_str:
-                    try:
-                        extras_dict = json.loads(extras_str)
-                    except Exception:
-                        extras_dict = {}
-
-                # Máscara estrita de extras: nunca devolve valores reais em listagens
-                extras_chaves = list(extras_dict.keys())
-                dados_extras_mascarado = {k: None for k in extras_chaves}
+                dados_extras_resp, extras_sensiveis_resp, extras_configurados_resp = _formatar_extras_para_resposta(extras_normalizados)
 
                 ultima_lista_raw = cursor.execute("""
                     SELECT versao_numero, tamanho_bytes, encoding_detectado, checksum_sha256, enviado_em, enviado_por
@@ -492,8 +545,9 @@ def configurar_backups_ftp_admin(bp: Blueprint, conectar, obter_status):
                     'responsavel': responsavel,
                     'lancamento_em': lancamento_em,
                     'notas': notas,
-                    'dados_extras': dados_extras_mascarado,
-                    'extras_configurados': extras_chaves,
+                    'dados_extras': dados_extras_resp,
+                    'extras_sensiveis': extras_sensiveis_resp,
+                    'extras_configurados': extras_configurados_resp,
                     'status': r['status'],
                     'revision': r['revision'],
                     'criado_em': r['criado_em'],
@@ -568,6 +622,35 @@ def configurar_backups_ftp_admin(bp: Blueprint, conectar, obter_status):
         elif not isinstance(dados_extras, dict):
             return _resposta_com_headers({'erro': 'dados_extras deve ser um objeto dicionário.'}, 400)
 
+        extras_sensiveis_input = payload.get('extras_sensiveis')
+        if extras_sensiveis_input is not None:
+            if isinstance(extras_sensiveis_input, str):
+                try:
+                    extras_sensiveis_input = json.loads(extras_sensiveis_input)
+                except Exception:
+                    return _resposta_com_headers({'erro': 'extras_sensiveis deve ser um objeto válido.'}, 400)
+            if not isinstance(extras_sensiveis_input, dict):
+                return _resposta_com_headers({'erro': 'extras_sensiveis deve ser um objeto dicionário.'}, 400)
+
+            for k_sens, v_sens in extras_sensiveis_input.items():
+                if v_sens is not None and type(v_sens) is not bool:
+                    return _resposta_com_headers({'erro': f'O valor de sensibilidade para a chave "{k_sens}" deve ser um booleano estrito (true/false).'}, 400)
+        else:
+            extras_sensiveis_input = {}
+
+        extras_normalizados = {}
+        for k, v in dados_extras.items():
+            chave_str = str(k)
+            # Default para novos campos é False, a menos que especificado explicitamente em extras_sensiveis
+            if chave_str in extras_sensiveis_input and extras_sensiveis_input[chave_str] is not None:
+                sensivel = extras_sensiveis_input[chave_str]
+            else:
+                sensivel = False
+            extras_normalizados[chave_str] = {
+                'v': str(v) if v is not None else '',
+                's': sensivel
+            }
+
         try:
             obter_chave_aead()
         except CryptoKeyError:
@@ -597,7 +680,7 @@ def configurar_backups_ftp_admin(bp: Blueprint, conectar, obter_status):
             resp_cifrado = cifrar_dado(responsavel, f"rotina:{rotina_id}:responsavel")
             lanc_cifrado = cifrar_dado(lancamento_em, f"rotina:{rotina_id}:lancamento") if lancamento_em else None
             notas_cifradas = cifrar_dado(notas, f"rotina:{rotina_id}:notas")
-            extras_cifrados = cifrar_dado(json.dumps(dados_extras), f"rotina:{rotina_id}:extras")
+            extras_cifrados = cifrar_dado(json.dumps(extras_normalizados), f"rotina:{rotina_id}:extras")
 
             cursor.execute("""
                 UPDATE backups_ftp_rotinas SET
@@ -628,7 +711,7 @@ def configurar_backups_ftp_admin(bp: Blueprint, conectar, obter_status):
             )
             conn.commit()
 
-            extras_chaves = list(dados_extras.keys())
+            dados_extras_resp, extras_sensiveis_resp, extras_configurados_resp = _formatar_extras_para_resposta(extras_normalizados)
             return _resposta_com_headers({
                 'sucesso': True,
                 'mensagem': 'Rotina criada com sucesso.',
@@ -643,8 +726,9 @@ def configurar_backups_ftp_admin(bp: Blueprint, conectar, obter_status):
                     'responsavel': responsavel,
                     'lancamento_em': lancamento_em,
                     'notas': notas,
-                    'dados_extras': {k: None for k in extras_chaves},
-                    'extras_configurados': extras_chaves,
+                    'dados_extras': dados_extras_resp,
+                    'extras_sensiveis': extras_sensiveis_resp,
+                    'extras_configurados': extras_configurados_resp,
                     'status': status,
                     'revision': 1
                 }
@@ -749,9 +833,13 @@ def configurar_backups_ftp_admin(bp: Blueprint, conectar, obter_status):
             else:
                 nova_senha_cifrada = rotina['senha_cifrada']
 
-            # Gestão de dados_extras com preservação de chaves existentes e remoção explícita
-            extras_str = decifrar_dado(rotina['dados_extras_json_cifrado'], f"rotina:{id}:extras")
-            extras_atuais = json.loads(extras_str) if extras_str else {}
+            # Gestão de dados_extras com preservação de chaves existentes, toggle de sensibilidade e remoção explícita
+            try:
+                extras_str = decifrar_dado(rotina['dados_extras_json_cifrado'], f"rotina:{id}:extras")
+                extras_atuais = _deserializar_extras_internos(extras_str)
+            except Exception:
+                conn.rollback()
+                return _resposta_com_headers({'erro': 'Falha de integridade ao decifrar ou deserializar dados extras.'}, 503)
 
             dados_extras_payload = payload.get('dados_extras')
             if dados_extras_payload is not None:
@@ -760,14 +848,83 @@ def configurar_backups_ftp_admin(bp: Blueprint, conectar, obter_status):
                         dados_extras_payload = json.loads(dados_extras_payload)
                     except Exception:
                         dados_extras_payload = {}
-                if isinstance(dados_extras_payload, dict):
-                    for k, v in dados_extras_payload.items():
-                        # Se v é None ou "", preserva o valor atual da chave se existir
-                        if v is None or v == "":
-                            if k not in extras_atuais:
-                                extras_atuais[k] = ""
+                if not isinstance(dados_extras_payload, dict):
+                    dados_extras_payload = {}
+            else:
+                dados_extras_payload = None
+
+            extras_sensiveis_payload = payload.get('extras_sensiveis')
+            if extras_sensiveis_payload is not None:
+                if isinstance(extras_sensiveis_payload, str):
+                    try:
+                        extras_sensiveis_payload = json.loads(extras_sensiveis_payload)
+                    except Exception:
+                        conn.rollback()
+                        return _resposta_com_headers({'erro': 'extras_sensiveis deve ser um objeto válido.'}, 400)
+                if not isinstance(extras_sensiveis_payload, dict):
+                    conn.rollback()
+                    return _resposta_com_headers({'erro': 'extras_sensiveis deve ser um objeto dicionário.'}, 400)
+
+                for k_sens, v_sens in extras_sensiveis_payload.items():
+                    if v_sens is not None and type(v_sens) is not bool:
+                        conn.rollback()
+                        return _resposta_com_headers({'erro': f'O valor de sensibilidade para a chave "{k_sens}" deve ser um booleano estrito (true/false) ou null.'}, 400)
+            else:
+                extras_sensiveis_payload = None
+
+            mudou_sensibilidade = False
+
+            # Reunir todas as chaves mencionadas nos payloads de extras
+            todas_chaves_payload = set()
+            if dados_extras_payload is not None:
+                todas_chaves_payload.update(dados_extras_payload.keys())
+            if extras_sensiveis_payload is not None:
+                todas_chaves_payload.update(extras_sensiveis_payload.keys())
+
+            for k in todas_chaves_payload:
+                k_str = str(k)
+                tem_valor_input = (dados_extras_payload is not None and k in dados_extras_payload)
+                valor_input = dados_extras_payload[k] if tem_valor_input else None
+
+                tem_sensivel_input = (extras_sensiveis_payload is not None and k in extras_sensiveis_payload)
+                sensivel_input = extras_sensiveis_payload[k] if tem_sensivel_input else None
+
+                if k_str in extras_atuais:
+                    antigo_v = extras_atuais[k_str]['v']
+                    antigo_s = extras_atuais[k_str]['s']
+
+                    # Regra de sensibilidade: null mantém o booleano anterior
+                    if tem_sensivel_input and sensivel_input is not None:
+                        novo_s = sensivel_input
+                    else:
+                        novo_s = antigo_s
+
+                    # Regra de preservação e edição para vazio:
+                    # null preserva sempre;
+                    # vazio ("") preserva para confidencial carregado mascarado (antigo_s == True);
+                    # nao-confidencial (antigo_s == False) aceita string vazia como edicao direta
+                    if tem_valor_input:
+                        if valor_input is None:
+                            novo_v = antigo_v
+                        elif valor_input == "":
+                            if antigo_s:
+                                novo_v = antigo_v
+                            else:
+                                novo_v = ""
                         else:
-                            extras_atuais[k] = str(v)
+                            novo_v = str(valor_input)
+                    else:
+                        novo_v = antigo_v
+
+                    if novo_s != antigo_s:
+                        mudou_sensibilidade = True
+
+                    extras_atuais[k_str] = {'v': novo_v, 's': novo_s}
+                else:
+                    # Nova chave adicionada na atualização
+                    novo_v = str(valor_input) if (tem_valor_input and valor_input is not None) else ""
+                    novo_s = sensivel_input if (tem_sensivel_input and sensivel_input is not None) else False
+                    extras_atuais[k_str] = {'v': novo_v, 's': novo_s}
 
             remover_extras = payload.get('remover_extras') or []
             if isinstance(remover_extras, list):
@@ -812,6 +969,19 @@ def configurar_backups_ftp_admin(bp: Blueprint, conectar, obter_status):
                 id
             ))
 
+            if mudou_sensibilidade:
+                _gravar_auditoria_na_transacao(
+                    cursor,
+                    usuario_id=operador,
+                    cliente_alias=rotina['cliente_alias'],
+                    rotina_id=id,
+                    versao_id=None,
+                    campo_ou_segredo='campo_extra',
+                    acao='alterar_sensibilidade_extra',
+                    ip_origem=ip_origem,
+                    resultado='sucesso'
+                )
+
             _gravar_auditoria_na_transacao(
                 cursor,
                 usuario_id=operador,
@@ -825,7 +995,7 @@ def configurar_backups_ftp_admin(bp: Blueprint, conectar, obter_status):
             )
             conn.commit()
 
-            extras_chaves = list(extras_atuais.keys())
+            dados_extras_resp, extras_sensiveis_resp, extras_configurados_resp = _formatar_extras_para_resposta(extras_atuais)
             return _resposta_com_headers({
                 'sucesso': True,
                 'mensagem': 'Rotina atualizada com sucesso.',
@@ -840,8 +1010,9 @@ def configurar_backups_ftp_admin(bp: Blueprint, conectar, obter_status):
                     'responsavel': responsavel,
                     'lancamento_em': novo_lancamento,
                     'notas': notas,
-                    'dados_extras': {k: None for k in extras_chaves},
-                    'extras_configurados': extras_chaves,
+                    'dados_extras': dados_extras_resp,
+                    'extras_sensiveis': extras_sensiveis_resp,
+                    'extras_configurados': extras_configurados_resp,
                     'status': status,
                     'revision': nova_revision
                 }
@@ -1027,7 +1198,7 @@ def configurar_backups_ftp_admin(bp: Blueprint, conectar, obter_status):
 
             try:
                 extras_str = decifrar_dado(rotina['dados_extras_json_cifrado'], f"rotina:{id}:extras")
-                extras_dict = json.loads(extras_str) if extras_str else {}
+                extras_dict = _deserializar_extras_internos(extras_str)
             except Exception:
                 return _resposta_com_headers({'erro': 'Erro ao descriptografar dados extras.'}, 503)
 
@@ -1037,7 +1208,7 @@ def configurar_backups_ftp_admin(bp: Blueprint, conectar, obter_status):
             return _resposta_com_headers({
                 'sucesso': True,
                 'chave': chave,
-                'valor': str(extras_dict[chave])
+                'valor': extras_dict[chave]['v']
             }, 200)
         finally:
             conn.close()
@@ -1083,7 +1254,7 @@ def configurar_backups_ftp_admin(bp: Blueprint, conectar, obter_status):
 
             try:
                 extras_str = decifrar_dado(rotina['dados_extras_json_cifrado'], f"rotina:{id}:extras")
-                extras_dict = json.loads(extras_str) if extras_str else {}
+                extras_dict = _deserializar_extras_internos(extras_str)
             except Exception:
                 return _resposta_com_headers({'erro': 'Erro ao descriptografar dados extras.'}, 503)
 
@@ -1093,7 +1264,7 @@ def configurar_backups_ftp_admin(bp: Blueprint, conectar, obter_status):
             return _resposta_com_headers({
                 'sucesso': True,
                 'chave': chave,
-                'valor': str(extras_dict[chave]),
+                'valor': extras_dict[chave]['v'],
                 'mensagem': 'Ação de cópia auditada com sucesso.'
             }, 200)
         finally:

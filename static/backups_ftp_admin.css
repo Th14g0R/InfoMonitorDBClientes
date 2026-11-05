@@ -145,3 +145,39 @@
     margin: 0;
     max-height: 55vh;
 }
+
+/* Linha de Campo Extra com Suporte a Checkbox Confidencial */
+.ftp-linha-campo-extra {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    background: #f8fafc;
+    border: 1px solid var(--cor-borda, #e2e8f0);
+    border-radius: 6px;
+    padding: 6px 8px;
+}
+.ftp-linha-campo-extra .extra-chave {
+    flex: 1;
+    min-width: 130px;
+}
+.ftp-linha-campo-extra .extra-valor {
+    flex: 1.4;
+    min-width: 150px;
+}
+.ftp-label-sensivel {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.78em;
+    font-weight: 500;
+    color: var(--cor-texto-suave, #64748b);
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    margin-left: 2px;
+}
+.ftp-label-sensivel input[type="checkbox"] {
+    cursor: pointer;
+    margin: 0;
+}
