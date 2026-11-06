@@ -95,7 +95,7 @@
       <td>${nome}${p ? '<span class="tag">PRESA</span>' : ''}<br><span class="mut">${esc(a.code)}${a.extension && a.extension != a.code ? ' · ramal ' + esc(a.extension) : ''}</span></td>
       <td><span class="pill" style="--c:${st[1]}">${esc(st[0])}</span></td>
       <td class="tempo">${a.seconds == null && !a.paused ? '–' : fmtSeg(segs(a))}</td>
-      <td>${a.penalty ?? '–'}</td>
+      <td>${esc(a.penalty ?? '–')}</td>
       <td>${situacaoHtml(a)}</td><td>${btn}</td></tr>`;
   }
   function card(k, cab) {

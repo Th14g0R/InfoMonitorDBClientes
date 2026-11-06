@@ -260,7 +260,10 @@ LAYOUT_PADRAO = {'cols': 2, 'c1': ['InfoBrasil_Suporte'], 'c2': [], 'ord': {'col
 def validar_layout(dados):
     if not isinstance(dados, dict):
         raise ValueError('Layout inválido.')
-    cols = int(dados.get('cols', 1))
+    try:
+        cols = int(dados.get('cols', 1))
+    except (ValueError, TypeError, OverflowError):
+        raise ValueError('Número de colunas inválido.')
     if cols not in (1, 2):
         raise ValueError('Número de colunas inválido.')
     colunas = {}
@@ -270,12 +273,22 @@ def validar_layout(dados):
             raise ValueError('Lista de filas inválida.')
         colunas[chave] = list(dict.fromkeys(valor))
     colunas['c2'] = [v for v in colunas['c2'] if v not in colunas['c1']]
-    ord_ = dados.get('ord') or {}
+    ord_ = dados.get('ord')
+    if ord_ is None:
+        ord_ = {}
+    elif not isinstance(ord_, dict):
+        raise ValueError('Ordenação inválida.')
     col = ord_.get('col', 'status')
-    direcao = int(ord_.get('dir', 1))
+    try:
+        direcao = int(ord_.get('dir', 1))
+    except (ValueError, TypeError, OverflowError):
+        raise ValueError('Ordenação inválida.')
     if col not in COLUNAS_ORDEM or direcao not in (1, -1):
         raise ValueError('Ordenação inválida.')
-    limite = int(dados.get('limite', 10))
+    try:
+        limite = int(dados.get('limite', 10))
+    except (ValueError, TypeError, OverflowError):
+        raise ValueError('Limite de pausa inválido.')
     if not 1 <= limite <= 600:
         raise ValueError('Limite de pausa inválido.')
     return {'cols': cols, **colunas, 'ord': {'col': col, 'dir': direcao}, 'limite': limite}
@@ -329,10 +342,19 @@ def transferir(cliente, dados):
     if de == para or not RE_FILA.match(de) or not RE_FILA.match(para):
         raise ValueError('Filas inválidas.')
     ramal = _codigo(dados.get('extension') or codigo)
-    prioridade = str(dados.get('penalty') if dados.get('penalty') not in (None, '') else 1)
+    raw_pen = dados.get('penalty')
+    if raw_pen in (None, ''):
+        prioridade = 1
+    else:
+        try:
+            prioridade = int(raw_pen)
+        except (ValueError, TypeError, OverflowError):
+            raise ValueError('Prioridade deve ficar entre 0 e 99.')
+        if not 0 <= prioridade <= 99:
+            raise ValueError('Prioridade deve ficar entre 0 e 99.')
     id_de, id_para = _id_fila(de), _id_fila(para)      # valida as duas antes de mexer
     # inclui na nova antes de tirar da antiga: o agente nunca fica sem fila
-    incluir = cliente.post(f'/v2/agents/{codigo}/add_to_queue', {'queue_id': id_para, 'extension': ramal, 'penalty': prioridade})
+    incluir = cliente.post(f'/v2/agents/{codigo}/add_to_queue', {'queue_id': id_para, 'extension': ramal, 'penalty': str(prioridade)})
     if not incluir['ok']:
         return {'ok': False, 'mensagem': f'Não incluiu na nova fila: {incluir["mensagem"]}'}
     remover = cliente.post(f'/v2/agents/{codigo}/remove_to_queue', {'queue_id': id_de})
@@ -345,9 +367,23 @@ def alterar_prioridade(cliente, dados):
     codigo, fila = _codigo(dados.get('code')), str(dados.get('fila') or '')
     if not RE_FILA.match(fila):
         raise ValueError('Fila inválida.')
-    prioridade = int(dados.get('penalty'))
+    raw_pen = dados.get('penalty')
+    try:
+        prioridade = int(raw_pen)
+    except (ValueError, TypeError, OverflowError):
+        raise ValueError('Prioridade deve ficar entre 0 e 99.')
     if not 0 <= prioridade <= 99:
         raise ValueError('Prioridade deve ficar entre 0 e 99.')
+    raw_pen_atual = dados.get('penaltyAtual')
+    if raw_pen_atual in (None, ''):
+        pen_atual = 1
+    else:
+        try:
+            pen_atual = int(raw_pen_atual)
+        except (ValueError, TypeError, OverflowError):
+            raise ValueError('Prioridade atual deve ficar entre 0 e 99.')
+        if not 0 <= pen_atual <= 99:
+            raise ValueError('Prioridade atual deve ficar entre 0 e 99.')
     ramal = _codigo(dados.get('extension') or codigo)
     id_fila = _id_fila(fila)
     corpo = {'queue_id': id_fila, 'extension': ramal, 'penalty': str(prioridade)}
@@ -360,8 +396,7 @@ def alterar_prioridade(cliente, dados):
     segunda = cliente.post(f'/v2/agents/{codigo}/add_to_queue', corpo)
     if segunda['ok']:
         return {'ok': True, 'mensagem': 'Prioridade alterada.'}
-    anterior = dados.get('penaltyAtual')
-    volta = cliente.post(f'/v2/agents/{codigo}/add_to_queue', {**corpo, 'penalty': str(anterior if anterior not in (None, '') else 1)})
+    volta = cliente.post(f'/v2/agents/{codigo}/add_to_queue', {**corpo, 'penalty': str(pen_atual)})
     aviso = 'o agente voltou para a fila' if volta['ok'] else 'ATENÇÃO: o agente ficou fora da fila'
     return {'ok': False, 'mensagem': f'Não aplicou ({segunda["mensagem"]}); {aviso}.'}
 
@@ -401,10 +436,16 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None):
             return jsonify(erro=erro or 'Sem resposta da NPX.'), 502
         nomes, ids = nomes_filas(), ids_filas()
         chaves = list(dict.fromkeys(list(nomes) + [a['queue'] for a in lista if a['queue']]))
+        pode_gerenciar = pode()
+        if pode_gerenciar:
+            agentes_retorno = lista
+        else:
+            campos_privados = {'callSrc', 'callDst', 'callClient'}
+            agentes_retorno = [{k: v for k, v in a.items() if k not in campos_privados} for a in lista]
         resposta = jsonify(
-            atualizado=em.isoformat(), erroNpx=erro, layout=layout.obter(), podeGerenciar=pode(),
+            atualizado=em.isoformat(), erroNpx=erro, layout=layout.obter(), podeGerenciar=pode_gerenciar,
             filas=[{'key': k, 'nome': nomes.get(k, k.replace('_', ' ')), 'temId': k in ids} for k in chaves],
-            agentes=lista)
+            agentes=agentes_retorno)
         resposta.headers['Cache-Control'] = 'no-store'
         return resposta
 
@@ -414,8 +455,9 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None):
             return negar()
         try:
             novo = layout.salvar(request.get_json(silent=True), usuario())
-        except (ValueError, TypeError) as erro:
+        except (ValueError, TypeError, OverflowError) as erro:
             return jsonify(ok=False, mensagem=str(erro)), 400
+        registrar_acao_admin('agentes_layout', {'cols': novo.get('cols'), 'limite': novo.get('limite')})
         return jsonify(ok=True, layout=novo)
 
     @bp.route('/admin/agentes/<codigo>/tirar-pausa', methods=['POST'], endpoint='agentes_tirar_pausa')
@@ -445,7 +487,7 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None):
         dados = request.get_json(silent=True) or {}
         try:
             return responder_acao('transferir', dados.get('code'), transferir(cliente, dados))
-        except (ValueError, TypeError) as erro:
+        except (ValueError, TypeError, OverflowError) as erro:
             return jsonify(ok=False, mensagem=str(erro)), 400
 
     @bp.route('/admin/agentes/prioridade', methods=['POST'], endpoint='agentes_prioridade')
@@ -455,7 +497,7 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None):
         dados = request.get_json(silent=True) or {}
         try:
             return responder_acao('prioridade', dados.get('code'), alterar_prioridade(cliente, dados))
-        except (ValueError, TypeError) as erro:
+        except (ValueError, TypeError, OverflowError) as erro:
             return jsonify(ok=False, mensagem=str(erro)), 400
 
     return coletor

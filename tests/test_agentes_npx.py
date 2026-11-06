@@ -10,7 +10,7 @@ from unittest.mock import patch
 from flask import Blueprint, Flask
 
 import agentes_npx
-from agentes_npx import ClienteNpx, ColetorAgentes, LayoutAgentes, configurar_agentes, transferir, validar_layout
+from agentes_npx import ClienteNpx, ColetorAgentes, LayoutAgentes, alterar_prioridade, configurar_agentes, transferir, validar_layout
 
 RAIZ = Path(__file__).resolve().parent.parent
 
@@ -116,11 +116,51 @@ class AcoesTest(unittest.TestCase):
         self.assertFalse(r['ok'])
         self.assertEqual(len(cliente.enviados), 1)
 
+    def test_transferir_valida_penalty_0_a_99_e_padrao_1(self):
+        cliente = ClienteFalso()
+        with patch.dict(os.environ, {'NPX_FILAS_IDS': 'InfoBrasil_Suporte=10;InfoBrasil_Comercial=11'}):
+            for penalty_invalido in (-1, 100, 'invalido', float('inf')):
+                with self.assertRaises(ValueError):
+                    transferir(cliente, {'code': '4422001', 'de': 'InfoBrasil_Suporte', 'para': 'InfoBrasil_Comercial', 'penalty': penalty_invalido})
+            self.assertEqual(cliente.enviados, [])
+
+            # vazio ou None assume 1
+            for v in (None, ''):
+                transferir(cliente, {'code': '4422001', 'de': 'InfoBrasil_Suporte', 'para': 'InfoBrasil_Comercial', 'penalty': v})
+                self.assertEqual(cliente.enviados[-2][1]['penalty'], '1')
+
+            # 0 e 99 são limites válidos
+            transferir(cliente, {'code': '4422001', 'de': 'InfoBrasil_Suporte', 'para': 'InfoBrasil_Comercial', 'penalty': 0})
+            self.assertEqual(cliente.enviados[-2][1]['penalty'], '0')
+            transferir(cliente, {'code': '4422001', 'de': 'InfoBrasil_Suporte', 'para': 'InfoBrasil_Comercial', 'penalty': 99})
+            self.assertEqual(cliente.enviados[-2][1]['penalty'], '99')
+
+    def test_alterar_prioridade_valida_penalty_e_penalty_atual_0_a_99(self):
+        cliente = ClienteFalso()
+        with patch.dict(os.environ, {'NPX_FILAS_IDS': 'InfoBrasil_Suporte=10'}):
+            for penalty_invalido in (-1, 100, 'invalido', float('inf')):
+                with self.assertRaises(ValueError):
+                    alterar_prioridade(cliente, {'code': '4422001', 'fila': 'InfoBrasil_Suporte', 'penalty': penalty_invalido})
+                with self.assertRaises(ValueError):
+                    alterar_prioridade(cliente, {'code': '4422001', 'fila': 'InfoBrasil_Suporte', 'penalty': 1, 'penaltyAtual': penalty_invalido})
+            self.assertEqual(cliente.enviados, [])
+
+            # Válido aplica prioridade
+            res = alterar_prioridade(cliente, {'code': '4422001', 'fila': 'InfoBrasil_Suporte', 'penalty': 5})
+            self.assertTrue(res['ok'])
+            self.assertEqual(cliente.enviados[-1][1]['penalty'], '5')
+
     def test_validar_layout(self):
         self.assertEqual(validar_layout({'cols': 2, 'c1': ['A', 'A'], 'c2': ['A', 'B'], 'ord': {'col': 'tempo', 'dir': -1}, 'limite': 5}),
                          {'cols': 2, 'c1': ['A'], 'c2': ['B'], 'ord': {'col': 'tempo', 'dir': -1}, 'limite': 5})
         for ruim in ({'cols': 3}, {'c1': ['<script>']}, {'ord': {'col': 'senha'}}, {'limite': 0}, 'x'):
             with self.assertRaises((ValueError, TypeError)):
+                validar_layout(ruim)
+
+    def test_validar_layout_rejeita_ord_invalido_e_infinity(self):
+        for ruim in ({'ord': 'x'}, {'ord': 123}, {'cols': float('inf')}, {'limite': float('inf')},
+                     {'ord': {'col': 'status', 'dir': float('inf')}}):
+            with self.assertRaises((ValueError, TypeError, OverflowError)):
                 validar_layout(ruim)
 
 
@@ -206,6 +246,64 @@ class RotasTest(unittest.TestCase):
         self.cliente.token = ''
         self.assertIn('NPX_API_TOKEN', self.http.get('/agentes').text)
         self.assertEqual(self.http.get('/agentes/dados').status_code, 503)
+
+    def test_visitante_nao_ve_dados_sensiveis_de_chamada(self):
+        self.coletor.retrato = [{'code': '4422001', 'name': 'Darkison', 'queue': 'InfoBrasil_Suporte',
+                                 'status': 2, 'paused': False, 'callSrc': '85999990001',
+                                 'callDst': '4422001', 'callClient': '85999990001'}]
+        # Visitante / sem gerência
+        self.permitido = False
+        dados_pub = self.http.get('/agentes/dados').get_json()
+        agente_pub = dados_pub['agentes'][0]
+        self.assertFalse(dados_pub['podeGerenciar'])
+        self.assertNotIn('callSrc', agente_pub)
+        self.assertNotIn('callDst', agente_pub)
+        self.assertNotIn('callClient', agente_pub)
+        # Snapshot em memória permaneceu intacto
+        self.assertIn('callSrc', self.coletor.retrato[0])
+
+        # Usuário autorizado vê os campos
+        self.permitido = True
+        dados_auth = self.http.get('/agentes/dados').get_json()
+        agente_auth = dados_auth['agentes'][0]
+        self.assertTrue(dados_auth['podeGerenciar'])
+        self.assertEqual(agente_auth.get('callSrc'), '85999990001')
+        self.assertEqual(agente_auth.get('callDst'), '4422001')
+        self.assertEqual(agente_auth.get('callClient'), '85999990001')
+
+    def test_salvar_layout_rejeita_ord_invalido_e_infinity_com_400(self):
+        self.permitido = True
+        cabecalho = {'X-CSRF-Token': self.token}
+        self.assertEqual(self.http.post('/admin/agentes/layout', json={'ord': 'invalido'}, headers=cabecalho).status_code, 400)
+        self.assertEqual(self.http.post('/admin/agentes/layout', json={'cols': float('inf')}, headers=cabecalho).status_code, 400)
+        self.assertEqual(self.http.post('/admin/agentes/layout', json={'limite': float('inf')}, headers=cabecalho).status_code, 400)
+
+    def test_salvar_layout_registra_auditoria_sem_payload_sensivel(self):
+        self.permitido = True
+        cabecalho = {'X-CSRF-Token': self.token}
+        novo = {'cols': 2, 'c1': ['InfoBrasil_Suporte'], 'c2': [], 'ord': {'col': 'name', 'dir': 1}, 'limite': 15}
+        with patch('agentes_npx.registrar_acao_admin') as audit:
+            resp = self.http.post('/admin/agentes/layout', json=novo, headers=cabecalho)
+            self.assertEqual(resp.status_code, 200)
+            audit.assert_called_once_with('agentes_layout', {'cols': 2, 'limite': 15})
+
+    @patch.dict(os.environ, {'NPX_FILAS_IDS': 'InfoBrasil_Suporte=12;InfoBrasil_Comercial=13'})
+    def test_transferir_e_prioridade_validam_penalty_com_400_sem_mutacao(self):
+        self.permitido = True
+        cabecalho = {'X-CSRF-Token': self.token}
+        r1 = self.http.post('/admin/agentes/transferir',
+                            json={'code': '4422001', 'de': 'InfoBrasil_Suporte', 'para': 'InfoBrasil_Comercial', 'penalty': 150},
+                            headers=cabecalho)
+        self.assertEqual(r1.status_code, 400)
+        r2 = self.http.post('/admin/agentes/prioridade',
+                            json={'code': '4422001', 'fila': 'InfoBrasil_Suporte', 'penalty': -10},
+                            headers=cabecalho)
+        self.assertEqual(r2.status_code, 400)
+        r3 = self.http.post('/admin/agentes/prioridade',
+                            json={'code': '4422001', 'fila': 'InfoBrasil_Suporte', 'penalty': 1, 'penaltyAtual': 200},
+                            headers=cabecalho)
+        self.assertEqual(r3.status_code, 400)
+        self.assertEqual(self.cliente.enviados, [])
 
 
 class IntegracaoBancosTest(unittest.TestCase):
