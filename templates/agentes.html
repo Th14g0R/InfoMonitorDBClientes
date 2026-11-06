@@ -15,7 +15,7 @@
   </script>
   <link rel="stylesheet" href="/static/ui.css?v=menu-20261023-1">
   <link rel="stylesheet" href="/static/menu_navegacao.css?v=menu-20261023-1">
-  <link rel="stylesheet" href="/static/agentes.css?v=20261106-1">
+  <link rel="stylesheet" href="/static/agentes.css?v=20261106-3">
   <script src="/static/csrf.js"></script>
   <script src="/static/ui.js?v=menu-20261023-1" defer></script>
 </head>
@@ -28,11 +28,9 @@
     </div>
     <div class="ag-ctl">
       {% if pode_gerenciar %}
-      <label>Pausa presa acima de <input type="number" id="limite" min="1" max="600" value="{{ layout_inicial.limite }}"> min</label>
       <label><input type="checkbox" id="soPausa"> só em pausa</label>
       <span class="seg" id="segCols" title="Colunas"><button type="button" data-v="1">1 coluna</button><button type="button" data-v="2">2 colunas</button></span>
       {% endif %}
-      <button type="button" id="cheia" title="Tela cheia (Esc para sair)">⛶ Tela cheia</button>
     </div>
   </header>
   <div class="ag-menu">{% include 'menu_navegacao.html' %}</div>
@@ -47,7 +45,7 @@
       <div class="chip cham"><b id="nCham">–</b>recebendo</div>
       <div class="chip lig"><b id="nLig">–</b>em ligação</div>
       <div class="chip pausa"><b id="nPausa">–</b>em pausa</div>
-      <div class="chip presa"><b id="nPresa">–</b>pausa presa</div>
+      <div class="chip presa"><b id="nPresa">–</b>pausa estourada</div>
     </div>
     <div id="msg" role="status"></div>
     <div id="filas"><p class="mut">Carregando…</p></div>
@@ -61,11 +59,13 @@
     <div class="dlg-h"><h3 id="dNome"></h3><div id="dInfo" class="mut"></div></div>
     <div class="dlg-b">
       <div class="acao" id="aPausa"><label>Pausa</label>
-        <div class="linha"><span id="dPausa"></span><button type="button" class="btn-pausa" id="bTirar">Tirar pausa</button></div></div>
+        <div class="linha"><span id="dPausa"></span><button type="button" class="btn-pausa" id="bTirar">Tirar pausa</button><button type="button" class="btn-pausa" id="bPausar">Colocar em pausa</button></div></div>
       <div class="acao"><label for="dFila">Transferir para a fila</label>
         <div class="linha"><select id="dFila"></select><button type="button" id="bTransf">Transferir</button></div></div>
-      <div class="acao"><label for="dPen">Prioridade (1 = atende primeiro)</label>
-        <div class="linha"><input type="number" id="dPen" min="0" max="99"><button type="button" id="bPen">Salvar</button></div></div>
+      <div class="acao"><label for="dPen">Prioridade (1 = atende primeiro, 10 = atende por último)</label>
+        <div class="linha"><input type="number" id="dPen" min="1" max="10" value="1"><button type="button" id="bPen">Salvar</button></div></div>
+      <div class="acao"><label>Remover da Fila</label>
+        <div class="linha"><button type="button" class="btn-perigo" id="bRemoverFila">Remover da fila</button></div></div>
       <div class="acao"><label>Sessão</label>
         <div class="linha"><button type="button" class="btn-perigo" id="bDeslogar">Deslogar agente</button></div></div>
       <div id="dlgMsg" role="status"></div>
@@ -75,6 +75,6 @@
   {% endif %}
 </div>
 <script type="application/json" id="cfg-agentes">{{ {'pode': pode_gerenciar, 'layout': layout_inicial} | tojson }}</script>
-<script src="/static/agentes.js?v=20261106-2"></script>
+<script src="/static/agentes.js?v=20261106-6"></script>
 </body>
 </html>

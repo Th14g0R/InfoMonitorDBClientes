@@ -18,8 +18,8 @@
   const COLS = [['name', 'Agente'], ['status', 'Status'], ['tempo', 'Tempo'], ['penalty', 'Prior.'], ['situacao', 'Situação']];
   const GRUPO = '<colgroup><col class="c-ag"><col class="c-st"><col class="c-tp"><col class="c-pr"><col class="c-si"><col class="c-ac"></colgroup>';
 
-  let dados = [], filas = [], carregando = false, sel = null, arrastando = null, alvo = null;
-  let layout = CFG.layout || {cols: 2, c1: [], c2: [], ord: {col: 'status', dir: 1}, limite: 10};
+  let dados = [], filas = [], carregando = false, sel = null, arrastando = null, alvo = null, painelConfigurado = true;
+  let layout = CFG.layout || {cols: 2, c1: [], c2: [], ord: {col: 'status', dir: 1}};
   let timerSalvar = null;
 
   // ---------- utilidades ----------
@@ -39,8 +39,12 @@
     return n || '';
   }
   const fila = k => filas.find(f => f.key === k) || {key: k, nome: k, temId: false};
-  const limite = () => Number(layout.limite) || 10;
-  const presa = a => a.paused && a.pauseMinutes != null && a.pauseMinutes >= limite();
+  const maxValido = m => m != null && Number.isFinite(Number(m)) && Number(m) >= 0;
+  const estourada = a => {
+    if (!a.paused || !maxValido(a.pauseMaxMinutes) || a.pauseMinutes == null) return false;
+    const min = Number(a.pauseMinutes);
+    return Number.isFinite(min) && min > Number(a.pauseMaxMinutes);
+  };
   const duasColunas = () => Number(layout.cols) === 2 && innerWidth > 900;
   const soPausa = () => PODE && $('soPausa') && $('soPausa').checked;
 
@@ -48,9 +52,24 @@
     const num = a.callSrc || a.callDst || a.callClient || '';
     return num ? {num, dir: a.callDst && !a.callSrc ? 'para' : 'de'} : null;
   }
-  function situacaoTexto(a) { if (a.paused) return a.pauseType || 'Pausa'; const c = chamada(a); return c ? c.num : ''; }
+  function situacaoTexto(a) {
+    if (a.paused) {
+      const tipo = a.pauseType || 'Pausa';
+      if (maxValido(a.pauseMaxMinutes) && a.pauseMinutes != null && Number.isFinite(Number(a.pauseMinutes))) {
+        return `${tipo} · ${Math.round(a.pauseMinutes)}m de ${Math.round(a.pauseMaxMinutes)}m`;
+      }
+      return `${tipo}${a.pauseStart ? ` desde ${fmtHora(a.pauseStart)}` : ''}`;
+    }
+    const c = chamada(a); return c ? c.num : '';
+  }
   function situacaoHtml(a) {
-    if (a.paused) return `${esc(a.pauseType || 'Pausa')}${a.pauseStart ? ` <span class="mut">desde ${fmtHora(a.pauseStart)}</span>` : ''}`;
+    if (a.paused) {
+      const tipo = esc(a.pauseType || 'Pausa');
+      if (maxValido(a.pauseMaxMinutes) && a.pauseMinutes != null && Number.isFinite(Number(a.pauseMinutes))) {
+        return `${tipo} <span class="mut">· ${Math.round(a.pauseMinutes)}m de ${Math.round(a.pauseMaxMinutes)}m</span>`;
+      }
+      return `${tipo}${a.pauseStart ? ` <span class="mut">desde ${fmtHora(a.pauseStart)}</span>` : ''}`;
+    }
     if (a.status === 2 || a.status === 5) {
       const c = chamada(a);
       if (!c) return `<span class="mut">${a.status === 5 ? 'Chamando' : 'Em ligação'}</span>`;
@@ -87,12 +106,12 @@
 
   // ---------- desenho ----------
   function linha(a) {
-    const st = stDe(a), p = presa(a);
+    const st = stDe(a), est = estourada(a);
     const nome = PODE ? `<button type="button" class="nome" data-abrir="${esc(a.code)}" data-fila="${esc(a.queue)}">${esc(a.name)}</button>`
                       : `<span class="nome">${esc(a.name)}</span>`;
-    const btn = PODE && a.paused ? `<button type="button" class="${p ? 'btn-pausa' : ''}" data-tirar="${esc(a.code)}" data-nome="${esc(a.name)}">Tirar pausa</button>` : '';
-    return `<tr class="${st[3]}${p ? ' presa' : ''}" style="--c:${st[1]}">
-      <td>${nome}${p ? '<span class="tag">PRESA</span>' : ''}<br><span class="mut">${esc(a.code)}${a.extension && a.extension != a.code ? ' · ramal ' + esc(a.extension) : ''}</span></td>
+    const btn = PODE && a.paused ? `<button type="button" class="${est ? 'btn-pausa' : ''}" data-tirar="${esc(a.code)}" data-nome="${esc(a.name)}">Tirar pausa</button>` : '';
+    return `<tr class="${st[3]}${est ? ' estourada presa' : ''}" style="--c:${st[1]}">
+      <td>${nome}<br><span class="mut">${esc(a.code)}${a.extension && a.extension != a.code ? ' · ramal ' + esc(a.extension) : ''}</span></td>
       <td><span class="pill" style="--c:${st[1]}">${esc(st[0])}</span></td>
       <td class="tempo">${a.seconds == null && !a.paused ? '–' : fmtSeg(segs(a))}</td>
       <td>${esc(a.penalty ?? '–')}</td>
@@ -123,12 +142,13 @@
     $('nCham').textContent = conta(a => !a.paused && a.status === 5);
     $('nLig').textContent = conta(a => !a.paused && a.status === 2);
     $('nPausa').textContent = conta(a => a.paused);
-    $('nPresa').textContent = conta(presa);
+    $('nPresa').textContent = conta(estourada);
     const o = layout.ord || {};
     const cab = COLS.map(([c, t]) => `<th ${PODE ? `data-col="${c}"` : ''} title="${c === 'penalty' ? 'Prioridade (1 = atende primeiro)' : t}" class="${o.col === c ? 'ativo' : ''}">${t}<span class="seta">${o.col === c ? (o.dir > 0 ? '▲' : '▼') : '↕'}</span></th>`).join('') + '<th></th>';
     const {c1, c2} = arrumacao();
+    const dropFim = PODE ? '<div class="drop-fim" title="Solte aqui para mover para o fim da coluna"></div>' : '';
     const coluna = (n, ks) => `<div class="col" data-coluna="${n}">${ks.map(k => card(k, cab)).join('') ||
-      (PODE ? '<div class="col-vazia">Arraste um grupo para cá</div>' : '')}</div>`;
+      (PODE ? '<div class="col-vazia">Arraste um grupo para cá</div>' : '')}${ks.length && PODE ? dropFim : ''}</div>`;
     const box = $('filas');
     AG.classList.toggle('duas-colunas', duasColunas());
     if (duasColunas()) { box.classList.add('duas'); box.innerHTML = coluna(1, c1) + coluna(2, c2); }
@@ -145,6 +165,7 @@
       const j = await r.json();
       if (!r.ok) throw new Error(j.erro || r.status);
       dados = j.agentes || []; filas = j.filas || [];
+      painelConfigurado = j.painelConfigurado !== false;
       // quem só visualiza segue sempre o layout do administrador; quem edita só recebe na abertura
       if (!PODE || primeiraCarga) { layout = j.layout || layout; aplicarControles(); }
       primeiraCarga = false;
@@ -158,7 +179,6 @@
   }
   function aplicarControles() {
     marcar('segCols', layout.cols);
-    if ($('limite')) $('limite').value = layout.limite;
   }
   function salvarLayout() {
     if (!PODE) return;
@@ -183,10 +203,23 @@
     el.textContent = j.ok ? '✔ ' + okTxt : '✖ ' + (j.mensagem || j.erro || 'Falhou.');
     el.style.color = j.ok ? 'var(--livre)' : 'var(--lig)';
   }
-  async function tirar(code, nome, el) {
+  async function acao(btn, fn, el) {
+    const alvoMsg = el || $('dlgMsg') || $('msg');
+    if (btn) btn.disabled = true;
+    try { await fn(alvoMsg); } catch (e) { if (alvoMsg) alvoMsg.textContent = 'Erro: ' + e.message; }
+    finally { if (btn) btn.disabled = false; setTimeout(carregar, 1200); }
+  }
+  function tirar(code, nome, el, btn) {
     if (!confirm(`Tirar ${nome} (${code}) da pausa?`)) return;
-    resultado(await post(`/admin/agentes/${encodeURIComponent(code)}/tirar-pausa`), `${nome} saiu da pausa.`, el);
-    setTimeout(carregar, 1500);
+    acao(btn, async (alvoMsg) => {
+      resultado(await post(`/admin/agentes/${encodeURIComponent(code)}/tirar-pausa`), `${nome} saiu da pausa.`, alvoMsg);
+    }, el);
+  }
+  function colocarPausa(code, nome, el, btn) {
+    if (!confirm(`Colocar ${nome} (${code}) em pausa?`)) return;
+    acao(btn, async (alvoMsg) => {
+      resultado(await post(`/admin/agentes/${encodeURIComponent(code)}/colocar-pausa`), `${nome} foi colocado em pausa.`, alvoMsg);
+    }, el);
   }
   function abrir(code, f) { sel = {code, fila: f}; $('dlgMsg').textContent = ''; atualizarDialogo(true); $('dlg').showModal(); }
   function atualizarDialogo(inicial) {
@@ -197,44 +230,64 @@
     $('dNome').textContent = a.name;
     $('dInfo').innerHTML = `Código ${esc(a.code)} · ramal ${esc(a.extension || a.code)} · fila <b>${esc(fila(a.queue).nome)}</b><br>
       <span class="pill" style="--c:${st[1]}">${esc(st[0])}</span>${c && !a.paused ? ` 📞 ${c.dir} <b>${esc(fmtFone(c.num))}</b>` : ''}`;
-    $('aPausa').style.display = a.paused ? '' : 'none';
-    $('dPausa').textContent = a.paused ? `${a.pauseType || 'Pausa'} há ${fmtSeg(segs(a))}` : '';
+    $('aPausa').style.display = '';
+    if (a.paused) {
+      $('bTirar').style.display = '';
+      $('bPausar').style.display = 'none';
+      $('dPausa').textContent = `${a.pauseType || 'Pausa'} há ${fmtSeg(segs(a))}`;
+    } else {
+      $('bTirar').style.display = 'none';
+      $('bPausar').style.display = '';
+      $('bPausar').disabled = !painelConfigurado;
+      $('dPausa').textContent = 'Agente ativo / fora de pausa';
+    }
     if (inicial) {
-      const atual = fila(a.queue);
       const destinos = filas.filter(f => f.key !== a.queue);
-      const algum = atual.temId && destinos.some(f => f.temId);
-      $('dFila').innerHTML = (algum ? '' : '<option value="" selected disabled>Aguardando ID das filas na NPX</option>') +
-        destinos.map(f => `<option value="${esc(f.key)}" ${f.temId && atual.temId ? '' : 'disabled'}>${esc(f.nome)}${f.temId ? '' : ' (sem ID da NPX)'}</option>`).join('');
-      $('bTransf').disabled = !algum;
-      $('bPen').disabled = !atual.temId;
-      $('dPen').value = a.penalty ?? 1;
-      if (!atual.temId) { $('dlgMsg').textContent = 'Transferir e mudar prioridade dependem do ID desta fila na NPX (NPX_FILAS_IDS).'; $('dlgMsg').style.color = 'var(--mut)'; }
+      $('dFila').innerHTML = destinos.length
+        ? destinos.map(f => `<option value="${esc(f.key)}">${esc(f.nome)}</option>`).join('')
+        : '<option value="" disabled>Nenhuma outra fila disponível</option>';
+      $('bTransf').disabled = !painelConfigurado || !destinos.length;
+      $('bPen').disabled = !painelConfigurado;
+      $('bRemoverFila').disabled = !painelConfigurado;
+      const penAtual = Number(a.penalty);
+      $('dPen').value = Number.isInteger(penAtual) && penAtual >= 1 && penAtual <= 10 ? penAtual : 1;
+      if (!painelConfigurado) {
+        $('dlgMsg').textContent = 'Ações do painel aguardando configuração de credenciais no servidor.';
+        $('dlgMsg').style.color = 'var(--mut)';
+      }
     }
   }
-  async function acao(btn, fn) {
-    btn.disabled = true;
-    try { await fn(); } catch (e) { $('dlgMsg').textContent = 'Erro: ' + e.message; }
-    finally { btn.disabled = false; setTimeout(carregar, 1500); }
-  }
   if (PODE) {
-    $('bTirar').onclick = () => tirar(sel.agente.code, sel.agente.name, $('dlgMsg'));
-    $('bTransf').onclick = e => acao(e.currentTarget, async () => {
+    $('bTirar').onclick = e => tirar(sel.agente.code, sel.agente.name, $('dlgMsg'), e.currentTarget);
+    $('bPausar').onclick = e => colocarPausa(sel.agente.code, sel.agente.name, $('dlgMsg'), e.currentTarget);
+    $('bTransf').onclick = e => acao(e.currentTarget, async (alvoMsg) => {
       const a = sel.agente, para = $('dFila').value; if (!para) return;
       if (!confirm(`Transferir ${a.name} de ${fila(a.queue).nome} para ${fila(para).nome}?`)) return;
-      const j = await post('/admin/agentes/transferir', {code: a.code, de: a.queue, para, extension: a.extension, penalty: a.penalty});
-      resultado(j, `${a.name} agora está em ${fila(para).nome}.`, $('dlgMsg'));
+      const j = await post('/admin/agentes/transferir', {code: a.code, de: a.queue, para: para, extension: a.extension});
+      resultado(j, `${a.name} agora está em ${fila(para).nome}.`, alvoMsg);
       if (j.ok) sel.fila = para;
     });
-    $('bPen').onclick = e => acao(e.currentTarget, async () => {
+    $('bPen').onclick = e => acao(e.currentTarget, async (alvoMsg) => {
       const a = sel.agente, pen = Number($('dPen').value);
-      if (!(pen >= 0 && pen <= 99)) { $('dlgMsg').textContent = 'Prioridade inválida.'; return; }
-      const j = await post('/admin/agentes/prioridade', {code: a.code, fila: a.queue, extension: a.extension, penalty: pen, penaltyAtual: a.penalty});
-      resultado(j, `Prioridade de ${a.name} agora é ${pen}.`, $('dlgMsg'));
+      if (!Number.isInteger(pen) || pen < 1 || pen > 10) {
+        alvoMsg.textContent = 'Prioridade deve ser um número inteiro entre 1 e 10.';
+        alvoMsg.style.color = 'var(--lig)';
+        return;
+      }
+      if (!confirm(`Alterar prioridade de ${a.name} para ${pen}?`)) return;
+      const j = await post('/admin/agentes/prioridade', {code: a.code, fila: a.queue, penalty: pen});
+      resultado(j, `Prioridade de ${a.name} agora é ${pen}.`, alvoMsg);
     });
-    $('bDeslogar').onclick = e => acao(e.currentTarget, async () => {
+    $('bRemoverFila').onclick = e => acao(e.currentTarget, async (alvoMsg) => {
+      const a = sel.agente;
+      if (!confirm(`ATENÇÃO: Remover ${a.name} (${a.code}) da fila ${fila(a.queue).nome}? Ele deixará de receber chamadas desta fila.`)) return;
+      const j = await post(`/admin/agentes/${encodeURIComponent(a.code)}/remover-fila`, {fila: a.queue});
+      resultado(j, `${a.name} foi removido da fila ${fila(a.queue).nome}.`, alvoMsg);
+    });
+    $('bDeslogar').onclick = e => acao(e.currentTarget, async (alvoMsg) => {
       const a = sel.agente;
       if (!confirm(`Deslogar ${a.name} (${a.code})? Ele sai das filas e para de receber ligações.`)) return;
-      resultado(await post(`/admin/agentes/${encodeURIComponent(a.code)}/deslogar`), `${a.name} foi deslogado.`, $('dlgMsg'));
+      resultado(await post(`/admin/agentes/${encodeURIComponent(a.code)}/deslogar`), `${a.name} foi deslogado.`, alvoMsg);
     });
     $('bFechar').onclick = () => $('dlg').close();
     $('dlg').addEventListener('close', () => { sel = null; });
@@ -247,6 +300,7 @@
     box.addEventListener('dragstart', e => {
       const s = e.target.closest('.alca') && e.target.closest('section.fila'); if (!s) return;
       arrastando = s.dataset.fila; s.classList.add('arrastando');
+      AG.classList.add('arrastando');
       e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', arrastando);
       try { e.dataTransfer.setDragImage(s, 20, 20); } catch (_) { /* navegador sem suporte */ }
     });
@@ -255,30 +309,82 @@
       const col = e.target.closest('.col'); if (!col) return;
       e.preventDefault(); limparAlvos();
       const s = e.target.closest('section.fila');
-      if (s && s.dataset.fila !== arrastando) {
+
+      // sobre o próprio grupo que está sendo arrastado: limpa alvo para não reter posição anterior
+      if (s && s.dataset.fila === arrastando) {
+        alvo = null;
+        return;
+      }
+
+      if (s) {
         const r = s.getBoundingClientRect(), antes = e.clientY < r.top + r.height / 2;
         s.classList.add(antes ? 'alvo-antes' : 'alvo-depois');
-        const prox = antes ? s : s.nextElementSibling;
+        let prox = s;
+        if (!antes) {
+          prox = s.nextElementSibling;
+          while (prox && prox.dataset && prox.dataset.fila === arrastando) {
+            prox = prox.nextElementSibling;
+          }
+        }
         alvo = {coluna: col.dataset.coluna, antesDe: prox && prox.dataset ? prox.dataset.fila || null : null};
-      } else if (!s) {
-        col.classList.add('alvo-fim'); alvo = {coluna: col.dataset.coluna, antesDe: null};
+        return;
       }
+
+      // cursor em gap entre cards ou na dropzone final
+      const cards = [...col.querySelectorAll('section.fila:not(.arrastando)')];
+      if (!cards.length) {
+        col.classList.add('alvo-fim'); alvo = {coluna: col.dataset.coluna, antesDe: null};
+        return;
+      }
+      const ultimoCard = cards[cards.length - 1], rUltimo = ultimoCard.getBoundingClientRect();
+      if (e.clientY >= rUltimo.bottom) {
+        col.classList.add('alvo-fim'); alvo = {coluna: col.dataset.coluna, antesDe: null};
+        return;
+      }
+      const primeiroCard = cards[0], rPrimeiro = primeiroCard.getBoundingClientRect();
+      if (e.clientY <= rPrimeiro.top) {
+        primeiroCard.classList.add('alvo-antes');
+        alvo = {coluna: col.dataset.coluna, antesDe: primeiroCard.dataset.fila};
+        return;
+      }
+      // no gap entre cards: seleciona o vizinho mais próximo por clientY
+      let maisProx = cards[0], menorDist = Math.abs(e.clientY - (rPrimeiro.top + rPrimeiro.height / 2));
+      for (let i = 1; i < cards.length; i++) {
+        const rc = cards[i].getBoundingClientRect(), d = Math.abs(e.clientY - (rc.top + rc.height / 2));
+        if (d < menorDist) { menorDist = d; maisProx = cards[i]; }
+      }
+      const rm = maisProx.getBoundingClientRect(), antes = e.clientY < rm.top + rm.height / 2;
+      maisProx.classList.add(antes ? 'alvo-antes' : 'alvo-depois');
+      let prox = maisProx;
+      if (!antes) {
+        prox = maisProx.nextElementSibling;
+        while (prox && prox.dataset && prox.dataset.fila === arrastando) {
+          prox = prox.nextElementSibling;
+        }
+      }
+      alvo = {coluna: col.dataset.coluna, antesDe: prox && prox.dataset ? prox.dataset.fila || null : null};
     });
     box.addEventListener('drop', e => {
       if (!arrastando || !alvo) return; e.preventDefault();
       const {c1, c2} = arrumacao();
       let n1 = c1.filter(k => k !== arrastando), n2 = c2.filter(k => k !== arrastando);
-      if (!duasColunas()) {   // uma coluna: reordena a sequência e mantém cada grupo na sua coluna
+      if (!duasColunas()) {   // uma coluna: reordena a sequência visual mantendo separação c1/c2
         const seq = n1.concat(n2), i = alvo.antesDe ? seq.indexOf(alvo.antesDe) : seq.length;
         seq.splice(i < 0 ? seq.length : i, 0, arrastando);
-        n1 = seq.filter(k => c1.includes(k)); n2 = seq.filter(k => !c1.includes(k));
+        if (alvo.antesDe === null && n2.length > 0) {
+          // ao soltar no drop-fim da coluna única, posiciona no fim de c2 para ser o último visualmente
+          n1 = seq.filter(k => c1.includes(k) && k !== arrastando);
+          n2 = seq.filter(k => c2.includes(k) || k === arrastando);
+        } else {
+          n1 = seq.filter(k => c1.includes(k)); n2 = seq.filter(k => !c1.includes(k));
+        }
       } else {
         const lista = alvo.coluna === '1' ? n1 : n2, i = alvo.antesDe ? lista.indexOf(alvo.antesDe) : lista.length;
         lista.splice(i < 0 ? lista.length : i, 0, arrastando);
       }
       layout = {...layout, c1: n1, c2: n2}; salvarLayout();
     });
-    box.addEventListener('dragend', () => { arrastando = null; alvo = null; limparAlvos(); render(); });
+    box.addEventListener('dragend', () => { arrastando = null; alvo = null; AG.classList.remove('arrastando'); limparAlvos(); render(); });
   }
 
   // ---------- controles ----------
@@ -289,22 +395,20 @@
       const c = th.dataset.col, o = layout.ord || {};
       layout = {...layout, ord: {col: c, dir: o.col === c ? -o.dir : 1}}; render(); salvarLayout(); return;
     }
-    const t = e.target.closest('button[data-tirar]'); if (t) { tirar(t.dataset.tirar, t.dataset.nome, $('msg')); return; }
+    const t = e.target.closest('button[data-tirar]'); if (t) { tirar(t.dataset.tirar, t.dataset.nome, $('msg'), t); return; }
     const n = e.target.closest('button[data-abrir]'); if (n) abrir(n.dataset.abrir, n.dataset.fila);
   });
   if (PODE) {
     $('segCols').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; layout = {...layout, cols: Number(b.dataset.v)}; marcar('segCols', layout.cols); render(); salvarLayout(); });
-    $('limite').addEventListener('input', () => { const v = Number($('limite').value); if (v >= 1 && v <= 600) { layout = {...layout, limite: v}; render(); salvarLayout(); } });
     $('soPausa').checked = ler('agentes-soPausa') === '1';
     $('soPausa').addEventListener('change', () => { guardar('agentes-soPausa', $('soPausa').checked ? '1' : '0'); render(); });
   }
-  // tela cheia (botão ou F11): esconde menu e controles
+  // tela cheia (F11 ou fullscreenchange): esconde menu e controles
   function checaTelaCheia() {
     const cheia = !!document.fullscreenElement || matchMedia('(display-mode: fullscreen)').matches ||
                   (innerHeight >= screen.height - 2 && innerWidth >= screen.width - 2);
     root.classList.toggle('tela-cheia', cheia);
   }
-  $('cheia').addEventListener('click', () => { if (root.requestFullscreen) root.requestFullscreen().catch(() => {}); });
   document.addEventListener('fullscreenchange', checaTelaCheia);
   let largAnterior = innerWidth;
   addEventListener('resize', () => { checaTelaCheia(); if ((largAnterior > 900) !== (innerWidth > 900)) render(); largAnterior = innerWidth; });
