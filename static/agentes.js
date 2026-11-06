@@ -298,13 +298,6 @@
     $('soPausa').checked = ler('agentes-soPausa') === '1';
     $('soPausa').addEventListener('change', () => { guardar('agentes-soPausa', $('soPausa').checked ? '1' : '0'); render(); });
   }
-  // tema: o mesmo do restante do InfoMonitor
-  function setTema(v) {
-    root.setAttribute('data-theme', v); guardar('infomonitor-theme', v); marcar('segTema', v);
-  }
-  $('segTema').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setTema(b.dataset.v); });
-  marcar('segTema', root.getAttribute('data-theme') || 'light');
-  new MutationObserver(() => marcar('segTema', root.getAttribute('data-theme') || 'light')).observe(root, {attributes: true, attributeFilter: ['data-theme']});
   // tela cheia (botão ou F11): esconde menu e controles
   function checaTelaCheia() {
     const cheia = !!document.fullscreenElement || matchMedia('(display-mode: fullscreen)').matches ||
