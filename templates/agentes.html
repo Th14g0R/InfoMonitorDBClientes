@@ -31,7 +31,6 @@
       <label><input type="checkbox" id="soPausa"> só em pausa</label>
       <span class="seg" id="segCols" title="Colunas"><button type="button" data-v="1">1 coluna</button><button type="button" data-v="2">2 colunas</button></span>
       {% endif %}
-      <button type="button" id="cheia" title="Tela cheia (Esc para sair)">⛶ Tela cheia</button>
     </div>
   </header>
   <div class="ag-menu">{% include 'menu_navegacao.html' %}</div>
@@ -76,6 +75,6 @@
   {% endif %}
 </div>
 <script type="application/json" id="cfg-agentes">{{ {'pode': pode_gerenciar, 'layout': layout_inicial} | tojson }}</script>
-<script src="/static/agentes.js?v=20261106-5"></script>
+<script src="/static/agentes.js?v=20261106-6"></script>
 </body>
 </html>

@@ -403,13 +403,12 @@
     $('soPausa').checked = ler('agentes-soPausa') === '1';
     $('soPausa').addEventListener('change', () => { guardar('agentes-soPausa', $('soPausa').checked ? '1' : '0'); render(); });
   }
-  // tela cheia (botão ou F11): esconde menu e controles
+  // tela cheia (F11 ou fullscreenchange): esconde menu e controles
   function checaTelaCheia() {
     const cheia = !!document.fullscreenElement || matchMedia('(display-mode: fullscreen)').matches ||
                   (innerHeight >= screen.height - 2 && innerWidth >= screen.width - 2);
     root.classList.toggle('tela-cheia', cheia);
   }
-  $('cheia').addEventListener('click', () => { if (root.requestFullscreen) root.requestFullscreen().catch(() => {}); });
   document.addEventListener('fullscreenchange', checaTelaCheia);
   let largAnterior = innerWidth;
   addEventListener('resize', () => { checaTelaCheia(); if ((largAnterior > 900) !== (innerWidth > 900)) render(); largAnterior = innerWidth; });
