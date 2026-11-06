@@ -777,7 +777,7 @@ class SegurancaTest(unittest.TestCase):
         self.assertIsNotNone(links)
         self.assertEqual(links.tag, consultas.tag)
         anchors = _links(links)
-        for rotulo in ('TEF-SiTEF', 'SmartPOS', 'Downloads', 'Reforma Tributária'):
+        for rotulo in ('TEF-SiTEF', 'SmartPOS', 'Downloads', 'Reforma Tributária', 'API Infobrasil'):
             with self.subTest(rotulo=rotulo):
                 link = next((a for a in anchors if rotulo in a.texto()), None)
                 self.assertIsNotNone(link)
