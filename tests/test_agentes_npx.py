@@ -2,21 +2,61 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import closing
+from datetime import datetime
+from http import cookiejar
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+from urllib import error as urlerror
 
 from flask import Blueprint, Flask
 
 import agentes_npx
-from agentes_npx import ClienteNpx, ColetorAgentes, LayoutAgentes, alterar_prioridade, configurar_agentes, transferir, validar_layout
+import seguranca
+from agentes_npx import (
+    ClienteNpx,
+    ClientePainelNpx,
+    ColetorAgentes,
+    LayoutAgentes,
+    SameOriginRedirectHandler,
+    alterar_prioridade,
+    configurar_agentes,
+    nomes_filas,
+    transferir,
+    validar_layout,
+)
 
 RAIZ = Path(__file__).resolve().parent.parent
 
 
+class MockResponse:
+    def __init__(self, body, status=200, headers=None, url='https://app.npx.com.br/rates'):
+        self.body = body.encode('utf-8') if isinstance(body, str) else body
+        self.status = status
+        self.headers = headers or {}
+        self.url = url
+
+    def read(self, *args):
+        return self.body
+
+    def geturl(self):
+        return self.url
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
 class ClienteFalso(ClienteNpx):
-    """Responde como a API da NPX a partir de um dicionário, registrando os POSTs."""
+    """Responde como a API Beatrix da NPX a partir de um dicionário, registrando os POSTs."""
     def __init__(self, respostas=None, posts=None):
         super().__init__(base='https://npx.invalid/api', token='teste')
         self.respostas = respostas or {}
@@ -37,6 +77,27 @@ class ClienteFalso(ClienteNpx):
         return {'ok': True, 'http': 200, 'mensagem': 'Sucesso'}
 
 
+class ClientePainelFalso:
+    """Mock do ClientePainelNpx registrando chamadas de executar()."""
+    def __init__(self, configurado=True, respostas=None):
+        self._configurado = configurado
+        self.respostas = respostas or {}
+        self.executados = []
+
+    @property
+    def configurado(self):
+        return self._configurado
+
+    def executar(self, acao, parametros):
+        self.executados.append((acao, dict(parametros)))
+        if not self._configurado:
+            return {'ok': False, 'http': 503, 'mensagem': 'Painel NPX não configurado no servidor.'}
+        for chave, resp in self.respostas.items():
+            if chave == acao or chave in str(parametros):
+                return resp
+        return {'ok': True, 'http': 200, 'mensagem': f'Ação {acao} executada com sucesso.'}
+
+
 def status(nome, st=1, paused=0, duration=60, penalty=2, src=''):
     return {'name': nome, 'status': st, 'paused': paused, 'duration': duration, 'penalty': penalty,
             'extension': None, 'src': src, 'dst': '', 'current_call': {'client_name': src}}
@@ -53,7 +114,6 @@ class ColetorTest(unittest.TestCase):
             {'code': '4422009', 'agent_name': 'Antigo', 'queue': 'InfoBrasil_Suporte', 'logon_date': '2026-10-01T07:00:00-03:00', 'logoff_date': '2026-10-01T18:00:00-03:00'},
         ]
         hoje = [
-            # mesma sessão do histórico, agora com logoff: não pode aparecer
             {'code': '4422005', 'agent_name': 'Saiu', 'queue': 'InfoBrasil_Suporte', 'logon_date': '2026-11-06T07:00:00-03:00', 'logoff_date': '2026-11-06T08:00:00-03:00'},
             {'code': '4422001', 'agent_name': 'Darkison', 'queue': 'InfoBrasil_Suporte', 'logon_date': '2026-11-06T07:57:08-03:00', 'logoff_date': None},
         ]
@@ -92,63 +152,448 @@ class ColetorTest(unittest.TestCase):
         with patch.object(ClienteNpx, '_req', return_value=(200, '{"message":"Sucesso","status":1}')):
             self.assertTrue(cliente.post('/x')['ok'])
 
+    def test_forcar_releitura_acorda_coletor(self):
+        cliente = ClienteFalso()
+        coletor = ColetorAgentes(cliente)
+        coletor.forcar_releitura()
+        self.assertTrue(coletor._forcar.is_set())
+        self.assertTrue(coletor._acordar.is_set())
+
+    def test_coletor_erro_publico_generico_sem_vazar_exception(self):
+        cliente = ClienteFalso()
+        coletor = ColetorAgentes(cliente)
+        with patch.object(coletor, 'coletar', side_effect=RuntimeError('Sensivel: token_privado_xyz')):
+            try:
+                coletor.coletar()
+            except Exception:
+                coletor.erro = 'Coleta de agentes indisponível no momento.'
+        self.assertEqual(coletor.erro, 'Coleta de agentes indisponível no momento.')
+        self.assertNotIn('token_privado_xyz', coletor.erro)
+
+
+class ClientePainelNpxTest(unittest.TestCase):
+    def test_painel_url_requer_https_sem_credenciais_e_default_exato(self):
+        painel_padrao = ClientePainelNpx(base='', email='u@x.com', senha='123')
+        self.assertEqual(painel_padrao.base, 'https://app.npx.com.br')
+        self.assertTrue(painel_padrao.configurado)
+
+        painel_http = ClientePainelNpx(base='http://app.npx.com.br', email='u@x.com', senha='123')
+        self.assertFalse(painel_http.configurado)
+
+        painel_creds = ClientePainelNpx(base='https://user:pass@app.npx.com.br', email='u@x.com', senha='123')
+        self.assertFalse(painel_creds.configurado)
+
+        painel_query = ClientePainelNpx(base='https://app.npx.com.br?foo=bar', email='u@x.com', senha='123')
+        self.assertFalse(painel_query.configurado)
+
+        self.assertFalse(ClientePainelNpx(base='https://app.npx.com.br', email='', senha='123').configurado)
+        self.assertFalse(ClientePainelNpx(base='https://app.npx.com.br', email='u@x.com', senha='').configurado)
+
+    def test_autenticacao_devise_extrai_token_e_grava_cookies(self):
+        painel = ClientePainelNpx(base='https://app.npx.com.br', email='user@teste.com', senha='secretpassword')
+        html_login = '<html><form action="/users/sign_in"><input type="hidden" name="authenticity_token" value="csrf_abc_123"></form></html>'
+
+        respostas = [
+            MockResponse(html_login, status=200, url='https://app.npx.com.br/users/sign_in'),
+            MockResponse('<html>Dashboard</html>', status=200, url='https://app.npx.com.br/rates/monitor'),
+        ]
+
+        with patch.object(painel, '_criar_opener') as mock_criar:
+            mock_opener = MagicMock()
+            mock_opener.open.side_effect = lambda req, timeout=None: respostas.pop(0)
+            mock_criar.return_value = mock_opener
+
+            self.assertTrue(painel.autenticar())
+            self.assertTrue(painel._autenticado)
+            self.assertEqual(painel._token_csrf, 'csrf_abc_123')
+            self.assertEqual(mock_opener.open.call_count, 2)
+            req_post = mock_opener.open.call_args_list[1][0][0]
+            corpo_post = req_post.data.decode('utf-8')
+            self.assertIn('authenticity_token=csrf_abc_123', corpo_post)
+            self.assertIn('user%5Bemail%5D=user%40teste.com', corpo_post)
+
+    def test_autenticacao_redirect_fora_da_origem_bloqueado(self):
+        handler = SameOriginRedirectHandler('https://app.npx.com.br')
+        from urllib.request import Request
+        req = Request('https://app.npx.com.br/users/sign_in')
+        with self.assertRaises(urlerror.HTTPError) as ctx:
+            handler.redirect_request(req, None, 302, 'Found', {}, 'https://malicious.com/steal')
+        self.assertEqual(ctx.exception.code, 403)
+        ctx.exception.close()
+
+        with self.assertRaises(urlerror.HTTPError) as ctx_creds:
+            handler.redirect_request(req, None, 302, 'Found', {}, 'https://user:pass@app.npx.com.br/safe')
+        self.assertEqual(ctx_creds.exception.code, 403)
+        ctx_creds.exception.close()
+
+        with self.assertRaises(urlerror.HTTPError) as ctx_http:
+            handler.redirect_request(req, None, 302, 'Found', {}, 'http://app.npx.com.br/insecure')
+        self.assertEqual(ctx_http.exception.code, 403)
+        ctx_http.exception.close()
+
+    def test_login_errado_e_cooldown(self):
+        relogio_simulado = 1000.0
+        painel = ClientePainelNpx(base='https://app.npx.com.br', email='u@x.com', senha='err')
+        painel._clock = lambda: relogio_simulado
+
+        html_login = '<input name="authenticity_token" value="tk1">'
+        respostas = [
+            MockResponse(html_login, status=200, url='https://app.npx.com.br/users/sign_in'),
+            MockResponse('<form class="new_user">Invalid</form>', status=200, url='https://app.npx.com.br/users/sign_in'),
+        ]
+        with patch.object(painel, '_criar_opener') as mock_criar:
+            mock_opener = MagicMock()
+            mock_opener.open.side_effect = lambda req, timeout=None: respostas.pop(0)
+            mock_criar.return_value = mock_opener
+
+            res1 = painel.executar('move_agent', {'code': '4422001', 'queue': 'InfoBrasil_Suporte'})
+            self.assertFalse(res1['ok'])
+            self.assertEqual(res1['http'], 502)
+            self.assertFalse(painel._autenticado)
+            self.assertEqual(painel._login_falha_em, 1000.0)
+
+            relogio_simulado = 1010.0
+            chamadas_antes = mock_opener.open.call_count
+            res2 = painel.executar('move_agent', {'code': '4422001', 'queue': 'InfoBrasil_Suporte'})
+            self.assertFalse(res2['ok'])
+            self.assertEqual(res2['http'], 502)
+            self.assertIn('temporariamente suspensa', res2['mensagem'])
+            self.assertEqual(mock_opener.open.call_count, chamadas_antes)
+
+            relogio_simulado = 1065.0
+            respostas.append(MockResponse(html_login, status=200, url='https://app.npx.com.br/users/sign_in'))
+            respostas.append(MockResponse('<form class="new_user">Invalid</form>', status=200, url='https://app.npx.com.br/users/sign_in'))
+            res3 = painel.executar('move_agent', {'code': '4422001', 'queue': 'InfoBrasil_Suporte'})
+            self.assertFalse(res3['ok'])
+            self.assertGreater(mock_opener.open.call_count, chamadas_antes)
+
+    def test_urlerror_e_excecoes_de_rede_retornam_resultado_seguro_502(self):
+        painel = ClientePainelNpx(base='https://app.npx.com.br', email='u@x.com', senha='s')
+        painel._autenticado = True
+        painel._opener = MagicMock()
+        painel._opener.open.side_effect = urlerror.URLError('Connection refused host:123')
+
+        res = painel.executar('move_agent', {'code': '4422001', 'queue': 'InfoBrasil_Suporte'})
+        self.assertFalse(res['ok'])
+        self.assertEqual(res['http'], 502)
+        self.assertEqual(res['mensagem'], 'Falha na comunicação com o painel NPX.')
+
+    def test_concorrencia_duas_threads_uma_reautenticacao(self):
+        painel = ClientePainelNpx(base='https://app.npx.com.br', email='u@x.com', senha='s')
+        # Inicia pré-autenticado com sessão antiga expirada
+        painel._autenticado = True
+
+        html_login = '<input name="authenticity_token" value="tk_conc">'
+        chamadas_login_get = 0
+        chamadas_login_post = 0
+        geracao_sessao = 0
+        lock_cont = threading.Lock()
+
+        def fake_open(req, timeout=None):
+            nonlocal chamadas_login_get, chamadas_login_post, geracao_sessao
+            url = req.full_url
+            if '/users/sign_in' in url:
+                with lock_cont:
+                    if req.data:
+                        chamadas_login_post += 1
+                        time.sleep(0.02)
+                        geracao_sessao += 1
+                        return MockResponse('<html>OK</html>', status=200, url='https://app.npx.com.br/rates/monitor')
+                    chamadas_login_get += 1
+                    time.sleep(0.02)
+                    return MockResponse(html_login, status=200, url='https://app.npx.com.br/users/sign_in')
+
+            with lock_cont:
+                g = geracao_sessao
+            if g == 0:
+                # Sessão antiga expirada responde HTTP 401
+                raise urlerror.HTTPError(url, 401, 'Unauthorized', {}, None)
+            return MockResponse('{"status": 1, "message": "OK"}', status=200)
+
+        mock_opener = MagicMock()
+        mock_opener.open.side_effect = fake_open
+        painel._opener = mock_opener
+
+        resultados = []
+        lock_res = threading.Lock()
+
+        def worker(code, queue):
+            r = painel.executar('move_agent', {'code': code, 'queue': queue})
+            with lock_res:
+                resultados.append(r)
+
+        with patch.object(painel, '_criar_opener', return_value=mock_opener):
+            t1 = threading.Thread(target=worker, args=('4422001', 'InfoBrasil_Suporte'))
+            t2 = threading.Thread(target=worker, args=('4422002', 'InfoBrasil_Comercial'))
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
+
+            self.assertEqual(len(resultados), 2)
+            self.assertTrue(resultados[0]['ok'])
+            self.assertTrue(resultados[1]['ok'])
+            # Exatamente uma reautenticação com 1 GET e 1 POST
+            self.assertEqual(chamadas_login_get, 1)
+            self.assertEqual(chamadas_login_post, 1)
+            self.assertEqual(chamadas_login_get + chamadas_login_post, 2)
+            self.assertTrue(painel._autenticado)
+
+    def test_executar_acao_move_agent(self):
+        painel = ClientePainelNpx(base='https://app.npx.com.br', email='u@x.com', senha='s')
+        painel._autenticado = True
+        painel._opener = MagicMock()
+        painel._opener.open.return_value = MockResponse('{"status": 1, "message": "Agente transferido"}', status=200)
+
+        res = painel.executar('move_agent', {'code': '4422001', 'queue': 'InfoBrasil_Comercial'})
+        self.assertTrue(res['ok'])
+        self.assertEqual(res['mensagem'], 'Agente transferido')
+        req = painel._opener.open.call_args[0][0]
+        self.assertIn('/rates/move_agent?code=4422001&queue=InfoBrasil_Comercial', req.full_url)
+
+    def test_executar_acao_update_penalty_valida_int_estrito_1_a_10(self):
+        painel = ClientePainelNpx(base='https://app.npx.com.br', email='u@x.com', senha='s')
+        painel._autenticado = True
+        painel._opener = MagicMock()
+        painel._opener.open.return_value = MockResponse('{"status": 1, "message": "Prioridade alterada"}', status=200)
+
+        r1 = painel.executar('update_penalty', {'code': '4422001', 'queue': 'InfoBrasil_Suporte', 'penalty': 1})
+        self.assertTrue(r1['ok'])
+        r10 = painel.executar('update_penalty', {'code': '4422001', 'queue': 'InfoBrasil_Suporte', 'penalty': 10})
+        self.assertTrue(r10['ok'])
+
+        for ruim in (0, 11, -1, True, False, 5.5, '5', float('inf')):
+            with self.assertRaises(ValueError):
+                painel.executar('update_penalty', {'code': '4422001', 'queue': 'InfoBrasil_Suporte', 'penalty': ruim})
+
+    def test_executar_acao_invert_pause_status(self):
+        painel = ClientePainelNpx(base='https://app.npx.com.br', email='u@x.com', senha='s')
+        painel._autenticado = True
+        painel._opener = MagicMock()
+        painel._opener.open.return_value = MockResponse('{"status": 1, "message": "Pausa invertida"}', status=200)
+
+        r_pausar = painel.executar('invert_pause_status', {'code': '4422001', 'pause': '1'})
+        self.assertTrue(r_pausar['ok'])
+        req = painel._opener.open.call_args[0][0]
+        self.assertIn('/rates/invert_pause_status?code=4422001&pause=1', req.full_url)
+
+        r_despausar = painel.executar('invert_pause_status', {'code': '4422001', 'pause': '0'})
+        self.assertTrue(r_despausar['ok'])
+        req2 = painel._opener.open.call_args[0][0]
+        self.assertIn('/rates/invert_pause_status?code=4422001&pause=0', req2.full_url)
+
+        for ruim in (True, False, 2, 'pause', None):
+            with self.assertRaises(ValueError):
+                painel.executar('invert_pause_status', {'code': '4422001', 'pause': ruim})
+
+    def test_executar_acao_remove_agent(self):
+        painel = ClientePainelNpx(base='https://app.npx.com.br', email='u@x.com', senha='s')
+        painel._autenticado = True
+        painel._opener = MagicMock()
+        painel._opener.open.return_value = MockResponse('{"status": 1, "message": "Agente removido"}', status=200)
+
+        res = painel.executar('remove_agent', {'code': '4422001', 'queue': 'InfoBrasil_Suporte'})
+        self.assertTrue(res['ok'])
+        req = painel._opener.open.call_args[0][0]
+        # A spec externa do NPX rates/remove_agent usa SOMENTE code na query string
+        self.assertEqual(req.full_url, 'https://app.npx.com.br/rates/remove_agent?code=4422001')
+
+    def test_executar_relogin_e_retry_quando_sessao_expirada(self):
+        painel = ClientePainelNpx(base='https://app.npx.com.br', email='u@x.com', senha='s')
+        painel._autenticado = True
+        mock_opener = MagicMock()
+
+        respostas = [
+            MockResponse('<html>Sessão expirada</html>', status=401, url='https://app.npx.com.br/rates/move_agent'),
+            MockResponse('<input name="authenticity_token" value="tk2">', status=200, url='https://app.npx.com.br/users/sign_in'),
+            MockResponse('<html>Dashboard</html>', status=200, url='https://app.npx.com.br/rates/monitor'),
+            MockResponse('{"status": 1, "message": "Sucesso após retry"}', status=200, url='https://app.npx.com.br/rates/move_agent'),
+        ]
+        mock_opener.open.side_effect = lambda req, timeout=None: respostas.pop(0)
+        painel._opener = mock_opener
+
+        with patch.object(painel, '_criar_opener', return_value=mock_opener):
+            res = painel.executar('move_agent', {'code': '4422001', 'queue': 'InfoBrasil_Suporte'})
+            self.assertTrue(res['ok'])
+            self.assertEqual(res['mensagem'], 'Sucesso após retry')
+
+    def test_executar_nao_repete_mais_de_uma_vez_se_falhar(self):
+        painel = ClientePainelNpx(base='https://app.npx.com.br', email='u@x.com', senha='s')
+        painel._autenticado = True
+        mock_opener = MagicMock()
+
+        respostas = [
+            MockResponse('<html>401</html>', status=401),
+            MockResponse('<input name="authenticity_token" value="tk2">', status=200),
+            MockResponse('<html>Dashboard</html>', status=200),
+            MockResponse('<html>Erro persistente</html>', status=500),
+        ]
+        mock_opener.open.side_effect = lambda req, timeout=None: respostas.pop(0)
+        painel._opener = mock_opener
+
+        with patch.object(painel, '_criar_opener', return_value=mock_opener):
+            res = painel.executar('move_agent', {'code': '4422001', 'queue': 'InfoBrasil_Suporte'})
+            self.assertFalse(res['ok'])
+            self.assertEqual(res['mensagem'], 'Resposta inválida do painel NPX.')
+            self.assertEqual(res['http'], 502)
+
+    def test_sanitizacao_remove_tags_colapsa_espacos_max200_e_redige_segredos(self):
+        painel = ClientePainelNpx(base='https://app.npx.com.br', email='admin@empresa.com', senha='super_secret_password')
+        painel._autenticado = True
+        painel._token_csrf = 'csrf_token_muito_longo_12345'
+        painel._opener = MagicMock()
+
+        # Cookie longo no CookieJar e cookie curto 'ok'
+        c_longo = cookiejar.Cookie(version=0, name='_session', value='cookie_longo_super_secreto', port=None, port_specified=False,
+                                   domain='app.npx.com.br', domain_specified=True, domain_initial_dot=False,
+                                   path='/', path_specified=True, secure=True, expires=None, discard=False,
+                                   comment=None, comment_url=None, rest={}, rfc2109=False)
+        c_curto = cookiejar.Cookie(version=0, name='pt', value='ok', port=None, port_specified=False,
+                                   domain='app.npx.com.br', domain_specified=True, domain_initial_dot=False,
+                                   path='/', path_specified=True, secure=True, expires=None, discard=False,
+                                   comment=None, comment_url=None, rest={}, rfc2109=False)
+        painel._jar.set_cookie(c_longo)
+        painel._jar.set_cookie(c_curto)
+
+        texto_remoto = (
+            '  <div>status ok: Erro <span class="badge">grave</span>:  admin@empresa.com '
+            'e senha super_secret_password com token csrf_token_muito_longo_12345 '
+            'e cookie: cookie_longo_super_secreto com sucesso!  </div> '
+            + 'x' * 300
+        )
+        painel._opener.open.return_value = MockResponse(json.dumps({'error': texto_remoto}), status=400)
+
+        with patch.dict(os.environ, {'NPX_API_TOKEN': 'secret_api_token_456'}):
+            res = painel.executar('move_agent', {'code': '4422001', 'queue': 'InfoBrasil_Suporte'})
+            self.assertFalse(res['ok'])
+            msg = res['mensagem']
+
+            # Tags HTML removidas
+            self.assertNotIn('<div>', msg)
+            self.assertNotIn('</span>', msg)
+            # Múltiplos espaços colapsados
+            self.assertNotIn('  ', msg)
+            # Tamanho máximo 200 caracteres
+            self.assertLessEqual(len(msg), 200)
+            # Segredos redigidos
+            self.assertNotIn('admin@empresa.com', msg)
+            self.assertNotIn('super_secret_password', msg)
+            self.assertNotIn('csrf_token_muito_longo_12345', msg)
+            self.assertNotIn('cookie_longo_super_secreto', msg)
+            self.assertIn('***', msg)
+            # Palavras legítimas preservadas no trecho inicial mesmo com cookie curto 'ok'
+            self.assertIn('status ok', msg)
+            self.assertIn('sucesso', msg)
+
+    def test_cliente_npx_post_captura_value_error_com_log_sanitizado(self):
+        cliente = ClienteNpx(base='https://app.npxtech.com.br/api', token='token_secreto_npx_123')
+        with patch.object(cliente, '_req', side_effect=ValueError('Erro com token_secreto_npx_123')):
+            with self.assertLogs('agentes_npx', level='WARNING') as cm:
+                res = cliente.post('/v2/agents/4422001/unpause')
+                self.assertFalse(res['ok'])
+                self.assertEqual(res['http'], 502)
+                self.assertIn('Falha na comunicação com a API NPX.', res['mensagem'])
+                log_completo = '\n'.join(cm.output)
+                self.assertIn('ValueError', log_completo)
+                self.assertNotIn('token_secreto_npx_123', log_completo)
+
+    def test_logs_usam_apenas_tipo_de_erro_sem_vazar_credenciais(self):
+        painel = ClientePainelNpx(base='https://app.npx.com.br', email='secreto@empresa.com', senha='senha_ultrasecreta')
+        painel._autenticado = True
+        painel._opener = MagicMock()
+        # Exceção contendo senha e token na mensagem
+        excecao_sensivel = urlerror.URLError('Falha com senha_ultrasecreta e token_privado_999')
+        painel._opener.open.side_effect = excecao_sensivel
+
+        with self.assertLogs('agentes_npx', level='WARNING') as cm:
+            res = painel.executar('move_agent', {'code': '4422001', 'queue': 'InfoBrasil_Suporte'})
+            self.assertFalse(res['ok'])
+            self.assertEqual(res['http'], 502)
+
+        # Nenhum log contém a senha ou token em claro
+        registro = ' '.join(cm.output)
+        self.assertNotIn('senha_ultrasecreta', registro)
+        self.assertNotIn('secreto@empresa.com', registro)
+        self.assertNotIn('token_privado_999', registro)
+        # Contém o nome da classe do erro
+        self.assertIn('URLError', registro)
+
+    def test_cliente_npx_post_captura_urlerror_e_nao_html(self):
+        cliente = ClienteNpx(base='https://npx.invalid/api', token='tok_12345678')
+
+        with patch.object(cliente, '_req', side_effect=urlerror.URLError('Falha DNS')):
+            r_err = cliente.post('/v2/agents/4422001/unpause')
+            self.assertFalse(r_err['ok'])
+            self.assertEqual(r_err['http'], 502)
+            self.assertEqual(r_err['mensagem'], 'Falha na comunicação com a API NPX.')
+
+        with patch.object(cliente, '_req', return_value=(502, '<html><head><title>502 Bad Gateway</title></head><body>Bad Gateway</body></html>')):
+            r_html = cliente.post('/v2/agents/4422001/unpause')
+            self.assertFalse(r_html['ok'])
+            self.assertEqual(r_html['http'], 502)
+            self.assertEqual(r_html['mensagem'], 'Falha na operação na API NPX.')
+            self.assertNotIn('<html>', r_html['mensagem'])
+
+        # Captura Exception genérica (ex: ValueError) e retorna 502
+        with patch.object(cliente, '_req', side_effect=ValueError('Payload corrompido')):
+            r_val = cliente.post('/v2/agents/4422001/unpause')
+            self.assertFalse(r_val['ok'])
+            self.assertEqual(r_val['http'], 502)
+            self.assertEqual(r_val['mensagem'], 'Falha na comunicação com a API NPX.')
+
 
 class AcoesTest(unittest.TestCase):
-    def test_transferir_exige_id_das_duas_filas_antes_de_mexer(self):
-        cliente = ClienteFalso()
-        with patch.dict(os.environ, {'NPX_FILAS_IDS': 'InfoBrasil_Suporte=10'}):
+    def test_transferir_valida_fila_e_chama_painel(self):
+        painel = ClientePainelFalso()
+        res = transferir(painel, {'code': '4422001', 'para': 'InfoBrasil_Comercial'})
+        self.assertTrue(res['ok'])
+        self.assertEqual(painel.executados, [('move_agent', {'code': '4422001', 'queue': 'InfoBrasil_Comercial'})])
+
+        for fila_invalida in ('', '   ', 'fila com espacos', 'FilaDesconhecida', '<script>'):
             with self.assertRaises(ValueError):
-                transferir(cliente, {'code': '4422001', 'de': 'InfoBrasil_Suporte', 'para': 'InfoBrasil_Comercial'})
-        self.assertEqual(cliente.enviados, [])
+                transferir(painel, {'code': '4422001', 'para': fila_invalida})
 
-    def test_transferir_inclui_na_nova_antes_de_remover_da_antiga(self):
-        cliente = ClienteFalso()
-        with patch.dict(os.environ, {'NPX_FILAS_IDS': 'InfoBrasil_Suporte=10;InfoBrasil_Comercial=11'}):
-            r = transferir(cliente, {'code': '4422001', 'de': 'InfoBrasil_Suporte', 'para': 'InfoBrasil_Comercial', 'penalty': 2})
-        self.assertTrue(r['ok'])
-        self.assertEqual([c for c, _ in cliente.enviados], ['/v2/agents/4422001/add_to_queue', '/v2/agents/4422001/remove_to_queue'])
-        self.assertEqual(cliente.enviados[0][1]['queue_id'], '11')
+    def test_transferir_e_prioridade_aceitam_fila_conhecida_apenas_no_snapshot(self):
+        painel = ClientePainelNpx(base='https://app.npx.com.br', email='u@x.com', senha='s')
+        painel._autenticado = True
+        mock_opener = MagicMock()
+        mock_opener.open.return_value = MockResponse('{"status": 1, "message": "OK"}', status=200)
+        painel._opener = mock_opener
 
-    def test_transferir_nao_remove_se_inclusao_falhar(self):
-        cliente = ClienteFalso(posts={'add_to_queue': {'ok': False, 'http': 200, 'mensagem': 'erro'}})
-        with patch.dict(os.environ, {'NPX_FILAS_IDS': 'InfoBrasil_Suporte=10;InfoBrasil_Comercial=11'}):
-            r = transferir(cliente, {'code': '4422001', 'de': 'InfoBrasil_Suporte', 'para': 'InfoBrasil_Comercial'})
-        self.assertFalse(r['ok'])
-        self.assertEqual(len(cliente.enviados), 1)
+        coletor = MagicMock()
+        coletor.retrato = [{'code': '4422009', 'queue': 'FilaEspecial_Temporaria'}]
 
-    def test_transferir_valida_penalty_0_a_99_e_padrao_1(self):
-        cliente = ClienteFalso()
-        with patch.dict(os.environ, {'NPX_FILAS_IDS': 'InfoBrasil_Suporte=10;InfoBrasil_Comercial=11'}):
-            for penalty_invalido in (-1, 100, 'invalido', float('inf')):
-                with self.assertRaises(ValueError):
-                    transferir(cliente, {'code': '4422001', 'de': 'InfoBrasil_Suporte', 'para': 'InfoBrasil_Comercial', 'penalty': penalty_invalido})
-            self.assertEqual(cliente.enviados, [])
+        # Fila que não está no nomes_filas(), mas existe no snapshot do coletor:
+        # ClientePainelNpx REAL com opener mock deve aceitar a fila especial sem erro
+        res1 = transferir(painel, {'code': '4422001', 'para': 'FilaEspecial_Temporaria'}, coletor=coletor)
+        self.assertTrue(res1['ok'])
+        req1 = painel._opener.open.call_args[0][0]
+        self.assertEqual(req1.full_url, 'https://app.npx.com.br/rates/move_agent?code=4422001&queue=FilaEspecial_Temporaria')
 
-            # vazio ou None assume 1
-            for v in (None, ''):
-                transferir(cliente, {'code': '4422001', 'de': 'InfoBrasil_Suporte', 'para': 'InfoBrasil_Comercial', 'penalty': v})
-                self.assertEqual(cliente.enviados[-2][1]['penalty'], '1')
+        res2 = alterar_prioridade(painel, {'code': '4422001', 'fila': 'FilaEspecial_Temporaria', 'penalty': 4}, coletor=coletor)
+        self.assertTrue(res2['ok'])
+        req2 = painel._opener.open.call_args[0][0]
+        self.assertEqual(req2.full_url, 'https://app.npx.com.br/rates/update_penalty?code=4422001&penalty=4&queue=FilaEspecial_Temporaria')
 
-            # 0 e 99 são limites válidos
-            transferir(cliente, {'code': '4422001', 'de': 'InfoBrasil_Suporte', 'para': 'InfoBrasil_Comercial', 'penalty': 0})
-            self.assertEqual(cliente.enviados[-2][1]['penalty'], '0')
-            transferir(cliente, {'code': '4422001', 'de': 'InfoBrasil_Suporte', 'para': 'InfoBrasil_Comercial', 'penalty': 99})
-            self.assertEqual(cliente.enviados[-2][1]['penalty'], '99')
+    def test_alterar_prioridade_valida_int_estrito_1_a_10_e_chama_painel(self):
+        painel = ClientePainelFalso()
+        res = alterar_prioridade(painel, {'code': '4422001', 'fila': 'InfoBrasil_Suporte', 'penalty': 5})
+        self.assertTrue(res['ok'])
+        self.assertEqual(painel.executados, [('update_penalty', {'code': '4422001', 'queue': 'InfoBrasil_Suporte', 'penalty': 5})])
 
-    def test_alterar_prioridade_valida_penalty_e_penalty_atual_0_a_99(self):
-        cliente = ClienteFalso()
-        with patch.dict(os.environ, {'NPX_FILAS_IDS': 'InfoBrasil_Suporte=10'}):
-            for penalty_invalido in (-1, 100, 'invalido', float('inf')):
-                with self.assertRaises(ValueError):
-                    alterar_prioridade(cliente, {'code': '4422001', 'fila': 'InfoBrasil_Suporte', 'penalty': penalty_invalido})
-                with self.assertRaises(ValueError):
-                    alterar_prioridade(cliente, {'code': '4422001', 'fila': 'InfoBrasil_Suporte', 'penalty': 1, 'penaltyAtual': penalty_invalido})
-            self.assertEqual(cliente.enviados, [])
+        for pen_invalido in (0, 11, -1, True, False, 5.5, '5', float('inf')):
+            with self.assertRaises(ValueError):
+                alterar_prioridade(painel, {'code': '4422001', 'fila': 'InfoBrasil_Suporte', 'penalty': pen_invalido})
 
-            # Válido aplica prioridade
-            res = alterar_prioridade(cliente, {'code': '4422001', 'fila': 'InfoBrasil_Suporte', 'penalty': 5})
-            self.assertTrue(res['ok'])
-            self.assertEqual(cliente.enviados[-1][1]['penalty'], '5')
+    def test_transferir_e_prioridade_retornam_503_quando_painel_desconfigurado(self):
+        painel_desconfigurado = ClientePainelFalso(configurado=False)
+        r1 = transferir(painel_desconfigurado, {'code': '4422001', 'para': 'InfoBrasil_Comercial'})
+        self.assertFalse(r1['ok'])
+        self.assertEqual(r1['http'], 503)
+
+        r2 = alterar_prioridade(painel_desconfigurado, {'code': '4422001', 'fila': 'InfoBrasil_Suporte', 'penalty': 3})
+        self.assertFalse(r2['ok'])
+        self.assertEqual(r2['http'], 503)
 
     def test_validar_layout(self):
         self.assertEqual(validar_layout({'cols': 2, 'c1': ['A', 'A'], 'c2': ['A', 'B'], 'ord': {'col': 'tempo', 'dir': -1}, 'limite': 5}),
@@ -163,6 +608,12 @@ class AcoesTest(unittest.TestCase):
             with self.assertRaises((ValueError, TypeError, OverflowError)):
                 validar_layout(ruim)
 
+    def test_remocao_completa_ids_filas_e_npx_filas_ids(self):
+        self.assertFalse(hasattr(agentes_npx, 'ids_filas'), 'ids_filas não deve existir em agentes_npx')
+        self.assertFalse(hasattr(agentes_npx, '_id_fila'), '_id_fila não deve existir em agentes_npx')
+        fonte = (RAIZ / 'agentes_npx.py').read_text(encoding='utf-8')
+        self.assertNotIn('NPX_FILAS_IDS', fonte)
+
 
 class RotasTest(unittest.TestCase):
     def setUp(self):
@@ -171,13 +622,18 @@ class RotasTest(unittest.TestCase):
         self.env = patch.dict(os.environ, {'SECRET_KEY': 'test-only-' + 'a' * 64})
         self.env.start()
         self.permitido = False
-        import seguranca
+
+        with seguranca._rate_limit_lock:
+            seguranca._rate_limit_store.clear()
+
         self.app = Flask(__name__, template_folder=str(RAIZ / 'templates'), static_folder=str(RAIZ / 'static'))
         seguranca.aplicar_config_flask(self.app)
         self.app.config['TESTING'] = True
         bp = Blueprint('bancos', __name__)
         self.cliente = ClienteFalso()
-        configurar_agentes(bp, self.conectar, lambda perm: self.permitido and perm == 'perm_agentes', cliente=self.cliente)
+        self.cliente_painel = ClientePainelFalso(configurado=True)
+        configurar_agentes(bp, self.conectar, lambda perm: self.permitido and perm == 'perm_agentes',
+                           cliente=self.cliente, cliente_painel=self.cliente_painel)
         self.coletor = bp.coletor_agentes
         self.app.register_blueprint(bp)
 
@@ -188,7 +644,6 @@ class RotasTest(unittest.TestCase):
                     'busca_termo': '', 'ordem_atual': '', 'atualizar_url': ''}
         self.coletor.garantir_rodando = lambda: None
         self.coletor.retrato = [{'code': '4422001', 'name': 'Darkison', 'queue': 'InfoBrasil_Suporte', 'status': -1, 'paused': True}]
-        from datetime import datetime
         self.coletor.coletado_em = datetime.now(agentes_npx.FUSO)
         self.http = self.app.test_client()
         self.http.get('/agentes')
@@ -198,6 +653,8 @@ class RotasTest(unittest.TestCase):
     def tearDown(self):
         self.env.stop()
         self.temp.cleanup()
+        with seguranca._rate_limit_lock:
+            seguranca._rate_limit_store.clear()
 
     def conectar(self):
         conn = sqlite3.connect(self.db)
@@ -212,7 +669,9 @@ class RotasTest(unittest.TestCase):
         dados = self.http.get('/agentes/dados').get_json()
         self.assertEqual(dados['agentes'][0]['code'], '4422001')
         self.assertFalse(dados['podeGerenciar'])
+        self.assertTrue(dados['painelConfigurado'])
         self.assertIn('InfoBrasil_Suporte', [f['key'] for f in dados['filas']])
+        self.assertIn('InfoBrasil_Transbordo', [f['key'] for f in dados['filas']])
 
     def test_quem_gerencia_ve_acoes(self):
         self.permitido = True
@@ -220,17 +679,99 @@ class RotasTest(unittest.TestCase):
         self.assertIn('class="pode"', html)
         self.assertIn('id="dlg"', html)
 
-    def test_acoes_exigem_permissao_e_csrf(self):
+    def test_todas_as_7_rotas_post_exigem_permissao_e_csrf(self):
+        rotas = [
+            ('/admin/agentes/layout', {'cols': 2, 'c1': ['InfoBrasil_Suporte'], 'c2': []}),
+            ('/admin/agentes/4422001/tirar-pausa', {}),
+            ('/admin/agentes/4422001/colocar-pausa', {}),
+            ('/admin/agentes/4422001/deslogar', {}),
+            ('/admin/agentes/4422001/remover-fila', {'fila': 'InfoBrasil_Suporte'}),
+            ('/admin/agentes/transferir', {'code': '4422001', 'para': 'InfoBrasil_Comercial'}),
+            ('/admin/agentes/prioridade', {'code': '4422001', 'fila': 'InfoBrasil_Suporte', 'penalty': 3}),
+        ]
         cabecalho = {'X-CSRF-Token': self.token}
-        self.assertEqual(self.http.post('/admin/agentes/4422001/tirar-pausa', json={}, headers=cabecalho).status_code, 403)
+
+        # 1. Sem permissão -> todas retornam 403
+        self.permitido = False
+        for url, payload in rotas:
+            with seguranca._rate_limit_lock:
+                seguranca._rate_limit_store.clear()
+            r = self.http.post(url, json=payload, headers=cabecalho)
+            self.assertEqual(r.status_code, 403, f'Rota {url} deveria exigir permissão (403)')
+
+        # 2. Com permissão mas sem CSRF -> todas retornam 400
         self.permitido = True
-        self.assertEqual(self.http.post('/admin/agentes/4422001/tirar-pausa', json={}).status_code, 400)   # sem CSRF
-        r = self.http.post('/admin/agentes/4422001/tirar-pausa', json={}, headers=cabecalho)
-        self.assertEqual(r.status_code, 200)
-        self.assertTrue(r.get_json()['ok'])
+        for url, payload in rotas:
+            with seguranca._rate_limit_lock:
+                seguranca._rate_limit_store.clear()
+            r = self.http.post(url, json=payload)
+            self.assertEqual(r.status_code, 400, f'Rota {url} deveria exigir CSRF (400)')
+
+        # 3. Com permissão e CSRF -> todas têm sucesso (200)
+        for url, payload in rotas:
+            with seguranca._rate_limit_lock:
+                seguranca._rate_limit_store.clear()
+            r = self.http.post(url, json=payload, headers=cabecalho)
+            self.assertEqual(r.status_code, 200, f'Rota {url} falhou com CSRF válido: {r.get_json()}')
+            self.assertTrue(r.get_json()['ok'], f'Rota {url} ok!=True: {r.get_json()}')
+
+    def test_validacao_codigo_antes_de_configuracao(self):
+        cabecalho = {'X-CSRF-Token': self.token}
+        self.permitido = True
+        self.cliente_painel._configurado = False
+
+        for cod_invalido in ('abc', '999999999999999', '123_45', '-10'):
+            r1 = self.http.post(f'/admin/agentes/{cod_invalido}/colocar-pausa', json={}, headers=cabecalho)
+            self.assertEqual(r1.status_code, 400)
+            r2 = self.http.post('/admin/agentes/transferir', json={'code': cod_invalido, 'para': 'InfoBrasil_Suporte'}, headers=cabecalho)
+            self.assertEqual(r2.status_code, 400)
+        r3 = self.http.post('/admin/agentes/transferir', json={'code': '', 'para': 'InfoBrasil_Suporte'}, headers=cabecalho)
+        self.assertEqual(r3.status_code, 400)
+
+    def test_mapeamento_status_401_403_upstream_para_local_502(self):
+        cabecalho = {'X-CSRF-Token': self.token}
+        self.permitido = True
+        self.cliente_painel.respostas['invert_pause_status'] = {'ok': False, 'http': 401, 'mensagem': 'Não autorizado'}
+        r = self.http.post('/admin/agentes/4422001/colocar-pausa', json={}, headers=cabecalho)
+        self.assertEqual(r.status_code, 502)
+
+    def test_tirar_pausa_usa_painel_quando_configurado_ou_fallback_api(self):
+        cabecalho = {'X-CSRF-Token': self.token}
+        self.permitido = True
+
+        r1 = self.http.post('/admin/agentes/4422001/tirar-pausa', json={}, headers=cabecalho)
+        self.assertEqual(r1.status_code, 200)
+        self.assertEqual(self.cliente_painel.executados[-1], ('invert_pause_status', {'code': '4422001', 'pause': '0'}))
+
+        self.cliente_painel._configurado = False
+        r2 = self.http.post('/admin/agentes/4422001/tirar-pausa', json={}, headers=cabecalho)
+        self.assertEqual(r2.status_code, 200)
         self.assertEqual(self.cliente.enviados[-1][0], '/v2/agents/4422001/unpause')
-        self.assertEqual(self.http.post('/admin/agentes/abc/deslogar', json={}, headers=cabecalho).status_code, 400)
-        self.assertEqual(len(self.cliente.enviados), 1)
+
+    def test_colocar_pausa_remover_fila_transferir_prioridade_retornam_503_sem_painel(self):
+        cabecalho = {'X-CSRF-Token': self.token}
+        self.permitido = True
+        self.cliente_painel._configurado = False
+
+        r_pausa = self.http.post('/admin/agentes/4422001/colocar-pausa', json={}, headers=cabecalho)
+        self.assertEqual(r_pausa.status_code, 503)
+
+        r_remover = self.http.post('/admin/agentes/4422001/remover-fila', json={'fila': 'InfoBrasil_Suporte'}, headers=cabecalho)
+        self.assertEqual(r_remover.status_code, 503)
+
+        r_transf = self.http.post('/admin/agentes/transferir', json={'code': '4422001', 'para': 'InfoBrasil_Comercial'}, headers=cabecalho)
+        self.assertEqual(r_transf.status_code, 503)
+
+        r_prio = self.http.post('/admin/agentes/prioridade', json={'code': '4422001', 'fila': 'InfoBrasil_Suporte', 'penalty': 5}, headers=cabecalho)
+        self.assertEqual(r_prio.status_code, 503)
+
+    def test_auditoria_apenas_acao_e_codigo_sem_texto_remoto(self):
+        self.permitido = True
+        cabecalho = {'X-CSRF-Token': self.token}
+        with patch('agentes_npx.registrar_acao_admin') as audit:
+            resp = self.http.post('/admin/agentes/4422001/colocar-pausa', json={}, headers=cabecalho)
+            self.assertEqual(resp.status_code, 200)
+            audit.assert_called_once_with('agentes_colocar_pausa', {'agente': '4422001', 'ok': True})
 
     def test_layout_salvo_pelo_admin_vale_para_todos(self):
         cabecalho = {'X-CSRF-Token': self.token}
@@ -251,7 +792,6 @@ class RotasTest(unittest.TestCase):
         self.coletor.retrato = [{'code': '4422001', 'name': 'Darkison', 'queue': 'InfoBrasil_Suporte',
                                  'status': 2, 'paused': False, 'callSrc': '85999990001',
                                  'callDst': '4422001', 'callClient': '85999990001'}]
-        # Visitante / sem gerência
         self.permitido = False
         dados_pub = self.http.get('/agentes/dados').get_json()
         agente_pub = dados_pub['agentes'][0]
@@ -259,10 +799,8 @@ class RotasTest(unittest.TestCase):
         self.assertNotIn('callSrc', agente_pub)
         self.assertNotIn('callDst', agente_pub)
         self.assertNotIn('callClient', agente_pub)
-        # Snapshot em memória permaneceu intacto
         self.assertIn('callSrc', self.coletor.retrato[0])
 
-        # Usuário autorizado vê os campos
         self.permitido = True
         dados_auth = self.http.get('/agentes/dados').get_json()
         agente_auth = dados_auth['agentes'][0]
@@ -287,23 +825,61 @@ class RotasTest(unittest.TestCase):
             self.assertEqual(resp.status_code, 200)
             audit.assert_called_once_with('agentes_layout', {'cols': 2, 'limite': 15})
 
-    @patch.dict(os.environ, {'NPX_FILAS_IDS': 'InfoBrasil_Suporte=12;InfoBrasil_Comercial=13'})
-    def test_transferir_e_prioridade_validam_penalty_com_400_sem_mutacao(self):
+    def test_prioridade_valida_penalty_int_estrito_1_a_10_com_400(self):
         self.permitido = True
         cabecalho = {'X-CSRF-Token': self.token}
-        r1 = self.http.post('/admin/agentes/transferir',
-                            json={'code': '4422001', 'de': 'InfoBrasil_Suporte', 'para': 'InfoBrasil_Comercial', 'penalty': 150},
-                            headers=cabecalho)
-        self.assertEqual(r1.status_code, 400)
-        r2 = self.http.post('/admin/agentes/prioridade',
-                            json={'code': '4422001', 'fila': 'InfoBrasil_Suporte', 'penalty': -10},
-                            headers=cabecalho)
-        self.assertEqual(r2.status_code, 400)
-        r3 = self.http.post('/admin/agentes/prioridade',
-                            json={'code': '4422001', 'fila': 'InfoBrasil_Suporte', 'penalty': 1, 'penaltyAtual': 200},
-                            headers=cabecalho)
-        self.assertEqual(r3.status_code, 400)
-        self.assertEqual(self.cliente.enviados, [])
+        for ruim in (0, 11, -1, 5.5, True, False, '5'):
+            r = self.http.post('/admin/agentes/prioridade',
+                               json={'code': '4422001', 'fila': 'InfoBrasil_Suporte', 'penalty': ruim},
+                               headers=cabecalho)
+            self.assertEqual(r.status_code, 400)
+
+    def test_remover_fila_com_snapshot_e_cliente_painel_real(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        db_path = str(Path(temp.name) / 'teste.db')
+
+        def conectar():
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        app = Flask(__name__)
+        seguranca.aplicar_config_flask(app)
+        app.config['TESTING'] = True
+        bp = Blueprint('bancos_real', __name__)
+
+        painel_real = ClientePainelNpx(base='https://app.npx.com.br', email='u@x.com', senha='s')
+        painel_real._autenticado = True
+        mock_opener = MagicMock()
+        mock_opener.open.return_value = MockResponse('{"status": 1, "message": "Agente removido"}', status=200)
+        painel_real._opener = mock_opener
+
+        cliente = ClienteFalso()
+        configurar_agentes(bp, conectar, lambda perm: True, cliente=cliente, cliente_painel=painel_real)
+        coletor = bp.coletor_agentes
+        coletor.garantir_rodando = lambda: None
+        coletor.retrato = [{'code': '4422001', 'queue': 'FilaEspecial_Temporaria'}]
+        app.register_blueprint(bp)
+
+        with app.test_client() as client:
+            with client.session_transaction() as sess:
+                sess['user_id'] = 1
+                sess['user_nome'] = 'Master'
+                sess['_csrf_token'] = 'token_csrf_123'
+
+            with seguranca._rate_limit_lock:
+                seguranca._rate_limit_store.clear()
+
+            resp = client.post('/admin/agentes/4422001/remover-fila',
+                               json={'fila': 'FilaEspecial_Temporaria'},
+                               headers={'X-CSRF-Token': 'token_csrf_123'})
+            self.assertEqual(resp.status_code, 200)
+            self.assertTrue(resp.get_json()['ok'])
+
+            # Valida URL exata chamada no open: remove_agent recebe SOMENTE code, sem parâmetro queue
+            req = mock_opener.open.call_args[0][0]
+            self.assertEqual(req.full_url, 'https://app.npx.com.br/rates/remove_agent?code=4422001')
 
 
 class IntegracaoBancosTest(unittest.TestCase):

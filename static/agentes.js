@@ -18,7 +18,7 @@
   const COLS = [['name', 'Agente'], ['status', 'Status'], ['tempo', 'Tempo'], ['penalty', 'Prior.'], ['situacao', 'Situação']];
   const GRUPO = '<colgroup><col class="c-ag"><col class="c-st"><col class="c-tp"><col class="c-pr"><col class="c-si"><col class="c-ac"></colgroup>';
 
-  let dados = [], filas = [], carregando = false, sel = null, arrastando = null, alvo = null;
+  let dados = [], filas = [], carregando = false, sel = null, arrastando = null, alvo = null, painelConfigurado = true;
   let layout = CFG.layout || {cols: 2, c1: [], c2: [], ord: {col: 'status', dir: 1}, limite: 10};
   let timerSalvar = null;
 
@@ -145,6 +145,7 @@
       const j = await r.json();
       if (!r.ok) throw new Error(j.erro || r.status);
       dados = j.agentes || []; filas = j.filas || [];
+      painelConfigurado = j.painelConfigurado !== false;
       // quem só visualiza segue sempre o layout do administrador; quem edita só recebe na abertura
       if (!PODE || primeiraCarga) { layout = j.layout || layout; aplicarControles(); }
       primeiraCarga = false;
@@ -183,10 +184,23 @@
     el.textContent = j.ok ? '✔ ' + okTxt : '✖ ' + (j.mensagem || j.erro || 'Falhou.');
     el.style.color = j.ok ? 'var(--livre)' : 'var(--lig)';
   }
-  async function tirar(code, nome, el) {
+  async function acao(btn, fn, el) {
+    const alvoMsg = el || $('dlgMsg') || $('msg');
+    if (btn) btn.disabled = true;
+    try { await fn(alvoMsg); } catch (e) { if (alvoMsg) alvoMsg.textContent = 'Erro: ' + e.message; }
+    finally { if (btn) btn.disabled = false; setTimeout(carregar, 1200); }
+  }
+  function tirar(code, nome, el, btn) {
     if (!confirm(`Tirar ${nome} (${code}) da pausa?`)) return;
-    resultado(await post(`/admin/agentes/${encodeURIComponent(code)}/tirar-pausa`), `${nome} saiu da pausa.`, el);
-    setTimeout(carregar, 1500);
+    acao(btn, async (alvoMsg) => {
+      resultado(await post(`/admin/agentes/${encodeURIComponent(code)}/tirar-pausa`), `${nome} saiu da pausa.`, alvoMsg);
+    }, el);
+  }
+  function colocarPausa(code, nome, el, btn) {
+    if (!confirm(`Colocar ${nome} (${code}) em pausa?`)) return;
+    acao(btn, async (alvoMsg) => {
+      resultado(await post(`/admin/agentes/${encodeURIComponent(code)}/colocar-pausa`), `${nome} foi colocado em pausa.`, alvoMsg);
+    }, el);
   }
   function abrir(code, f) { sel = {code, fila: f}; $('dlgMsg').textContent = ''; atualizarDialogo(true); $('dlg').showModal(); }
   function atualizarDialogo(inicial) {
@@ -197,44 +211,64 @@
     $('dNome').textContent = a.name;
     $('dInfo').innerHTML = `Código ${esc(a.code)} · ramal ${esc(a.extension || a.code)} · fila <b>${esc(fila(a.queue).nome)}</b><br>
       <span class="pill" style="--c:${st[1]}">${esc(st[0])}</span>${c && !a.paused ? ` 📞 ${c.dir} <b>${esc(fmtFone(c.num))}</b>` : ''}`;
-    $('aPausa').style.display = a.paused ? '' : 'none';
-    $('dPausa').textContent = a.paused ? `${a.pauseType || 'Pausa'} há ${fmtSeg(segs(a))}` : '';
+    $('aPausa').style.display = '';
+    if (a.paused) {
+      $('bTirar').style.display = '';
+      $('bPausar').style.display = 'none';
+      $('dPausa').textContent = `${a.pauseType || 'Pausa'} há ${fmtSeg(segs(a))}`;
+    } else {
+      $('bTirar').style.display = 'none';
+      $('bPausar').style.display = '';
+      $('bPausar').disabled = !painelConfigurado;
+      $('dPausa').textContent = 'Agente ativo / fora de pausa';
+    }
     if (inicial) {
-      const atual = fila(a.queue);
       const destinos = filas.filter(f => f.key !== a.queue);
-      const algum = atual.temId && destinos.some(f => f.temId);
-      $('dFila').innerHTML = (algum ? '' : '<option value="" selected disabled>Aguardando ID das filas na NPX</option>') +
-        destinos.map(f => `<option value="${esc(f.key)}" ${f.temId && atual.temId ? '' : 'disabled'}>${esc(f.nome)}${f.temId ? '' : ' (sem ID da NPX)'}</option>`).join('');
-      $('bTransf').disabled = !algum;
-      $('bPen').disabled = !atual.temId;
-      $('dPen').value = a.penalty ?? 1;
-      if (!atual.temId) { $('dlgMsg').textContent = 'Transferir e mudar prioridade dependem do ID desta fila na NPX (NPX_FILAS_IDS).'; $('dlgMsg').style.color = 'var(--mut)'; }
+      $('dFila').innerHTML = destinos.length
+        ? destinos.map(f => `<option value="${esc(f.key)}">${esc(f.nome)}</option>`).join('')
+        : '<option value="" disabled>Nenhuma outra fila disponível</option>';
+      $('bTransf').disabled = !painelConfigurado || !destinos.length;
+      $('bPen').disabled = !painelConfigurado;
+      $('bRemoverFila').disabled = !painelConfigurado;
+      const penAtual = Number(a.penalty);
+      $('dPen').value = Number.isInteger(penAtual) && penAtual >= 1 && penAtual <= 10 ? penAtual : 1;
+      if (!painelConfigurado) {
+        $('dlgMsg').textContent = 'Ações do painel aguardando configuração de credenciais no servidor.';
+        $('dlgMsg').style.color = 'var(--mut)';
+      }
     }
   }
-  async function acao(btn, fn) {
-    btn.disabled = true;
-    try { await fn(); } catch (e) { $('dlgMsg').textContent = 'Erro: ' + e.message; }
-    finally { btn.disabled = false; setTimeout(carregar, 1500); }
-  }
   if (PODE) {
-    $('bTirar').onclick = () => tirar(sel.agente.code, sel.agente.name, $('dlgMsg'));
-    $('bTransf').onclick = e => acao(e.currentTarget, async () => {
+    $('bTirar').onclick = e => tirar(sel.agente.code, sel.agente.name, $('dlgMsg'), e.currentTarget);
+    $('bPausar').onclick = e => colocarPausa(sel.agente.code, sel.agente.name, $('dlgMsg'), e.currentTarget);
+    $('bTransf').onclick = e => acao(e.currentTarget, async (alvoMsg) => {
       const a = sel.agente, para = $('dFila').value; if (!para) return;
       if (!confirm(`Transferir ${a.name} de ${fila(a.queue).nome} para ${fila(para).nome}?`)) return;
-      const j = await post('/admin/agentes/transferir', {code: a.code, de: a.queue, para, extension: a.extension, penalty: a.penalty});
-      resultado(j, `${a.name} agora está em ${fila(para).nome}.`, $('dlgMsg'));
+      const j = await post('/admin/agentes/transferir', {code: a.code, de: a.queue, para: para, extension: a.extension});
+      resultado(j, `${a.name} agora está em ${fila(para).nome}.`, alvoMsg);
       if (j.ok) sel.fila = para;
     });
-    $('bPen').onclick = e => acao(e.currentTarget, async () => {
+    $('bPen').onclick = e => acao(e.currentTarget, async (alvoMsg) => {
       const a = sel.agente, pen = Number($('dPen').value);
-      if (!(pen >= 0 && pen <= 99)) { $('dlgMsg').textContent = 'Prioridade inválida.'; return; }
-      const j = await post('/admin/agentes/prioridade', {code: a.code, fila: a.queue, extension: a.extension, penalty: pen, penaltyAtual: a.penalty});
-      resultado(j, `Prioridade de ${a.name} agora é ${pen}.`, $('dlgMsg'));
+      if (!Number.isInteger(pen) || pen < 1 || pen > 10) {
+        alvoMsg.textContent = 'Prioridade deve ser um número inteiro entre 1 e 10.';
+        alvoMsg.style.color = 'var(--lig)';
+        return;
+      }
+      if (!confirm(`Alterar prioridade de ${a.name} para ${pen}?`)) return;
+      const j = await post('/admin/agentes/prioridade', {code: a.code, fila: a.queue, penalty: pen});
+      resultado(j, `Prioridade de ${a.name} agora é ${pen}.`, alvoMsg);
     });
-    $('bDeslogar').onclick = e => acao(e.currentTarget, async () => {
+    $('bRemoverFila').onclick = e => acao(e.currentTarget, async (alvoMsg) => {
+      const a = sel.agente;
+      if (!confirm(`ATENÇÃO: Remover ${a.name} (${a.code}) da fila ${fila(a.queue).nome}? Ele deixará de receber chamadas desta fila.`)) return;
+      const j = await post(`/admin/agentes/${encodeURIComponent(a.code)}/remover-fila`, {fila: a.queue});
+      resultado(j, `${a.name} foi removido da fila ${fila(a.queue).nome}.`, alvoMsg);
+    });
+    $('bDeslogar').onclick = e => acao(e.currentTarget, async (alvoMsg) => {
       const a = sel.agente;
       if (!confirm(`Deslogar ${a.name} (${a.code})? Ele sai das filas e para de receber ligações.`)) return;
-      resultado(await post(`/admin/agentes/${encodeURIComponent(a.code)}/deslogar`), `${a.name} foi deslogado.`, $('dlgMsg'));
+      resultado(await post(`/admin/agentes/${encodeURIComponent(a.code)}/deslogar`), `${a.name} foi deslogado.`, alvoMsg);
     });
     $('bFechar').onclick = () => $('dlg').close();
     $('dlg').addEventListener('close', () => { sel = null; });
@@ -289,7 +323,7 @@
       const c = th.dataset.col, o = layout.ord || {};
       layout = {...layout, ord: {col: c, dir: o.col === c ? -o.dir : 1}}; render(); salvarLayout(); return;
     }
-    const t = e.target.closest('button[data-tirar]'); if (t) { tirar(t.dataset.tirar, t.dataset.nome, $('msg')); return; }
+    const t = e.target.closest('button[data-tirar]'); if (t) { tirar(t.dataset.tirar, t.dataset.nome, $('msg'), t); return; }
     const n = e.target.closest('button[data-abrir]'); if (n) abrir(n.dataset.abrir, n.dataset.fila);
   });
   if (PODE) {

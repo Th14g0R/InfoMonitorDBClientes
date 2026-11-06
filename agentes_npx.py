@@ -1,11 +1,14 @@
 """Painel de Agentes do call center (NPX/Beatrix).
 
 Consulta pública somente leitura em /agentes; quem tem a permissão ``perm_agentes``
-(ou é Master) organiza o layout e executa ações: tirar pausa, transferir de fila,
-mudar prioridade e deslogar.
+(ou é Master) organiza o layout e executa ações: tirar pausa, colocar em pausa,
+transferir de fila, mudar prioridade, remover de fila e deslogar.
 
 A API da NPX responde uma consulta por vez (~0,4 s cada), então a coleta roda
 continuamente numa thread e as páginas leem sempre o último retrato em memória.
+As ações administrativas operam via sessão web Devise (ClientePainelNpx), mantida
+estritamente em memória com re-autenticação automática e proteção contra vazamento
+de credenciais.
 """
 import json
 import logging
@@ -16,7 +19,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import datetime, timedelta
+from html.parser import HTMLParser
+from http import cookiejar
 from urllib import error as urlerror
+from urllib import parse as urlparse
 from urllib import request as urlrequest
 from zoneinfo import ZoneInfo
 
@@ -35,6 +41,7 @@ NOMES_PADRAO = {
     'Infobrasil_finan': 'Financeiro',
     'InfoBrasil_SPED_Fiscal': 'SPED Fiscal',
     'InfoBrasil_Ponto': 'Ponto',
+    'InfoBrasil_Transbordo': 'Transbordo',
 }
 COLUNAS_ORDEM = {'name', 'status', 'tempo', 'penalty', 'situacao'}
 INTERVALO_COLETA = 1.5      # pausa entre coletas (s)
@@ -57,9 +64,16 @@ def nomes_filas():
     return {**NOMES_PADRAO, **_lista_env('NPX_FILAS_NOMES')}
 
 
-def ids_filas():
-    """ID interno de cada fila na NPX, exigido por add_to_queue/remove_to_queue."""
-    return _lista_env('NPX_FILAS_IDS')
+def _validar_fila(fila, coletor=None):
+    f = str(fila or '').strip()
+    if not f or not RE_FILA.match(f):
+        raise ValueError('Fila inválida.')
+    validas = set(nomes_filas().keys())
+    if coletor and coletor.retrato:
+        validas.update(a.get('queue') for a in coletor.retrato if a.get('queue'))
+    if f not in validas:
+        raise ValueError(f'Fila "{f}" não reconhecida.')
+    return f
 
 
 def _iso_para_datetime(valor):
@@ -70,6 +84,7 @@ def _iso_para_datetime(valor):
 
 
 class ClienteNpx:
+    """Cliente para a API Beatrix (pabx, relatórios e deslogar)."""
     def __init__(self, base=None, token=None, timeout=15):
         self.base = (base or os.getenv('NPX_API_URL') or 'https://app.npxtech.com.br/api').rstrip('/')
         self.token = token if token is not None else os.getenv('NPX_API_TOKEN', '').strip()
@@ -97,19 +112,359 @@ class ClienteNpx:
 
     def post(self, caminho, corpo=None):
         """A NPX responde HTTP 200 mesmo com erro: sucesso = status 1 e sem campo ``error``."""
-        status, texto = self._req('POST', caminho, corpo or {})
+        try:
+            status, texto = self._req('POST', caminho, corpo or {})
+        except Exception as erro:
+            LOGGER.warning('Falha de rede no POST da API NPX (%s): %s', caminho, type(erro).__name__)
+            return {'ok': False, 'http': 502, 'mensagem': 'Falha na comunicação com a API NPX.'}
+
         try:
             obj = json.loads(texto)
-        except ValueError:
+        except (ValueError, TypeError):
             obj = None
+
         ok = 200 <= status < 300
         if ok and isinstance(obj, dict):
             if obj.get('error'):
                 ok = False
             elif 'status' in obj and str(obj['status']) != '1':
                 ok = False
-        mensagem = (obj.get('message') or obj.get('error')) if isinstance(obj, dict) else None
-        return {'ok': ok, 'http': status, 'mensagem': mensagem or texto[:300]}
+
+        raw_msg = (obj.get('message') or obj.get('error')) if isinstance(obj, dict) else None
+        if isinstance(raw_msg, str):
+            s = re.sub(r'<[^>]+>', ' ', raw_msg)
+            s = re.sub(r'\s+', ' ', s).strip()
+            if self.token and len(self.token) >= 8:
+                s = s.replace(self.token, '***')
+            s = re.sub(r'(?i)(?:bearer\s+|token[:=]\s*)[A-Za-z0-9_\-\.]{8,}', 'token: ***', s)
+            mensagem = s[:200]
+        else:
+            mensagem = 'Ação realizada com sucesso.' if ok else 'Falha na operação na API NPX.'
+
+        http_retorno = status if ok else (502 if status in (401, 403) else (status if status >= 400 else 502))
+        return {'ok': ok, 'http': http_retorno, 'mensagem': mensagem}
+
+
+class CSRFParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.token = None
+
+    def handle_starttag(self, tag, attrs):
+        if self.token:
+            return
+        d = dict(attrs)
+        if tag == 'input' and d.get('name') == 'authenticity_token':
+            self.token = d.get('value')
+        elif tag == 'meta' and d.get('name') == 'csrf-token':
+            self.token = d.get('content')
+
+
+class SameOriginRedirectHandler(urlrequest.HTTPRedirectHandler):
+    """Permite redirecionamentos apenas dentro da mesma origem HTTPS configurada."""
+    def __init__(self, allowed_origin):
+        super().__init__()
+        self.allowed_origin = allowed_origin.rstrip('/')
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urlparse.urljoin(req.full_url, newurl)
+        p = urlparse.urlparse(target)
+        origin = f'{p.scheme}://{p.netloc}'
+        if origin != self.allowed_origin or p.username or p.password or p.scheme != 'https':
+            raise urlerror.HTTPError(req.full_url, 403, 'Redirecionamento fora da origem HTTPS bloqueado.', headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, target)
+
+
+class ClientePainelNpx:
+    """Cliente para automação de ações operacionais no painel web da NPX (Rails/Devise).
+
+    Mantém sessão e cookies exclusivamente em memória (CookieJar).
+    Nunca persiste credenciais nem repassa segredos em logs ou respostas.
+    """
+    ACOES = {
+        'update_penalty': '/rates/update_penalty',
+        'move_agent': '/rates/move_agent',
+        'invert_pause_status': '/rates/invert_pause_status',
+        'remove_agent': '/rates/remove_agent',
+    }
+    USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    COOLDOWN_LOGIN = 60.0
+
+    def __init__(self, base=None, email=None, senha=None, timeout=15):
+        self.base = (base or os.getenv('NPX_PAINEL_URL') or 'https://app.npx.com.br').rstrip('/')
+        self.email = email if email is not None else os.getenv('NPX_PAINEL_EMAIL', '').strip()
+        self.senha = senha if senha is not None else os.getenv('NPX_PAINEL_SENHA', '').strip()
+        self.timeout = timeout
+        self._clock = time.monotonic
+        self._login_falha_em = -999.0
+        self._trava = threading.RLock()
+        self._jar = cookiejar.CookieJar()
+        self._opener = None
+        self._autenticado = False
+        self._token_csrf = None
+
+    def _validar_base_url(self):
+        if not self.base:
+            return False
+        p = urlparse.urlparse(self.base)
+        if p.scheme != 'https' or not p.netloc:
+            return False
+        if p.username or p.password or p.query or p.fragment:
+            return False
+        return True
+
+    @property
+    def configurado(self):
+        return bool(self._validar_base_url() and self.email and self.senha)
+
+    def _em_cooldown(self):
+        return (self._clock() - self._login_falha_em) < self.COOLDOWN_LOGIN
+
+    def _obter_origem(self):
+        p = urlparse.urlparse(self.base)
+        return f'{p.scheme}://{p.netloc}'
+
+    def _criar_opener(self):
+        origem = self._obter_origem()
+        redirect_handler = SameOriginRedirectHandler(origem)
+        cookie_processor = urlrequest.HTTPCookieProcessor(self._jar)
+        return urlrequest.build_opener(cookie_processor, redirect_handler)
+
+    def _sanitizar_mensagem(self, texto):
+        if not isinstance(texto, str):
+            return None
+        s = re.sub(r'<[^>]+>', ' ', texto)
+        s = re.sub(r'\s+', ' ', s).strip()
+        if not s:
+            return ''
+
+        segredos = set()
+        if self.senha and len(self.senha) >= 3:
+            segredos.add(self.senha)
+        if self.email and len(self.email) >= 3:
+            segredos.add(self.email)
+        token_api = os.getenv('NPX_API_TOKEN', '').strip()
+        if token_api and len(token_api) >= 8:
+            segredos.add(token_api)
+        if self._token_csrf and len(self._token_csrf) >= 8:
+            segredos.add(self._token_csrf)
+        # Valores de CookieJar: somente cookies com len >= 8 para não corromper texto legítimo
+        for c in self._jar:
+            if c.value and len(c.value) >= 8:
+                segredos.add(c.value)
+
+        for segredo in sorted(segredos, key=len, reverse=True):
+            s = s.replace(segredo, '***')
+
+        s = re.sub(r'(?i)(?:bearer\s+|token[:=]\s*)[A-Za-z0-9_\-\.]{8,}', 'token: ***', s)
+        s = re.sub(r'(?i)(?:cookie[:=]\s*)[^;\s]{8,}', 'cookie: ***', s)
+        s = re.sub(r'([?&](?:authenticity_token|password|senha|token)=)[^&]+', r'\1***', s, flags=re.IGNORECASE)
+        s = re.sub(r'(?:_session|_callcenter_session|remember_user_token)=[^;\s]+', '***', s, flags=re.IGNORECASE)
+
+        s = re.sub(r'\s+', ' ', s).strip()
+        return s[:200]
+
+    def autenticar(self, forcar=False):
+        if not self.configurado:
+            raise RuntimeError('Credenciais do painel NPX não configuradas ou URL inválida.')
+        with self._trava:
+            if self._autenticado and not forcar:
+                return True
+            if self._em_cooldown():
+                raise RuntimeError('Login no painel NPX temporariamente bloqueado após falha recente.')
+
+            self._autenticado = False
+            self._jar.clear()
+            self._opener = self._criar_opener()
+            self._token_csrf = None
+            login_url = self.base + '/users/sign_in'
+
+            # 1. GET para extrair authenticity_token
+            req_get = urlrequest.Request(login_url, headers={
+                'User-Agent': self.USER_AGENT,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            })
+            try:
+                with self._opener.open(req_get, timeout=self.timeout) as resp:
+                    corpo_html = resp.read().decode('utf-8', 'replace')
+            except Exception as erro:
+                self._login_falha_em = self._clock()
+                LOGGER.warning('Falha de conexão com login do painel NPX: %s', type(erro).__name__)
+                raise RuntimeError('Falha de conexão com a página de login do painel NPX.')
+
+            parser = CSRFParser()
+            parser.feed(corpo_html)
+            token = parser.token
+            if not token:
+                self._login_falha_em = self._clock()
+                LOGGER.warning('Token CSRF não localizado na página de login do painel NPX.')
+                raise RuntimeError('Token de autenticidade não encontrado no login do painel NPX.')
+            self._token_csrf = token
+
+            # 2. POST de login
+            dados_post = urlparse.urlencode({
+                'authenticity_token': token,
+                'user[email]': self.email,
+                'user[password]': self.senha,
+                'commit': 'Entrar',
+            }).encode('utf-8')
+
+            req_post = urlrequest.Request(login_url, data=dados_post, headers={
+                'User-Agent': self.USER_AGENT,
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            })
+            try:
+                with self._opener.open(req_post, timeout=self.timeout) as resp:
+                    final_url = resp.geturl()
+                    final_body = resp.read().decode('utf-8', 'replace')
+            except urlerror.HTTPError as erro:
+                self._login_falha_em = self._clock()
+                LOGGER.warning('HTTP %s no login do painel NPX: %s', erro.code, type(erro).__name__)
+                raise RuntimeError('Credenciais inválidas ou erro no login do painel NPX.')
+            except Exception as erro:
+                self._login_falha_em = self._clock()
+                LOGGER.warning('Falha na comunicação de autenticação com o painel NPX: %s', type(erro).__name__)
+                raise RuntimeError('Falha na comunicação de autenticação com o painel NPX.')
+
+            if '/users/sign_in' in final_url or 'new_user' in final_body:
+                self._login_falha_em = self._clock()
+                self._jar.clear()
+                self._token_csrf = None
+                LOGGER.warning('Credenciais do painel NPX inválidas ou sessão não confirmada.')
+                raise RuntimeError('Credenciais do painel NPX inválidas ou sessão não confirmada.')
+
+            self._autenticado = True
+            LOGGER.info('Sessão do painel NPX autenticada com sucesso.')
+            return True
+
+    def _requisicao_acao(self, endpoint, query_params):
+        if not self._autenticado or not self._opener:
+            self.autenticar()
+        qs = urlparse.urlencode(query_params)
+        url = f'{self.base}{endpoint}?{qs}'
+        req = urlrequest.Request(url, headers={
+            'User-Agent': self.USER_AGENT,
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'X-Requested-With': 'XMLHttpRequest',
+        })
+        try:
+            with self._opener.open(req, timeout=self.timeout) as resp:
+                status = resp.status
+                texto = resp.read().decode('utf-8', 'replace')
+                url_final = resp.geturl()
+        except urlerror.HTTPError as erro:
+            status = erro.code
+            texto = erro.read().decode('utf-8', 'replace')
+            url_final = erro.url
+            try:
+                erro.close()
+            except Exception:
+                pass
+        return status, texto, url_final
+
+    def executar(self, acao, parametros):
+        if not self.configurado:
+            return {'ok': False, 'http': 503, 'mensagem': 'Painel NPX não configurado no servidor.'}
+        if acao not in self.ACOES:
+            return {'ok': False, 'http': 400, 'mensagem': f'Ação "{acao}" inválida.'}
+
+        # Validação estrita de parâmetros ANTES de qualquer requisição
+        params_envio = {}
+        codigo = _codigo(parametros.get('code'))
+        params_envio['code'] = codigo
+
+        if acao == 'update_penalty':
+            pen = parametros.get('penalty')
+            if isinstance(pen, bool) or not isinstance(pen, int) or not (1 <= pen <= 10):
+                raise ValueError('O valor da prioridade deve ser um número inteiro entre 1 e 10.')
+            queue = str(parametros.get('queue') or '').strip()
+            if not RE_FILA.match(queue):
+                raise ValueError('Fila inválida.')
+            params_envio['penalty'] = str(pen)
+            params_envio['queue'] = queue
+
+        elif acao == 'move_agent':
+            queue = str(parametros.get('queue') or '').strip()
+            if not RE_FILA.match(queue):
+                raise ValueError('Fila inválida.')
+            params_envio['queue'] = queue
+
+        elif acao == 'invert_pause_status':
+            pause_raw = parametros.get('pause')
+            if pause_raw in ('0', 0) and not isinstance(pause_raw, bool):
+                params_envio['pause'] = '0'
+            elif pause_raw in ('1', 1) and not isinstance(pause_raw, bool):
+                params_envio['pause'] = '1'
+            else:
+                raise ValueError('Status de pausa inválido (esperado 0 ou 1).')
+
+        elif acao == 'remove_agent':
+            queue = str(parametros.get('queue') or '').strip()
+            if queue and not RE_FILA.match(queue):
+                raise ValueError('Fila inválida.')
+            # A spec externa do NPX rates/remove_agent usa SOMENTE code na query string
+
+        endpoint = self.ACOES[acao]
+
+        with self._trava:
+            if self._em_cooldown():
+                return {'ok': False, 'http': 502,
+                        'mensagem': 'Comunicação com o painel NPX temporariamente suspensa após falha recente de autenticação.'}
+
+            try:
+                status, texto, url_final = self._requisicao_acao(endpoint, params_envio)
+            except Exception as erro:
+                LOGGER.warning('Falha de rede na ação %s do painel NPX: %s', acao, type(erro).__name__)
+                return {'ok': False, 'http': 502, 'mensagem': 'Falha na comunicação com o painel NPX.'}
+
+            def eh_sessao_expirada(st, corpo, u):
+                if st in (401, 403):
+                    return True
+                if '/users/sign_in' in (u or ''):
+                    return True
+                if 'new_user' in corpo or 'users/sign_in' in corpo:
+                    return True
+                try:
+                    json.loads(corpo)
+                    return False
+                except (ValueError, TypeError):
+                    return True
+
+            if eh_sessao_expirada(status, texto, url_final):
+                LOGGER.info('Sessão expirada ou resposta não-JSON em %s. Re-autenticando e repetindo 1 vez...', acao)
+                try:
+                    self.autenticar(forcar=True)
+                    status, texto, url_final = self._requisicao_acao(endpoint, params_envio)
+                except Exception:
+                    LOGGER.warning('Falha na re-autenticação do painel NPX.')
+                    return {'ok': False, 'http': 502,
+                            'mensagem': 'Sessão do painel NPX expirada e não foi possível re-autenticar.'}
+
+            # Avaliação do resultado após retry (ou primeira execução válida)
+            try:
+                obj = json.loads(texto)
+            except (ValueError, TypeError):
+                return {'ok': False, 'http': 502, 'mensagem': 'Resposta inválida do painel NPX.'}
+
+            ok = (200 <= status < 300)
+            if isinstance(obj, dict):
+                if obj.get('error'):
+                    ok = False
+                elif 'status' in obj and str(obj['status']) not in ('1', 'true', 'ok'):
+                    ok = False
+                raw_msg = obj.get('message') or obj.get('error') or obj.get('msg')
+            else:
+                raw_msg = None
+
+            msg_sanitizada = self._sanitizar_mensagem(raw_msg)
+            if msg_sanitizada:
+                msg_final = msg_sanitizada
+            else:
+                msg_final = 'Ação realizada com sucesso.' if ok else 'Falha na operação no painel NPX.'
+
+            http_retorno = status if ok else (502 if status in (401, 403) else (status if status >= 400 else 502))
+            return {'ok': ok, 'http': http_retorno, 'mensagem': msg_final}
 
 
 class ColetorAgentes:
@@ -119,6 +474,7 @@ class ColetorAgentes:
         self._thread = None
         self._parar = threading.Event()
         self._forcar = threading.Event()
+        self._acordar = threading.Event()
         self.retrato = None          # lista de agentes
         self.coletado_em = None
         self.erro = None
@@ -138,18 +494,21 @@ class ColetorAgentes:
 
     def parar(self):
         self._parar.set()
+        self._acordar.set()
 
     def forcar_releitura(self):
         self._forcar.set()
+        self._acordar.set()
 
     def _laco(self):
         while not self._parar.is_set():
             try:
                 self.coletar()
-            except Exception as erro:   # mantém o último retrato válido e tenta de novo
-                self.erro = str(erro)
-                LOGGER.warning('Coleta NPX falhou: %s', erro)
-            self._parar.wait(INTERVALO_COLETA)
+            except Exception as erro:
+                self.erro = 'Coleta de agentes indisponível no momento.'
+                LOGGER.warning('Falha na coleta de agentes da NPX: %s', type(erro).__name__)
+            self._acordar.wait(INTERVALO_COLETA)
+            self._acordar.clear()
 
     # ---- coleta ----
     def _relatorio(self, caminho):
@@ -330,82 +689,33 @@ def _codigo(valor):
     return codigo
 
 
-def _id_fila(nome):
-    ident = ids_filas().get(nome)
-    if not ident:
-        raise ValueError(f'A fila "{nomes_filas().get(nome, nome)}" ainda não tem o ID da NPX configurado (NPX_FILAS_IDS).')
-    return ident
+def transferir(cliente_painel, dados, coletor=None):
+    codigo = _codigo(dados.get('code'))
+    para = _validar_fila(dados.get('para'), coletor)
+    if not cliente_painel or not cliente_painel.configurado:
+        return {'ok': False, 'http': 503, 'mensagem': 'Painel NPX não configurado no servidor.'}
+    return cliente_painel.executar('move_agent', {'code': codigo, 'queue': para})
 
 
-def transferir(cliente, dados):
-    codigo, de, para = _codigo(dados.get('code')), str(dados.get('de') or ''), str(dados.get('para') or '')
-    if de == para or not RE_FILA.match(de) or not RE_FILA.match(para):
-        raise ValueError('Filas inválidas.')
-    ramal = _codigo(dados.get('extension') or codigo)
+def alterar_prioridade(cliente_painel, dados, coletor=None):
+    codigo = _codigo(dados.get('code'))
+    fila = _validar_fila(dados.get('fila'), coletor)
     raw_pen = dados.get('penalty')
-    if raw_pen in (None, ''):
-        prioridade = 1
-    else:
-        try:
-            prioridade = int(raw_pen)
-        except (ValueError, TypeError, OverflowError):
-            raise ValueError('Prioridade deve ficar entre 0 e 99.')
-        if not 0 <= prioridade <= 99:
-            raise ValueError('Prioridade deve ficar entre 0 e 99.')
-    id_de, id_para = _id_fila(de), _id_fila(para)      # valida as duas antes de mexer
-    # inclui na nova antes de tirar da antiga: o agente nunca fica sem fila
-    incluir = cliente.post(f'/v2/agents/{codigo}/add_to_queue', {'queue_id': id_para, 'extension': ramal, 'penalty': str(prioridade)})
-    if not incluir['ok']:
-        return {'ok': False, 'mensagem': f'Não incluiu na nova fila: {incluir["mensagem"]}'}
-    remover = cliente.post(f'/v2/agents/{codigo}/remove_to_queue', {'queue_id': id_de})
-    if not remover['ok']:
-        return {'ok': False, 'mensagem': f'Incluído na nova fila, mas não saiu da anterior: {remover["mensagem"]}'}
-    return {'ok': True, 'mensagem': 'Transferido.'}
+    if isinstance(raw_pen, bool) or not isinstance(raw_pen, int) or not (1 <= raw_pen <= 10):
+        raise ValueError('O valor da prioridade deve ser um número inteiro entre 1 e 10.')
+    if not cliente_painel or not cliente_painel.configurado:
+        return {'ok': False, 'http': 503, 'mensagem': 'Painel NPX não configurado no servidor.'}
+    return cliente_painel.executar('update_penalty', {'code': codigo, 'queue': fila, 'penalty': raw_pen})
 
 
-def alterar_prioridade(cliente, dados):
-    codigo, fila = _codigo(dados.get('code')), str(dados.get('fila') or '')
-    if not RE_FILA.match(fila):
-        raise ValueError('Fila inválida.')
-    raw_pen = dados.get('penalty')
-    try:
-        prioridade = int(raw_pen)
-    except (ValueError, TypeError, OverflowError):
-        raise ValueError('Prioridade deve ficar entre 0 e 99.')
-    if not 0 <= prioridade <= 99:
-        raise ValueError('Prioridade deve ficar entre 0 e 99.')
-    raw_pen_atual = dados.get('penaltyAtual')
-    if raw_pen_atual in (None, ''):
-        pen_atual = 1
-    else:
-        try:
-            pen_atual = int(raw_pen_atual)
-        except (ValueError, TypeError, OverflowError):
-            raise ValueError('Prioridade atual deve ficar entre 0 e 99.')
-        if not 0 <= pen_atual <= 99:
-            raise ValueError('Prioridade atual deve ficar entre 0 e 99.')
-    ramal = _codigo(dados.get('extension') or codigo)
-    id_fila = _id_fila(fila)
-    corpo = {'queue_id': id_fila, 'extension': ramal, 'penalty': str(prioridade)}
-    primeira = cliente.post(f'/v2/agents/{codigo}/add_to_queue', corpo)
-    if primeira['ok']:
-        return {'ok': True, 'mensagem': 'Prioridade alterada.'}
-    # se a NPX não atualiza quem já está na fila: remove e inclui de novo, com volta em caso de falha
-    if not cliente.post(f'/v2/agents/{codigo}/remove_to_queue', {'queue_id': id_fila})['ok']:
-        return {'ok': False, 'mensagem': primeira['mensagem']}
-    segunda = cliente.post(f'/v2/agents/{codigo}/add_to_queue', corpo)
-    if segunda['ok']:
-        return {'ok': True, 'mensagem': 'Prioridade alterada.'}
-    volta = cliente.post(f'/v2/agents/{codigo}/add_to_queue', {**corpo, 'penalty': str(pen_atual)})
-    aviso = 'o agente voltou para a fila' if volta['ok'] else 'ATENÇÃO: o agente ficou fora da fila'
-    return {'ok': False, 'mensagem': f'Não aplicou ({segunda["mensagem"]}); {aviso}.'}
-
-
-def configurar_agentes(bp, conectar, tem_permissao, cliente=None):
+def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel=None):
     cliente = cliente or ClienteNpx()
+    cliente_painel = cliente_painel or ClientePainelNpx()
     coletor = ColetorAgentes(cliente)
     layout = LayoutAgentes(conectar)
     bp.coletor_agentes = coletor
+    bp.cliente_npx = cliente
+    bp.cliente_painel_npx = cliente_painel
 
     def pode():
         return bool(tem_permissao(PERMISSAO))
@@ -417,10 +727,20 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None):
         return session.get('user_nome') or str(session.get('user_id') or '?')
 
     def responder_acao(acao, codigo, resultado):
-        registrar_acao_admin(f'agentes_{acao}', {'agente': codigo, 'ok': resultado.get('ok'),
-                                                'mensagem': str(resultado.get('mensagem'))[:200]})
+        ok = bool(resultado.get('ok'))
+        registrar_acao_admin(f'agentes_{acao}', {'agente': codigo, 'ok': ok})
         coletor.forcar_releitura()
-        return jsonify(ok=bool(resultado.get('ok')), mensagem=resultado.get('mensagem'))
+        status_http = resultado.get('http', 200)
+        if not ok:
+            if status_http in (401, 403):
+                status_http = 502
+            elif status_http == 503:
+                status_http = 503
+            elif status_http < 400:
+                status_http = 502
+        else:
+            status_http = 200
+        return jsonify(ok=ok, mensagem=resultado.get('mensagem')), status_http
 
     @bp.route('/agentes', endpoint='agentes')
     def pagina_agentes():
@@ -433,8 +753,8 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None):
             return jsonify(erro='NPX_API_TOKEN não configurado no .env do servidor.'), 503
         lista, em, erro = coletor.dados()
         if lista is None:
-            return jsonify(erro=erro or 'Sem resposta da NPX.'), 502
-        nomes, ids = nomes_filas(), ids_filas()
+            return jsonify(erro='Sem resposta da NPX.'), 502
+        nomes = nomes_filas()
         chaves = list(dict.fromkeys(list(nomes) + [a['queue'] for a in lista if a['queue']]))
         pode_gerenciar = pode()
         if pode_gerenciar:
@@ -444,7 +764,8 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None):
             agentes_retorno = [{k: v for k, v in a.items() if k not in campos_privados} for a in lista]
         resposta = jsonify(
             atualizado=em.isoformat(), erroNpx=erro, layout=layout.obter(), podeGerenciar=pode_gerenciar,
-            filas=[{'key': k, 'nome': nomes.get(k, k.replace('_', ' ')), 'temId': k in ids} for k in chaves],
+            painelConfigurado=bool(cliente_painel and cliente_painel.configurado),
+            filas=[{'key': k, 'nome': nomes.get(k, k.replace('_', ' '))} for k in chaves],
             agentes=agentes_retorno)
         resposta.headers['Cache-Control'] = 'no-store'
         return resposta
@@ -462,41 +783,89 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None):
 
     @bp.route('/admin/agentes/<codigo>/tirar-pausa', methods=['POST'], endpoint='agentes_tirar_pausa')
     def tirar_pausa(codigo):
-        if not pode():
-            return negar()
         try:
             codigo = _codigo(codigo)
         except ValueError as erro:
             return jsonify(ok=False, mensagem=str(erro)), 400
-        return responder_acao('tirar_pausa', codigo, cliente.post(f'/v2/agents/{codigo}/unpause'))
-
-    @bp.route('/admin/agentes/<codigo>/deslogar', methods=['POST'], endpoint='agentes_deslogar')
-    def deslogar(codigo):
         if not pode():
             return negar()
+        if cliente_painel and cliente_painel.configurado:
+            res = cliente_painel.executar('invert_pause_status', {'code': codigo, 'pause': '0'})
+        else:
+            res = cliente.post(f'/v2/agents/{codigo}/unpause')
+        return responder_acao('tirar_pausa', codigo, res)
+
+    @bp.route('/admin/agentes/<codigo>/colocar-pausa', methods=['POST'], endpoint='agentes_colocar_pausa')
+    def colocar_pausa(codigo):
         try:
             codigo = _codigo(codigo)
         except ValueError as erro:
             return jsonify(ok=False, mensagem=str(erro)), 400
-        return responder_acao('deslogar', codigo, cliente.post(f'/callcenter/{codigo}/logoff'))
+        if not pode():
+            return negar()
+        if not (cliente_painel and cliente_painel.configurado):
+            return jsonify(ok=False, mensagem='Painel NPX não configurado no servidor.'), 503
+        res = cliente_painel.executar('invert_pause_status', {'code': codigo, 'pause': '1'})
+        return responder_acao('colocar_pausa', codigo, res)
 
-    @bp.route('/admin/agentes/transferir', methods=['POST'], endpoint='agentes_transferir')
-    def rota_transferir():
+    @bp.route('/admin/agentes/<codigo>/remover-fila', methods=['POST'], endpoint='agentes_remover_fila')
+    def remover_fila(codigo):
+        try:
+            codigo = _codigo(codigo)
+        except ValueError as erro:
+            return jsonify(ok=False, mensagem=str(erro)), 400
         if not pode():
             return negar()
         dados = request.get_json(silent=True) or {}
         try:
-            return responder_acao('transferir', dados.get('code'), transferir(cliente, dados))
+            fila = _validar_fila(dados.get('fila'), coletor)
+        except (ValueError, TypeError) as erro:
+            return jsonify(ok=False, mensagem=str(erro)), 400
+        if not (cliente_painel and cliente_painel.configurado):
+            return jsonify(ok=False, mensagem='Painel NPX não configurado no servidor.'), 503
+        try:
+            res = cliente_painel.executar('remove_agent', {'code': codigo, 'queue': fila})
+        except (ValueError, TypeError, OverflowError) as erro:
+            return jsonify(ok=False, mensagem=str(erro)), 400
+        return responder_acao('remover_fila', codigo, res)
+
+    @bp.route('/admin/agentes/<codigo>/deslogar', methods=['POST'], endpoint='agentes_deslogar')
+    def deslogar(codigo):
+        try:
+            codigo = _codigo(codigo)
+        except ValueError as erro:
+            return jsonify(ok=False, mensagem=str(erro)), 400
+        if not pode():
+            return negar()
+        return responder_acao('deslogar', codigo, cliente.post(f'/callcenter/{codigo}/logoff'))
+
+    @bp.route('/admin/agentes/transferir', methods=['POST'], endpoint='agentes_transferir')
+    def rota_transferir():
+        dados = request.get_json(silent=True) or {}
+        try:
+            codigo = _codigo(dados.get('code'))
+        except (ValueError, TypeError) as erro:
+            return jsonify(ok=False, mensagem=str(erro)), 400
+        if not pode():
+            return negar()
+        try:
+            res = transferir(cliente_painel, dados, coletor)
+            return responder_acao('transferir', codigo, res)
         except (ValueError, TypeError, OverflowError) as erro:
             return jsonify(ok=False, mensagem=str(erro)), 400
 
     @bp.route('/admin/agentes/prioridade', methods=['POST'], endpoint='agentes_prioridade')
     def rota_prioridade():
-        if not pode():
-            return negar()
         dados = request.get_json(silent=True) or {}
         try:
-            return responder_acao('prioridade', dados.get('code'), alterar_prioridade(cliente, dados))
+            codigo = _codigo(dados.get('code'))
+        except (ValueError, TypeError) as erro:
+            return jsonify(ok=False, mensagem=str(erro)), 400
+        if not pode():
+            return negar()
+        try:
+            res = alterar_prioridade(cliente_painel, dados, coletor)
+            return responder_acao('prioridade', codigo, res)
         except (ValueError, TypeError, OverflowError) as erro:
             return jsonify(ok=False, mensagem=str(erro)), 400
 
