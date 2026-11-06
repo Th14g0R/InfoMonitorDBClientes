@@ -12,6 +12,7 @@ de credenciais.
 """
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -47,6 +48,20 @@ COLUNAS_ORDEM = {'name', 'status', 'tempo', 'penalty', 'situacao'}
 INTERVALO_COLETA = 1.5      # pausa entre coletas (s)
 VALIDADE_HOJE = 15          # relatórios do dia (s)
 VALIDADE_HISTORICO = 60     # sessões abertas de dias anteriores (s)
+VALIDADE_HISTORICO_LIMITES = 60.0  # cache de limites de pausa históricos (s)
+
+
+def _normalizar_max_minutes(valor):
+    """Normaliza max_minutes para número finito >= 0 (int se inteiro, float se fracionário) ou None."""
+    if valor is None or isinstance(valor, bool):
+        return None
+    try:
+        n = float(valor)
+        if not math.isfinite(n) or n < 0:
+            return None
+        return int(n) if n.is_integer() else n
+    except (ValueError, TypeError, OverflowError):
+        return None
 
 
 def _lista_env(nome):
@@ -480,6 +495,9 @@ class ColetorAgentes:
         self.erro = None
         self._historico, self._historico_em = [], 0.0
         self._hoje, self._pausas, self._hoje_em = [], [], 0.0
+        self._limites_hist = {}
+        self._limites_hist_em = -999.0
+        self._limites_cache = {}
 
     # ---- ciclo de vida ----
     def garantir_rodando(self):
@@ -539,6 +557,34 @@ class ColetorAgentes:
                 ultima[chave] = linha
         return sorted((l for l in ultima.values() if not l.get('logoff_date')), key=lambda l: str(l.get('logon_date')))
 
+    def _atualizar_limites_pausa(self, agora):
+        if time.monotonic() - self._limites_hist_em >= VALIDADE_HISTORICO_LIMITES:
+            try:
+                de = (agora - timedelta(days=30)).strftime('%Y-%m-%d')
+                ate = agora.strftime('%Y-%m-%d')
+                pausas_hist = self._relatorio(
+                    f'/call_center_reports/report_pause_details?date_started_at={de}&date_ended_at={ate}&per_page=1000')
+                hist = {}
+                for p in sorted(pausas_hist, key=lambda x: str(x.get('pause_start') or '')):
+                    t = p.get('pause')
+                    if t and 'max_minutes' in p:
+                        hist[str(t)] = _normalizar_max_minutes(p.get('max_minutes'))
+                self._limites_hist = hist
+            except Exception as erro:
+                LOGGER.warning('Falha ao atualizar limites de pausa históricos: %s', type(erro).__name__)
+            finally:
+                self._limites_hist_em = time.monotonic()
+
+        hoje = {}
+        for p in sorted(self._pausas, key=lambda x: str(x.get('pause_start') or '')):
+            t = p.get('pause')
+            if t and 'max_minutes' in p:
+                hoje[str(t)] = _normalizar_max_minutes(p.get('max_minutes'))
+
+        limites = dict(self._limites_hist)
+        limites.update(hoje)
+        self._limites_cache = limites
+
     def coletar(self):
         agora = datetime.now(FUSO)
         agentes = {}
@@ -559,6 +605,8 @@ class ColetorAgentes:
             if pausa.get('queue') and pausa['queue'] not in item['filas']:
                 item['filas'].append(pausa['queue'])
 
+        self._atualizar_limites_pausa(agora)
+
         def status_de(codigo):
             try:
                 return codigo, self.cliente.get(f'/pabx/{codigo}/agent_status')
@@ -573,14 +621,23 @@ class ColetorAgentes:
             st = estados.get(codigo) or None
             aberta = pausas_abertas.get(codigo)
             em_pausa = str(st.get('paused')) == '1' if st else bool(aberta)
-            inicio = tipo = minutos = None
+            inicio = tipo = minutos = max_minutos = None
             if em_pausa:
                 if aberta:
                     inicio, tipo = aberta.get('pause_start'), aberta.get('pause')
                     dt = _iso_para_datetime(inicio)
                     minutos = round((agora - dt).total_seconds() / 60, 1) if dt else None
+                    if 'max_minutes' in aberta:
+                        max_minutos = _normalizar_max_minutes(aberta.get('max_minutes'))
+                    else:
+                        if tipo:
+                            max_minutos = self._limites_cache.get(str(tipo))
                 elif st:
+                    tipo = st.get('pause_type') or st.get('pause')
                     minutos = round(float(st.get('duration') or 0) / 60, 1)
+                    if tipo:
+                        max_minutos = self._limites_cache.get(str(tipo))
+
             chamada = (st or {}).get('current_call') or {}
             for fila in info['filas'] or ['']:
                 lista.append({
@@ -595,6 +652,7 @@ class ColetorAgentes:
                     'pauseType': tipo,
                     'pauseStart': inicio,
                     'pauseMinutes': minutos,
+                    'pauseMaxMinutes': max_minutos,
                     'callSrc': (st or {}).get('src') or None,
                     'callDst': (st or {}).get('dst') or None,
                     'callClient': chamada.get('client_name') or None,
@@ -613,7 +671,7 @@ class ColetorAgentes:
 
 
 # ---- layout definido pelo administrador ----
-LAYOUT_PADRAO = {'cols': 2, 'c1': ['InfoBrasil_Suporte'], 'c2': [], 'ord': {'col': 'status', 'dir': 1}, 'limite': 10}
+LAYOUT_PADRAO = {'cols': 2, 'c1': ['InfoBrasil_Suporte'], 'c2': [], 'ord': {'col': 'status', 'dir': 1}}
 
 
 def validar_layout(dados):
@@ -644,13 +702,8 @@ def validar_layout(dados):
         raise ValueError('Ordenação inválida.')
     if col not in COLUNAS_ORDEM or direcao not in (1, -1):
         raise ValueError('Ordenação inválida.')
-    try:
-        limite = int(dados.get('limite', 10))
-    except (ValueError, TypeError, OverflowError):
-        raise ValueError('Limite de pausa inválido.')
-    if not 1 <= limite <= 600:
-        raise ValueError('Limite de pausa inválido.')
-    return {'cols': cols, **colunas, 'ord': {'col': col, 'dir': direcao}, 'limite': limite}
+    # Campo antigo 'limite' é aceito e ignorado silenciosamente
+    return {'cols': cols, **colunas, 'ord': {'col': col, 'dir': direcao}}
 
 
 class LayoutAgentes:
@@ -778,7 +831,7 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
             novo = layout.salvar(request.get_json(silent=True), usuario())
         except (ValueError, TypeError, OverflowError) as erro:
             return jsonify(ok=False, mensagem=str(erro)), 400
-        registrar_acao_admin('agentes_layout', {'cols': novo.get('cols'), 'limite': novo.get('limite')})
+        registrar_acao_admin('agentes_layout', {'cols': novo.get('cols')})
         return jsonify(ok=True, layout=novo)
 
     @bp.route('/admin/agentes/<codigo>/tirar-pausa', methods=['POST'], endpoint='agentes_tirar_pausa')

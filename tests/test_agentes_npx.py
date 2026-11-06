@@ -170,6 +170,185 @@ class ColetorTest(unittest.TestCase):
         self.assertEqual(coletor.erro, 'Coleta de agentes indisponível no momento.')
         self.assertNotIn('token_privado_xyz', coletor.erro)
 
+    def test_normalizar_max_minutes_valores_validos_e_invalidos(self):
+        # 12.7 não truncado (float válido)
+        self.assertEqual(agentes_npx._normalizar_max_minutes(12.7), 12.7)
+        self.assertEqual(agentes_npx._normalizar_max_minutes('12.7'), 12.7)
+        # Inteiros válidos
+        self.assertEqual(agentes_npx._normalizar_max_minutes(0), 0)
+        self.assertEqual(agentes_npx._normalizar_max_minutes('0'), 0)
+        self.assertEqual(agentes_npx._normalizar_max_minutes(60), 60)
+        self.assertEqual(agentes_npx._normalizar_max_minutes('45'), 45)
+        # Inválidos retornam None
+        for inv in (None, True, False, -1, -12.7, '-10', 'abc', float('inf'), float('-inf'), float('nan')):
+            self.assertIsNone(agentes_npx._normalizar_max_minutes(inv), f'Falhou para {inv}')
+
+    def test_hist60_mais_hoje_null_resulta_em_none(self):
+        sessoes = [{'code': '4422001', 'agent_name': 'A1', 'queue': 'InfoBrasil_Suporte',
+                    'logon_date': '2026-11-06T08:00:00-03:00', 'logoff_date': None}]
+        hist_pausas = [
+            {'pause': 'Almoço', 'max_minutes': 60, 'pause_start': '2026-10-25T12:00:00-03:00'},
+        ]
+        hoje_pausas = [
+            # Pausa anterior encerrada hoje com max_minutes nulo
+            {'code': '4422002', 'agent_name': 'A2', 'queue': 'InfoBrasil_Suporte', 'pause': 'Almoço',
+             'pause_start': '2026-11-06T09:00:00-03:00', 'pause_finish': '2026-11-06T10:00:00-03:00', 'max_minutes': None},
+            # Pausa aberta atual do agente sem o campo max_minutes (campo ausente obriga consulta ao cache)
+            {'code': '4422001', 'agent_name': 'A1', 'queue': 'InfoBrasil_Suporte', 'pause': 'Almoço',
+             'pause_start': '2026-11-06T12:00:00-03:00', 'pause_finish': None},
+        ]
+        cliente = ClienteFalso({
+            REG: {'report_data': sessoes},
+            '/call_center_reports/report_pause_details?date_started_at': {'report_data': hist_pausas},
+            '/call_center_reports/report_pause_details?per_page': {'report_data': hoje_pausas},
+            '/pabx/4422001/agent_status': status('A1', paused=1),
+        })
+        coletor = ColetorAgentes(cliente)
+        lista = coletor.coletar()
+        self.assertEqual(lista[0]['pauseType'], 'Almoço')
+        self.assertIn('Almoço', coletor._limites_cache)
+        self.assertIsNone(coletor._limites_cache['Almoço'])
+        self.assertIsNone(lista[0]['pauseMaxMinutes'])
+
+    def test_hoje_dois_mesmo_tipo_mais_recente_null_vence(self):
+        sessoes = [{'code': '4422001', 'agent_name': 'A1', 'queue': 'InfoBrasil_Suporte',
+                    'logon_date': '2026-11-06T08:00:00-03:00', 'logoff_date': None}]
+        # Fornecidos fora de ordem cronológica: mais recente (null) primeiro, mais antigo (60) depois
+        hoje_pausas = [
+            {'code': '4422002', 'agent_name': 'A2', 'queue': 'InfoBrasil_Suporte', 'pause': 'Almoço',
+             'pause_start': '2026-11-06T11:00:00-03:00', 'pause_finish': '2026-11-06T12:00:00-03:00', 'max_minutes': None},
+            {'code': '4422003', 'agent_name': 'A3', 'queue': 'InfoBrasil_Suporte', 'pause': 'Almoço',
+             'pause_start': '2026-11-06T08:00:00-03:00', 'pause_finish': '2026-11-06T09:00:00-03:00', 'max_minutes': 60},
+            # Pausa aberta do agente sem o campo max_minutes (obriga consulta ao cache)
+            {'code': '4422001', 'agent_name': 'A1', 'queue': 'InfoBrasil_Suporte', 'pause': 'Almoço',
+             'pause_start': '2026-11-06T12:30:00-03:00', 'pause_finish': None},
+        ]
+        cliente = ClienteFalso({
+            REG: {'report_data': sessoes},
+            '/call_center_reports/report_pause_details?date_started_at': {'report_data': []},
+            '/call_center_reports/report_pause_details?per_page': {'report_data': hoje_pausas},
+            '/pabx/4422001/agent_status': status('A1', paused=1),
+        })
+        coletor = ColetorAgentes(cliente)
+        lista = coletor.coletar()
+        por_cod = {a['code']: a for a in lista}
+        self.assertEqual(por_cod['4422001']['pauseType'], 'Almoço')
+        self.assertIn('Almoço', coletor._limites_cache)
+        self.assertIsNone(coletor._limites_cache['Almoço'])
+        self.assertIsNone(por_cod['4422001']['pauseMaxMinutes'])
+
+    def test_historico_fora_de_ordem_preserva_null_mais_recente(self):
+        sessoes = [{'code': '4422001', 'agent_name': 'A1', 'queue': 'InfoBrasil_Suporte',
+                    'logon_date': '2026-11-06T08:00:00-03:00', 'logoff_date': None}]
+        # Fornecidos fora de ordem cronológica: mais recente (null) primeiro, mais antigo (60) depois
+        hist_pausas = [
+            {'pause': 'Almoço', 'max_minutes': None, 'pause_start': '2026-10-25T12:00:00-03:00'},
+            {'pause': 'Almoço', 'max_minutes': 60, 'pause_start': '2026-10-20T12:00:00-03:00'},
+        ]
+        hoje_pausas = [
+            # Pausa aberta com campo max_minutes ausente (obriga consulta ao cache)
+            {'code': '4422001', 'agent_name': 'A1', 'queue': 'InfoBrasil_Suporte', 'pause': 'Almoço',
+             'pause_start': '2026-11-06T12:00:00-03:00', 'pause_finish': None},
+        ]
+        cliente = ClienteFalso({
+            REG: {'report_data': sessoes},
+            '/call_center_reports/report_pause_details?date_started_at': {'report_data': hist_pausas},
+            '/call_center_reports/report_pause_details?per_page': {'report_data': hoje_pausas},
+            '/pabx/4422001/agent_status': status('A1', paused=1),
+        })
+        coletor = ColetorAgentes(cliente)
+        lista = coletor.coletar()
+        por_cod = {a['code']: a for a in lista}
+        self.assertEqual(por_cod['4422001']['pauseType'], 'Almoço')
+        self.assertIn('Almoço', coletor._limites_hist)
+        self.assertIsNone(coletor._limites_hist['Almoço'])
+        self.assertIn('Almoço', coletor._limites_cache)
+        self.assertIsNone(coletor._limites_cache['Almoço'])
+        self.assertIsNone(por_cod['4422001']['pauseMaxMinutes'])
+
+    def test_aberta_null_com_cache_positivo_resulta_em_none(self):
+        sessoes = [{'code': '4422001', 'agent_name': 'A1', 'queue': 'InfoBrasil_Suporte',
+                    'logon_date': '2026-11-06T08:00:00-03:00', 'logoff_date': None}]
+        cliente = ClienteFalso({
+            REG: {'report_data': sessoes},
+            '/call_center_reports/report_pause_details?date_started_at': {'report_data': [{'pause': 'Almoço', 'max_minutes': 60}]},
+            '/call_center_reports/report_pause_details?per_page': {'report_data': [
+                {'code': '4422001', 'agent_name': 'A1', 'queue': 'InfoBrasil_Suporte', 'pause': 'Almoço',
+                 'pause_start': '2026-11-06T12:00:00-03:00', 'pause_finish': None, 'max_minutes': None}
+            ]},
+            '/pabx/4422001/agent_status': status('A1', paused=1),
+        })
+        coletor = ColetorAgentes(cliente)
+        lista = coletor.coletar()
+        self.assertEqual(lista[0]['pauseType'], 'Almoço')
+        self.assertIsNone(lista[0]['pauseMaxMinutes'])
+
+    def test_aberta_campo_ausente_coberta_pelo_cache_historico_60(self):
+        sessoes = [{'code': '4422001', 'agent_name': 'A1', 'queue': 'InfoBrasil_Suporte',
+                    'logon_date': '2026-11-06T08:00:00-03:00', 'logoff_date': None}]
+        aberta_sem_campo = {
+            'code': '4422001', 'agent_name': 'A1', 'queue': 'InfoBrasil_Suporte',
+            'pause': 'Almoço', 'pause_start': '2026-11-06T12:00:00-03:00', 'pause_finish': None
+        }
+        self.assertNotIn('max_minutes', aberta_sem_campo)
+        cliente = ClienteFalso({
+            REG: {'report_data': sessoes},
+            '/call_center_reports/report_pause_details?date_started_at': {'report_data': [{'pause': 'Almoço', 'max_minutes': 60}]},
+            '/call_center_reports/report_pause_details?per_page': {'report_data': [aberta_sem_campo]},
+            '/pabx/4422001/agent_status': status('A1', paused=1),
+        })
+        coletor = ColetorAgentes(cliente)
+        lista = coletor.coletar()
+        self.assertEqual(lista[0]['pauseType'], 'Almoço')
+        self.assertEqual(lista[0]['pauseMaxMinutes'], 60)
+
+    def test_falha_30_dias_marca_timestamp_e_aguarda_60s(self):
+        chamadas_30d = 0
+        def get_hook(caminho):
+            nonlocal chamadas_30d
+            if 'date_started_at' in caminho and 'report_pause_details' in caminho:
+                chamadas_30d += 1
+                raise RuntimeError('Erro de rede 30 dias')
+            return {'report_data': []}
+
+        cliente = MagicMock()
+        cliente.configurado = True
+        cliente.get.side_effect = get_hook
+
+        coletor = ColetorAgentes(cliente)
+        coletor._limites_hist = {'Almoço': 60}
+        coletor.coletar()
+
+        self.assertEqual(chamadas_30d, 1)
+        self.assertEqual(coletor._limites_hist, {'Almoço': 60})
+        t1 = coletor._limites_hist_em
+        self.assertGreater(t1, 0)
+
+        # Segunda coleta dentro de 60s não repete a chamada com falha
+        coletor.coletar()
+        self.assertEqual(chamadas_30d, 1)
+
+    def test_forcar_releitura_nao_refaz_30_dias_de_limites(self):
+        chamadas_30d = 0
+        def get_hook(caminho):
+            nonlocal chamadas_30d
+            if 'date_started_at' in caminho and 'report_pause_details' in caminho:
+                chamadas_30d += 1
+            return {'report_data': [{'pause': 'Almoço', 'max_minutes': 60}]}
+
+        cliente = MagicMock()
+        cliente.configurado = True
+        cliente.get.side_effect = get_hook
+
+        coletor = ColetorAgentes(cliente)
+        coletor.coletar()
+        self.assertEqual(chamadas_30d, 1)
+
+        # forcar_releitura() atualiza estado de hoje, mas preserva cache de 60s
+        coletor.forcar_releitura()
+        coletor.coletar()
+        self.assertEqual(chamadas_30d, 1)
+
 
 class ClientePainelNpxTest(unittest.TestCase):
     def test_painel_url_requer_https_sem_credenciais_e_default_exato(self):
@@ -597,16 +776,23 @@ class AcoesTest(unittest.TestCase):
 
     def test_validar_layout(self):
         self.assertEqual(validar_layout({'cols': 2, 'c1': ['A', 'A'], 'c2': ['A', 'B'], 'ord': {'col': 'tempo', 'dir': -1}, 'limite': 5}),
-                         {'cols': 2, 'c1': ['A'], 'c2': ['B'], 'ord': {'col': 'tempo', 'dir': -1}, 'limite': 5})
-        for ruim in ({'cols': 3}, {'c1': ['<script>']}, {'ord': {'col': 'senha'}}, {'limite': 0}, 'x'):
+                         {'cols': 2, 'c1': ['A'], 'c2': ['B'], 'ord': {'col': 'tempo', 'dir': -1}})
+        for ruim in ({'cols': 3}, {'c1': ['<script>']}, {'ord': {'col': 'senha'}}, 'x'):
             with self.assertRaises((ValueError, TypeError)):
                 validar_layout(ruim)
 
     def test_validar_layout_rejeita_ord_invalido_e_infinity(self):
-        for ruim in ({'ord': 'x'}, {'ord': 123}, {'cols': float('inf')}, {'limite': float('inf')},
+        for ruim in ({'ord': 'x'}, {'ord': 123}, {'cols': float('inf')},
                      {'ord': {'col': 'status', 'dir': float('inf')}}):
             with self.assertRaises((ValueError, TypeError, OverflowError)):
                 validar_layout(ruim)
+
+    def test_validar_layout_aceita_e_ignora_campo_antigo_limite_qualquer_tipo(self):
+        # B8: validar_layout aceita e ignora silenciosamente o campo antigo limite com qualquer tipo
+        for lim in (0, 10, -5, float('inf'), 'invalido', None, {'chave': 'valor'}, [1, 2]):
+            res = validar_layout({'cols': 2, 'c1': ['A'], 'c2': [], 'limite': lim})
+            self.assertEqual(res, {'cols': 2, 'c1': ['A'], 'c2': [], 'ord': {'col': 'status', 'dir': 1}})
+            self.assertNotIn('limite', res)
 
     def test_remocao_completa_ids_filas_e_npx_filas_ids(self):
         self.assertFalse(hasattr(agentes_npx, 'ids_filas'), 'ids_filas não deve existir em agentes_npx')
@@ -781,7 +967,8 @@ class RotasTest(unittest.TestCase):
         self.assertEqual(self.http.post('/admin/agentes/layout', json={**novo, 'cols': 9}, headers=cabecalho).status_code, 400)
         self.assertTrue(self.http.post('/admin/agentes/layout', json=novo, headers=cabecalho).get_json()['ok'])
         self.permitido = False
-        self.assertEqual(self.http.get('/agentes/dados').get_json()['layout'], novo)
+        esperado = {'cols': 1, 'c1': ['InfoBrasil_Comercial'], 'c2': ['InfoBrasil_Suporte'], 'ord': {'col': 'name', 'dir': 1}}
+        self.assertEqual(self.http.get('/agentes/dados').get_json()['layout'], esperado)
 
     def test_sem_token_avisa_na_pagina(self):
         self.cliente.token = ''
@@ -814,7 +1001,10 @@ class RotasTest(unittest.TestCase):
         cabecalho = {'X-CSRF-Token': self.token}
         self.assertEqual(self.http.post('/admin/agentes/layout', json={'ord': 'invalido'}, headers=cabecalho).status_code, 400)
         self.assertEqual(self.http.post('/admin/agentes/layout', json={'cols': float('inf')}, headers=cabecalho).status_code, 400)
-        self.assertEqual(self.http.post('/admin/agentes/layout', json={'limite': float('inf')}, headers=cabecalho).status_code, 400)
+        # B8: limite antigo com infinity é aceito e ignorado com HTTP 200
+        res = self.http.post('/admin/agentes/layout', json={'cols': 1, 'limite': float('inf')}, headers=cabecalho)
+        self.assertEqual(res.status_code, 200)
+        self.assertNotIn('limite', res.get_json()['layout'])
 
     def test_salvar_layout_registra_auditoria_sem_payload_sensivel(self):
         self.permitido = True
@@ -823,7 +1013,7 @@ class RotasTest(unittest.TestCase):
         with patch('agentes_npx.registrar_acao_admin') as audit:
             resp = self.http.post('/admin/agentes/layout', json=novo, headers=cabecalho)
             self.assertEqual(resp.status_code, 200)
-            audit.assert_called_once_with('agentes_layout', {'cols': 2, 'limite': 15})
+            audit.assert_called_once_with('agentes_layout', {'cols': 2})
 
     def test_prioridade_valida_penalty_int_estrito_1_a_10_com_400(self):
         self.permitido = True

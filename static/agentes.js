@@ -19,7 +19,7 @@
   const GRUPO = '<colgroup><col class="c-ag"><col class="c-st"><col class="c-tp"><col class="c-pr"><col class="c-si"><col class="c-ac"></colgroup>';
 
   let dados = [], filas = [], carregando = false, sel = null, arrastando = null, alvo = null, painelConfigurado = true;
-  let layout = CFG.layout || {cols: 2, c1: [], c2: [], ord: {col: 'status', dir: 1}, limite: 10};
+  let layout = CFG.layout || {cols: 2, c1: [], c2: [], ord: {col: 'status', dir: 1}};
   let timerSalvar = null;
 
   // ---------- utilidades ----------
@@ -39,8 +39,12 @@
     return n || '';
   }
   const fila = k => filas.find(f => f.key === k) || {key: k, nome: k, temId: false};
-  const limite = () => Number(layout.limite) || 10;
-  const presa = a => a.paused && a.pauseMinutes != null && a.pauseMinutes >= limite();
+  const maxValido = m => m != null && Number.isFinite(Number(m)) && Number(m) >= 0;
+  const estourada = a => {
+    if (!a.paused || !maxValido(a.pauseMaxMinutes) || a.pauseMinutes == null) return false;
+    const min = Number(a.pauseMinutes);
+    return Number.isFinite(min) && min > Number(a.pauseMaxMinutes);
+  };
   const duasColunas = () => Number(layout.cols) === 2 && innerWidth > 900;
   const soPausa = () => PODE && $('soPausa') && $('soPausa').checked;
 
@@ -48,9 +52,24 @@
     const num = a.callSrc || a.callDst || a.callClient || '';
     return num ? {num, dir: a.callDst && !a.callSrc ? 'para' : 'de'} : null;
   }
-  function situacaoTexto(a) { if (a.paused) return a.pauseType || 'Pausa'; const c = chamada(a); return c ? c.num : ''; }
+  function situacaoTexto(a) {
+    if (a.paused) {
+      const tipo = a.pauseType || 'Pausa';
+      if (maxValido(a.pauseMaxMinutes) && a.pauseMinutes != null && Number.isFinite(Number(a.pauseMinutes))) {
+        return `${tipo} · ${Math.round(a.pauseMinutes)}m de ${Math.round(a.pauseMaxMinutes)}m`;
+      }
+      return `${tipo}${a.pauseStart ? ` desde ${fmtHora(a.pauseStart)}` : ''}`;
+    }
+    const c = chamada(a); return c ? c.num : '';
+  }
   function situacaoHtml(a) {
-    if (a.paused) return `${esc(a.pauseType || 'Pausa')}${a.pauseStart ? ` <span class="mut">desde ${fmtHora(a.pauseStart)}</span>` : ''}`;
+    if (a.paused) {
+      const tipo = esc(a.pauseType || 'Pausa');
+      if (maxValido(a.pauseMaxMinutes) && a.pauseMinutes != null && Number.isFinite(Number(a.pauseMinutes))) {
+        return `${tipo} <span class="mut">· ${Math.round(a.pauseMinutes)}m de ${Math.round(a.pauseMaxMinutes)}m</span>`;
+      }
+      return `${tipo}${a.pauseStart ? ` <span class="mut">desde ${fmtHora(a.pauseStart)}</span>` : ''}`;
+    }
     if (a.status === 2 || a.status === 5) {
       const c = chamada(a);
       if (!c) return `<span class="mut">${a.status === 5 ? 'Chamando' : 'Em ligação'}</span>`;
@@ -87,12 +106,12 @@
 
   // ---------- desenho ----------
   function linha(a) {
-    const st = stDe(a), p = presa(a);
+    const st = stDe(a), est = estourada(a);
     const nome = PODE ? `<button type="button" class="nome" data-abrir="${esc(a.code)}" data-fila="${esc(a.queue)}">${esc(a.name)}</button>`
                       : `<span class="nome">${esc(a.name)}</span>`;
-    const btn = PODE && a.paused ? `<button type="button" class="${p ? 'btn-pausa' : ''}" data-tirar="${esc(a.code)}" data-nome="${esc(a.name)}">Tirar pausa</button>` : '';
-    return `<tr class="${st[3]}${p ? ' presa' : ''}" style="--c:${st[1]}">
-      <td>${nome}${p ? '<span class="tag">PRESA</span>' : ''}<br><span class="mut">${esc(a.code)}${a.extension && a.extension != a.code ? ' · ramal ' + esc(a.extension) : ''}</span></td>
+    const btn = PODE && a.paused ? `<button type="button" class="${est ? 'btn-pausa' : ''}" data-tirar="${esc(a.code)}" data-nome="${esc(a.name)}">Tirar pausa</button>` : '';
+    return `<tr class="${st[3]}${est ? ' estourada presa' : ''}" style="--c:${st[1]}">
+      <td>${nome}<br><span class="mut">${esc(a.code)}${a.extension && a.extension != a.code ? ' · ramal ' + esc(a.extension) : ''}</span></td>
       <td><span class="pill" style="--c:${st[1]}">${esc(st[0])}</span></td>
       <td class="tempo">${a.seconds == null && !a.paused ? '–' : fmtSeg(segs(a))}</td>
       <td>${esc(a.penalty ?? '–')}</td>
@@ -123,7 +142,7 @@
     $('nCham').textContent = conta(a => !a.paused && a.status === 5);
     $('nLig').textContent = conta(a => !a.paused && a.status === 2);
     $('nPausa').textContent = conta(a => a.paused);
-    $('nPresa').textContent = conta(presa);
+    $('nPresa').textContent = conta(estourada);
     const o = layout.ord || {};
     const cab = COLS.map(([c, t]) => `<th ${PODE ? `data-col="${c}"` : ''} title="${c === 'penalty' ? 'Prioridade (1 = atende primeiro)' : t}" class="${o.col === c ? 'ativo' : ''}">${t}<span class="seta">${o.col === c ? (o.dir > 0 ? '▲' : '▼') : '↕'}</span></th>`).join('') + '<th></th>';
     const {c1, c2} = arrumacao();
@@ -159,7 +178,6 @@
   }
   function aplicarControles() {
     marcar('segCols', layout.cols);
-    if ($('limite')) $('limite').value = layout.limite;
   }
   function salvarLayout() {
     if (!PODE) return;
@@ -328,7 +346,6 @@
   });
   if (PODE) {
     $('segCols').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; layout = {...layout, cols: Number(b.dataset.v)}; marcar('segCols', layout.cols); render(); salvarLayout(); });
-    $('limite').addEventListener('input', () => { const v = Number($('limite').value); if (v >= 1 && v <= 600) { layout = {...layout, limite: v}; render(); salvarLayout(); } });
     $('soPausa').checked = ler('agentes-soPausa') === '1';
     $('soPausa').addEventListener('change', () => { guardar('agentes-soPausa', $('soPausa').checked ? '1' : '0'); render(); });
   }
