@@ -146,8 +146,9 @@
     const o = layout.ord || {};
     const cab = COLS.map(([c, t]) => `<th ${PODE ? `data-col="${c}"` : ''} title="${c === 'penalty' ? 'Prioridade (1 = atende primeiro)' : t}" class="${o.col === c ? 'ativo' : ''}">${t}<span class="seta">${o.col === c ? (o.dir > 0 ? '▲' : '▼') : '↕'}</span></th>`).join('') + '<th></th>';
     const {c1, c2} = arrumacao();
+    const dropFim = PODE ? '<div class="drop-fim" title="Solte aqui para mover para o fim da coluna"></div>' : '';
     const coluna = (n, ks) => `<div class="col" data-coluna="${n}">${ks.map(k => card(k, cab)).join('') ||
-      (PODE ? '<div class="col-vazia">Arraste um grupo para cá</div>' : '')}</div>`;
+      (PODE ? '<div class="col-vazia">Arraste um grupo para cá</div>' : '')}${ks.length && PODE ? dropFim : ''}</div>`;
     const box = $('filas');
     AG.classList.toggle('duas-colunas', duasColunas());
     if (duasColunas()) { box.classList.add('duas'); box.innerHTML = coluna(1, c1) + coluna(2, c2); }
@@ -299,6 +300,7 @@
     box.addEventListener('dragstart', e => {
       const s = e.target.closest('.alca') && e.target.closest('section.fila'); if (!s) return;
       arrastando = s.dataset.fila; s.classList.add('arrastando');
+      AG.classList.add('arrastando');
       e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', arrastando);
       try { e.dataTransfer.setDragImage(s, 20, 20); } catch (_) { /* navegador sem suporte */ }
     });
@@ -307,30 +309,82 @@
       const col = e.target.closest('.col'); if (!col) return;
       e.preventDefault(); limparAlvos();
       const s = e.target.closest('section.fila');
-      if (s && s.dataset.fila !== arrastando) {
+
+      // sobre o próprio grupo que está sendo arrastado: limpa alvo para não reter posição anterior
+      if (s && s.dataset.fila === arrastando) {
+        alvo = null;
+        return;
+      }
+
+      if (s) {
         const r = s.getBoundingClientRect(), antes = e.clientY < r.top + r.height / 2;
         s.classList.add(antes ? 'alvo-antes' : 'alvo-depois');
-        const prox = antes ? s : s.nextElementSibling;
+        let prox = s;
+        if (!antes) {
+          prox = s.nextElementSibling;
+          while (prox && prox.dataset && prox.dataset.fila === arrastando) {
+            prox = prox.nextElementSibling;
+          }
+        }
         alvo = {coluna: col.dataset.coluna, antesDe: prox && prox.dataset ? prox.dataset.fila || null : null};
-      } else if (!s) {
-        col.classList.add('alvo-fim'); alvo = {coluna: col.dataset.coluna, antesDe: null};
+        return;
       }
+
+      // cursor em gap entre cards ou na dropzone final
+      const cards = [...col.querySelectorAll('section.fila:not(.arrastando)')];
+      if (!cards.length) {
+        col.classList.add('alvo-fim'); alvo = {coluna: col.dataset.coluna, antesDe: null};
+        return;
+      }
+      const ultimoCard = cards[cards.length - 1], rUltimo = ultimoCard.getBoundingClientRect();
+      if (e.clientY >= rUltimo.bottom) {
+        col.classList.add('alvo-fim'); alvo = {coluna: col.dataset.coluna, antesDe: null};
+        return;
+      }
+      const primeiroCard = cards[0], rPrimeiro = primeiroCard.getBoundingClientRect();
+      if (e.clientY <= rPrimeiro.top) {
+        primeiroCard.classList.add('alvo-antes');
+        alvo = {coluna: col.dataset.coluna, antesDe: primeiroCard.dataset.fila};
+        return;
+      }
+      // no gap entre cards: seleciona o vizinho mais próximo por clientY
+      let maisProx = cards[0], menorDist = Math.abs(e.clientY - (rPrimeiro.top + rPrimeiro.height / 2));
+      for (let i = 1; i < cards.length; i++) {
+        const rc = cards[i].getBoundingClientRect(), d = Math.abs(e.clientY - (rc.top + rc.height / 2));
+        if (d < menorDist) { menorDist = d; maisProx = cards[i]; }
+      }
+      const rm = maisProx.getBoundingClientRect(), antes = e.clientY < rm.top + rm.height / 2;
+      maisProx.classList.add(antes ? 'alvo-antes' : 'alvo-depois');
+      let prox = maisProx;
+      if (!antes) {
+        prox = maisProx.nextElementSibling;
+        while (prox && prox.dataset && prox.dataset.fila === arrastando) {
+          prox = prox.nextElementSibling;
+        }
+      }
+      alvo = {coluna: col.dataset.coluna, antesDe: prox && prox.dataset ? prox.dataset.fila || null : null};
     });
     box.addEventListener('drop', e => {
       if (!arrastando || !alvo) return; e.preventDefault();
       const {c1, c2} = arrumacao();
       let n1 = c1.filter(k => k !== arrastando), n2 = c2.filter(k => k !== arrastando);
-      if (!duasColunas()) {   // uma coluna: reordena a sequência e mantém cada grupo na sua coluna
+      if (!duasColunas()) {   // uma coluna: reordena a sequência visual mantendo separação c1/c2
         const seq = n1.concat(n2), i = alvo.antesDe ? seq.indexOf(alvo.antesDe) : seq.length;
         seq.splice(i < 0 ? seq.length : i, 0, arrastando);
-        n1 = seq.filter(k => c1.includes(k)); n2 = seq.filter(k => !c1.includes(k));
+        if (alvo.antesDe === null && n2.length > 0) {
+          // ao soltar no drop-fim da coluna única, posiciona no fim de c2 para ser o último visualmente
+          n1 = seq.filter(k => c1.includes(k) && k !== arrastando);
+          n2 = seq.filter(k => c2.includes(k) || k === arrastando);
+        } else {
+          n1 = seq.filter(k => c1.includes(k)); n2 = seq.filter(k => !c1.includes(k));
+        }
       } else {
         const lista = alvo.coluna === '1' ? n1 : n2, i = alvo.antesDe ? lista.indexOf(alvo.antesDe) : lista.length;
         lista.splice(i < 0 ? lista.length : i, 0, arrastando);
       }
       layout = {...layout, c1: n1, c2: n2}; salvarLayout();
     });
-    box.addEventListener('dragend', () => { arrastando = null; alvo = null; limparAlvos(); render(); });
+    box.addEventListener('dragend', () => { arrastando = null; alvo = null; AG.classList.remove('arrastando'); limparAlvos(); render(); });
   }
 
   // ---------- controles ----------
