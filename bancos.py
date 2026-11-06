@@ -66,6 +66,7 @@ PERMISSOES_DISPONIVEIS = {
     'perm_gestao_bancos': 'Gestão de Bancos (Admin: enviar/criar/editar/excluir alias)',
     'perm_horarios': 'Painel de Horários',
     'perm_certificados': 'Gerenciar certificados (adicionar e verificar subdomínios)',
+    'perm_agentes': 'Painel de Agentes (organizar layout, tirar pausa, transferir, prioridade, deslogar)',
 }
 
 @bancos_bp.before_request
@@ -96,7 +97,7 @@ PAGINAS_PUBLICAS = {
     'bancos.api_historico', 'bancos.api_testar_cname', 'bancos.api_consulta_cnpj',
     'bancos.admin_login', 'bancos.esqueci_senha', 'bancos.admin_register',
     'bancos.redefinir_senha_token', 'bancos.certificados', 'bancos.consulta_cnpj',
-    'bancos.rota_relatorio_clientes_lojas',
+    'bancos.rota_relatorio_clientes_lojas', 'bancos.agentes', 'bancos.agentes_dados',
 }
 
 
@@ -1079,6 +1080,11 @@ scheduler.add_job(
     coalesce=True
 )
 configurar_certificados(bancos_bp, get_db_connection, tem_permissao, scheduler)
+try:
+    from agentes_npx import configurar_agentes
+    configurar_agentes(bancos_bp, get_db_connection, tem_permissao)
+except Exception as _e_agentes:
+    LOGGER.warning("Não foi possível inicializar o painel de agentes: %s", _e_agentes)
 try:
     from backups_ftp_admin import configurar_backups_ftp_admin
     configurar_backups_ftp_admin(bancos_bp, lambda: get_db_connection(), obter_status_backups_ftp)
@@ -3299,6 +3305,10 @@ HTML_ADMIN = r"""
                                         <input class="form-check-input" type="checkbox" name="perm_certificados" id="perm_certificados_{{ u.id }}" {% if u.perm_certificados %}checked{% endif %}>
                                         <label class="form-check-label small" for="perm_certificados_{{ u.id }}">Certificados</label>
                                     </div>
+                                    <div class="form-check form-check-inline">
+                                        <input class="form-check-input" type="checkbox" name="perm_agentes" id="perm_agentes_{{ u.id }}" {% if u.perm_agentes %}checked{% endif %}>
+                                        <label class="form-check-label small" for="perm_agentes_{{ u.id }}" title="Painel de Agentes: organizar layout, tirar pausa, transferir, prioridade e deslogar">Agentes</label>
+                                    </div>
                                     <button type="submit" class="btn btn-sm btn-outline-primary ms-1">💾</button>
                                 </form>
                             {% endif %}
@@ -4757,8 +4767,8 @@ def salvar_permissoes_usuario():
         return jsonify({"sucesso": False, "mensagem": "O usuário Master já tem acesso a tudo."}), 400
 
     conn.execute(
-        "UPDATE usuarios SET perm_servidores = ?, perm_gestao_bancos = ?, perm_horarios = ?, perm_certificados = ? WHERE id = ?",
-        (valores['perm_servidores'], valores['perm_gestao_bancos'], valores['perm_horarios'], valores['perm_certificados'], user_id)
+        "UPDATE usuarios SET perm_servidores = ?, perm_gestao_bancos = ?, perm_horarios = ?, perm_certificados = ?, perm_agentes = ? WHERE id = ?",
+        (valores['perm_servidores'], valores['perm_gestao_bancos'], valores['perm_horarios'], valores['perm_certificados'], valores['perm_agentes'], user_id)
     )
     conn.commit()
     conn.close()
@@ -4794,7 +4804,7 @@ def admin_painel():
     api_ultimo_status = None
     if session.get('eh_master'):
         conn = get_db_connection()
-        usuarios_lista = conn.execute("SELECT id, nome, email, eh_master, ativo, perm_servidores, perm_gestao_bancos, perm_horarios, perm_certificados FROM usuarios").fetchall()
+        usuarios_lista = conn.execute("SELECT id, nome, email, eh_master, ativo, perm_servidores, perm_gestao_bancos, perm_horarios, perm_certificados, perm_agentes FROM usuarios").fetchall()
         conn.close()
         api_config = obter_configuracao_api()
         api_ultimo_status = obter_ultimo_status_sincronizacao(get_db_connection)

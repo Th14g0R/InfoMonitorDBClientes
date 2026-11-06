@@ -205,6 +205,26 @@ class SegurancaTest(unittest.TestCase):
             with closing(self.bancos.get_db_connection()) as conn, conn:
                 conn.execute('DELETE FROM usuarios WHERE id=?', (uid,))
 
+    def test_agentes_permissao_concedida_e_revogada(self):
+        with closing(self.bancos.get_db_connection()) as conn, conn:
+            uid = conn.execute('INSERT INTO usuarios(nome,email,senha_hash,ativo) VALUES (?,?,?,1)',
+                               ('AgentePerm', 'agente-perm@example.invalid', generate_password_hash(self.password))).lastrowid
+        try:
+            usuario = self.app.test_client()
+            usuario.get('/admin/login')
+            with usuario.session_transaction() as sessao:
+                token = sessao['_csrf_token']
+                sessao.update(logged_in=True, user_id=uid)
+            layout_valido = {'cols': 1, 'c1': ['InfoBrasil_Suporte'], 'c2': [], 'ord': {'col': 'status', 'dir': 1}, 'limite': 10}
+            for permitido in (True, False):
+                resposta = self.client.post('/admin/usuarios/permissoes', json={'user_id': uid, 'perm_agentes': permitido}, headers={'X-CSRF-Token': self.token})
+                self.assertEqual(resposta.status_code, 200)
+                resposta_layout = usuario.post('/admin/agentes/layout', json=layout_valido, headers={'X-CSRF-Token': token})
+                self.assertEqual(resposta_layout.status_code, 200 if permitido else 403)
+        finally:
+            with closing(self.bancos.get_db_connection()) as conn, conn:
+                conn.execute('DELETE FROM usuarios WHERE id=?', (uid,))
+
     def test_certificados_remover_seguranca_completa(self):
         # 1. Sem GET (405 Method Not Allowed)
         self.assertEqual(self.client.get('/certificados/remover').status_code, 405)

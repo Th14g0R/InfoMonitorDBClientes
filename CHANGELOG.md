@@ -1,5 +1,11 @@
 # Histórico de versões
 
+## Não lançado
+
+- agentes: novo painel `/agentes` com os agentes do call center por fila (API Beatrix/NPX), atualizado a cada 5 s por um coletor em segundo plano; cores por situação (livre, recebendo, em ligação, pausa, offline), número da ligação ativa, pausa presa destacada, 1 ou 2 colunas, tema claro/escuro e tela cheia sem controles;
+- agentes: visitantes e usuários sem permissão veem o layout definido pelo administrador, sem ações; quem tem a nova permissão "Agentes" (ou é Master) organiza grupos e ordenação (salvos no `sistema.db` para todos) e pode tirar pausa, transferir de fila, mudar prioridade e deslogar, com CSRF e auditoria;
+- agentes: inclui sessões abertas há vários dias (varredura de 30 dias) e transfere incluindo na fila nova antes de remover da antiga; transferir/prioridade dependem de `NPX_FILAS_IDS`;
+
 ## 1.2.2 - 2026-10-23
 
 - navegacao: componente unificado de navegação (`templates/menu_navegacao.html`) e folha de estilos dedicada (`static/menu_navegacao.css`) aplicados em todas as telas da aplicação;
