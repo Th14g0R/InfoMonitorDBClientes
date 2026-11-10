@@ -62,3 +62,14 @@ Acesse no navegador: `http://localhost:8501`.
 O transcritor é integrado diretamente ao sistema principal de monitoramento:
 - Botão `🎧 Transcritor Call Center` na barra de navegação superior e no menu suspenso de **Gestão** em `bancos.py`.
 - Botão `🎧 Transcritor Call Center` no cabeçalho do módulo `horarios.py`.
+
+---
+
+## 🛠️ Administração do Serviço em Produção (NSSM)
+
+Em produção no servidor `SRV-ADS002` (IP `192.168.243.2`), a aplicação roda como serviço gerenciado pelo **NSSM** (`InfoTranscritorCallCenter`):
+
+- **Status:** `nssm status InfoTranscritorCallCenter`
+- **Iniciar:** `nssm start InfoTranscritorCallCenter`
+- **Parar:** `nssm stop InfoTranscritorCallCenter`
+- **Diagnóstico e Roteiro de Atualização:** Consulte a documentação técnica detalhada em [docs/transcritor-400.md](../docs/transcritor-400.md).

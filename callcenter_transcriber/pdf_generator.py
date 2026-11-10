@@ -162,6 +162,19 @@ def gerar_relatorio_pdf(dados: dict, nome_arquivo_audio: str = "gravação") -> 
     story.append(Paragraph(f"Arquivo: <b>{nome_arquivo_audio}</b> | Emitido em: {agora_str}", subtitulo_style))
     story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#2B6CB0"), spaceAfter=8))
 
+    # Alerta de integridade quando o áudio passou por recuperação de contêiner
+    if dados.get("aviso_recuperacao"):
+        aviso_style = ParagraphStyle(
+            'AvisoRecuperacaoDoc',
+            parent=styles['Normal'],
+            fontName='Helvetica-Bold',
+            fontSize=8,
+            leading=10,
+            textColor=colors.HexColor("#C53030")
+        )
+        story.append(Paragraph(f"<b>⚠️ AVISO DE INTEGRIDADE:</b> {dados['aviso_recuperacao']}", aviso_style))
+        story.append(Spacer(1, 6))
+
     # 2. Tabela de Metadados Estruturados
     story.append(Paragraph("DADOS PRINCIPAIS DO ATENDIMENTO", secao_style))
 

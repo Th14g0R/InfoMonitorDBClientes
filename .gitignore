@@ -1,5 +1,6 @@
 .env
 .env.*
+callcenter_transcriber.env
 !.env.example
 *.pem
 *.key

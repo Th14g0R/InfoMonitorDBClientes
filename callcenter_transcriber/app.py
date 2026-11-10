@@ -1,84 +1,51 @@
+import json
 import os
 import re
-import json
-import tempfile
 from pathlib import Path
-from typing import List, Optional
 
 import streamlit as st
 import streamlit.components.v1 as components
-from pydantic import BaseModel, Field
-from dotenv import load_dotenv
-
-import pdf_generator
-import player_component
-
-# Tenta carregar variáveis do .env na pasta do script ou na pasta raiz
-_current_dir = Path(__file__).resolve().parent
-load_dotenv(_current_dir / ".env")
-load_dotenv(_current_dir.parent / ".env")
+try:
+    from dotenv import load_dotenv
+    _current_dir = Path(__file__).resolve().parent
+    load_dotenv(_current_dir / ".env")
+    load_dotenv(_current_dir.parent / ".env")
+except ImportError:
+    pass
 
 try:
-    from google import genai
-    from google.genai import types
+    from callcenter_transcriber import pdf_generator, player_component
 except ImportError:
-    st.error("Biblioteca 'google-genai' não encontrada. Instale com: pip install google-genai")
-    st.stop()
+    import pdf_generator
+    import player_component
 
-# ---------------------------------------------------------
-# Estruturas de Dados Pydantic
-# ---------------------------------------------------------
-class FalaItem(BaseModel):
-    timestamp: str = Field(description="Momento aproximado da fala no formato MM:SS (ex: '00:08')")
-    locutor: str = Field(description="Nome e papel do interlocutor (ex: 'Atendente (Carlos)' ou 'Cliente (Juliana)')")
-    papel: str = Field(description="Papel do participante: 'Atendente', 'Cliente' ou 'Outro'")
-    texto: str = Field(description="Transcrição literal e fidedigna do que foi falado")
-
-class MetadadosChamada(BaseModel):
-    empresa_cliente_fantasia: str = Field(
-        default="Não identificada",
-        description="Nome fantasia ou marca da empresa do CLIENTE (ex: 'Supermercado Central', 'Farmácia Vida'). ATENÇÃO: NÃO colocar Infobrasil, pois Infobrasil é a nossa empresa que atende."
+try:
+    from callcenter_transcriber.gemini_transcriber import (
+        FalaItem,
+        MetadadosChamada,
+        MODELOS_DISPONIVEIS,
+        inspecionar_audio,
+        obter_mime_audio,
+        processar_audio,
+        sincronizar_upload_session,
     )
-    empresa_cliente_razao_social: Optional[str] = Field(
-        default="Não citada",
-        description="Razão social da empresa do CLIENTE se citada (ex: 'Comercial de Alimentos Silva Ltda'), senão 'Não citada'."
-    )
-    atendente: str = Field(
-        default="Não identificado",
-        description="Nome do atendente/técnico da Infobrasil que atendeu o chamado."
-    )
-    cliente: str = Field(
-        default="Não identificado",
-        description="Nome do cliente/usuário solicitante que conversou com o atendente."
-    )
-    protocolo_principal: Optional[str] = Field(
-        default="Não citado",
-        description="Número do protocolo principal gerado ou citado nesta chamada."
-    )
-    outros_protocolos: List[str] = Field(
-        default_factory=list,
-        description="Outros números de protocolos, tickets ou chamados anteriores citados na conversa (ex: ['88412', '91002'])."
-    )
-    status_resolucao: str = Field(
-        default="Não especificado",
-        description="Situação do chamado: 'Resolvido no atendimento', 'Pendente / Aguardando retorno', 'Em andamento' ou 'Encaminhado para outro setor/nível'."
-    )
-    prazo_informado: Optional[str] = Field(
-        default="Não informado",
-        description="Prazo ou previsão que o atendente acordou com o cliente (ex: 'Em até 2 horas', 'Até o fim da tarde', 'Próximo dia útil' ou 'Não informado')."
-    )
-    motivo_contato: str = Field(
-        default="Suporte técnico",
-        description="Motivo central do chamado (ex: 'Banco de dados travado', 'Erro na emissão de NF-e', 'Lentidão no PDV')."
-    )
-    resumo_atendimento: str = Field(
-        default="",
-        description="Resumo sucinto em 2 ou 3 frases sobre o atendimento e o desfecho."
-    )
-    sentimento_geral: str = Field(
-        default="Neutro",
-        description="Sentimento geral do cliente: 'Positivo / Satisfeito', 'Neutro' ou 'Insatisfeito / Reclamação'."
-    )
+except ImportError:
+    try:
+        from gemini_transcriber import (
+            FalaItem,
+            MetadadosChamada,
+            MODELOS_DISPONIVEIS,
+            inspecionar_audio,
+            obter_mime_audio,
+            processar_audio,
+            sincronizar_upload_session,
+        )
+    except ImportError as e_sdk:
+        st.error(
+            "⚠️ **Dependência do sistema ausente:** Não foi possível inicializar o módulo do transcritor. "
+            f"Verifique se o pacote `google-genai` está instalado no ambiente Python. Detalhes: {e_sdk}"
+        )
+        st.stop()
 
 # ---------------------------------------------------------
 # Configuração da Página
@@ -121,9 +88,9 @@ with st.sidebar:
     
     modelo_selecionado = st.selectbox(
         "Modelo de IA:",
-        options=["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-flash-lite-latest"],
+        options=MODELOS_DISPONIVEIS,
         index=0,
-        help="gemini-3.5-flash-lite é ultra-rápido, estável e ideal para áudios longos sem fila."
+        help="gemini-3.5-flash-lite é ultra-rápido, estável e ideal para áudios longos de telefonia."
     )
     
     st.markdown("---")
@@ -146,6 +113,14 @@ with st.sidebar:
             del st.session_state["resultado"]
             if "audio_bytes" in st.session_state:
                 del st.session_state["audio_bytes"]
+            if "meta_aviso" in st.session_state:
+                del st.session_state["meta_aviso"]
+            if "aviso_recuperacao" in st.session_state:
+                del st.session_state["aviso_recuperacao"]
+            # Limpa cache de cópia normalizada mantendo apenas 1 cópia ativa na sessão
+            for k in list(st.session_state.keys()):
+                if k.startswith("norm_"):
+                    del st.session_state[k]
             st.rerun()
 
 # ---------------------------------------------------------
@@ -153,87 +128,6 @@ with st.sidebar:
 # ---------------------------------------------------------
 st.title("🎧 Infobrasil Sistemas — Auditoria & Transcrição de Chamadas")
 st.markdown("Identificação inteligente de interlocutores, empresa do cliente, prazos e **reprodução com legenda sincronizada em tempo real**.")
-
-# ---------------------------------------------------------
-# Validações de Áudio: Formatos Compactados, Máx 64MB e Máx 2h
-# ---------------------------------------------------------
-LIMITE_TAMANHO_MB = 64.0
-LIMITE_DURACAO_SEGUNDOS = 7200  # 2 horas (120 minutos)
-FORMATOS_PERMITIDOS = [".mp3", ".ogg", ".m4a", ".aac"]
-
-def inspecionar_audio(uploaded_file) -> dict:
-    """Valida formato (sem .wav), tamanho (máx 64MB) e duração (máx 2h) do áudio."""
-    nome = uploaded_file.name
-    ext = Path(nome).suffix.lower()
-    tam_mb = uploaded_file.size / (1024 * 1024)
-    
-    info = {
-        "valido": True,
-        "erros": [],
-        "nome": nome,
-        "ext": ext,
-        "tamanho_mb": tam_mb,
-        "duracao_segundos": 0.0,
-        "duracao_formatada": "Não calculada"
-    }
-    
-    # 1. Bloqueio de formatos sem compactação (.wav)
-    if ext == ".wav":
-        info["valido"] = False
-        info["erros"].append(
-            "O formato **.wav** é um formato sem compactação e não é permitido. "
-            "Por favor, converta ou exporte sua gravação em formato compactado: **.ogg**, **.mp3** ou **.m4a**."
-        )
-    elif ext not in FORMATOS_PERMITIDOS:
-        info["valido"] = False
-        info["erros"].append(
-            f"Extensão **{ext}** não permitida. Utilize apenas formatos compactados: **.ogg**, **.mp3**, **.m4a** ou **.aac**."
-        )
-    
-    # 2. Bloqueio de tamanho (máximo 64 MB)
-    if tam_mb > LIMITE_TAMANHO_MB:
-        info["valido"] = False
-        info["erros"].append(
-            f"O arquivo possui **{tam_mb:.1f} MB**, ultrapassando o limite máximo de **{LIMITE_TAMANHO_MB:.0f} MB**. "
-            "Gravações de telefonia compactadas em .ogg/.mp3 raramente passam de 25 MB. Compacte ou reduza o arquivo."
-        )
-        
-    # 3. Inspeção de duração da gravação (máximo 2 horas = 7200s)
-    try:
-        from mutagen import File as MutagenFile
-        uploaded_file.seek(0)
-        bytes_audio = uploaded_file.read()
-        uploaded_file.seek(0)
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-            tmp.write(bytes_audio)
-            tmp_path = tmp.name
-            
-        try:
-            m_audio = MutagenFile(tmp_path)
-            if m_audio and m_audio.info and hasattr(m_audio.info, "length"):
-                dur_seg = float(m_audio.info.length)
-                info["duracao_segundos"] = dur_seg
-                m, s = divmod(int(dur_seg), 60)
-                h, m = divmod(m, 60)
-                info["duracao_formatada"] = f"{h}h {m:02d}m {s:02d}s" if h > 0 else f"{m:02d}m {s:02d}s"
-                
-                if dur_seg > LIMITE_DURACAO_SEGUNDOS:
-                    info["valido"] = False
-                    info["erros"].append(
-                        f"A gravação possui **{info['duracao_formatada']}**, ultrapassando o limite de **2 horas de áudio** (120 min). "
-                        "Divida a ligação em partes menores para realizar a transcrição."
-                    )
-        finally:
-            if os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-        
-    return info
 
 # ---------------------------------------------------------
 # Upload de Áudio
@@ -246,10 +140,12 @@ with col_upload:
         type=["mp3", "ogg", "m4a", "aac"],
         help="Formatos aceitos: .ogg, .mp3, .m4a, .aac. Limites: máximo 64 MB e até 2 horas de áudio. Arquivos sem compactação (.wav) não são permitidos."
     )
+    # C3: Invalida resultados, player anterior e caches norm_* se o arquivo mudou ou foi removido
+    sincronizar_upload_session(uploaded_file, st.session_state)
 
 with col_info:
     if uploaded_file is not None:
-        info_audio = inspecionar_audio(uploaded_file)
+        info_audio = inspecionar_audio(uploaded_file, st.session_state)
         if not info_audio["valido"]:
             st.error("⚠️ **Arquivo não atende aos requisitos:**")
             for err in info_audio["erros"]:
@@ -257,212 +153,26 @@ with col_info:
         else:
             st.markdown("**Resumo do Arquivo:**")
             dur_txt = f"\n\n⏱️ **Duração:** `{info_audio['duracao_formatada']}` *(Limite: 2h)*" if info_audio["duracao_segundos"] > 0 else ""
+            aviso_txt = ""
+            if info_audio.get("avisos"):
+                aviso_txt = "\n\n⚠️ **Avisos:** " + "; ".join(info_audio["avisos"])
             st.success(
                 f"📁 **Nome:** `{info_audio['nome']}`\n\n"
                 f"⚖️ **Tamanho:** `{info_audio['tamanho_mb']:.2f} MB` *(Limite: 64 MB)*"
                 f"{dur_txt}\n\n"
                 f"✨ **Formato compactado aceito:** `{info_audio['ext']}`"
+                f"{aviso_txt}"
             )
 
 # ---------------------------------------------------------
-# Função de Processamento com a API Gemini
+# Botão de Execução da Transcrição
 # ---------------------------------------------------------
-def processar_audio(arquivo, chave_api: str, modelo_desejado: str, status_placeholder=None) -> tuple:
-    import time
-    client = genai.Client(api_key=chave_api)
-    
-    ext = Path(arquivo.name).suffix.lower() or ".mp3"
-    
-    arquivo.seek(0)
-    audio_bytes = arquivo.read()
-    
-    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
-        tmp_file.write(audio_bytes)
-        tmp_path = tmp_file.name
-
-    gemini_file = None
-    try:
-        if status_placeholder:
-            status_placeholder.info("📤 Carregando áudio no serviço seguro do Google File API...")
-        
-        gemini_file = client.files.upload(file=tmp_path)
-        
-        # Aguarda o arquivo ficar ativo
-        for _ in range(30):
-            if hasattr(gemini_file, "state"):
-                state_name = getattr(gemini_file.state, "name", str(gemini_file.state))
-                if state_name == "ACTIVE":
-                    break
-                elif state_name in ("FAILED", "ERROR"):
-                    raise RuntimeError(f"O processamento do áudio falhou no Gemini (estado: {state_name}).")
-            time.sleep(1)
-            gemini_file = client.files.get(name=gemini_file.name)
-        
-        # Etapa 1: Transcrição Direta com Regras Estritas de Diferenciação de Vozes
-        prompt_transcricao = (
-            "Você é um auditor sênior de qualidade e transcrição de call center de TI e telecomunicações.\n"
-            "Esta gravação é uma chamada de suporte técnico da empresa 'Infobrasil Sistemas' (ou apenas 'Infobrasil').\n\n"
-            "REGRAS CRÍTICAS DE IDENTIFICAÇÃO DOS PARTICIPANTES:\n"
-            "1. A INFOBRASIL SOMOS NÓS (a empresa que presta o atendimento de suporte). O 'Atendente' é SEMPRE quem atende pela Infobrasil.\n"
-            "2. O 'Cliente' é a pessoa externa que liga ou recebe o contato solicitando suporte para a sua respectiva empresa (loja, farmácia, supermercado, etc.).\n"
-            "3. DIFERENCIAÇÃO CLARA DE VOZES: Use a voz e o contexto de quem com certeza é o cliente (quem relata o problema/dúvida) para diferenciar com precisão a voz do atendente (quem atende com saudação institucional e busca resolver o chamado).\n"
-            "4. PADRÃO ESTRITO DE ROTULAÇÃO (NÃO MISTURE NOMES):\n"
-            "   - Se souber o nome do atendente: 'Atendente (Nome)'\n"
-            "   - Se souber o nome do cliente: 'Cliente (Nome)'\n"
-            "   - NUNCA coloque dois nomes juntos ou entre parênteses como '(NomeAtendente / NomeCliente)'.\n"
-            "   - Se houver qualquer dúvida sobre o nome, rotule estritamente como apenas 'Atendente' ou 'Cliente', sem inventar parênteses.\n"
-            "5. FORMATO OBRIGATÓRIO POR LINHA:\n"
-            "   Cada fala DEVE começar em uma linha separada no formato:\n"
-            "   [MM:SS] Atendente (Nome): Fala dita\n"
-            "   [MM:SS] Cliente (Nome): Fala dita\n"
-            "   NUNCA junte falas de interlocutores diferentes no mesmo parágrafo. Se o interlocutor mudar, crie uma nova linha com o novo timestamp.\n"
-            "6. Transcreva com fidelidade absoluta todo o diálogo até o final da ligação."
-        )
-        
-        candidatos = [modelo_desejado]
-        for alt in ["gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-3.8-flash"]:
-            if alt not in candidatos:
-                candidatos.append(alt)
-        
-        texto_transcrito = ""
-        modelo_utilizado = modelo_desejado
-        
-        for idx, mod in enumerate(candidatos):
-            try:
-                if status_placeholder:
-                    status_placeholder.info(f"🎧 Transcrevendo áudio com **{mod}**... (gravações de ~35 min levam cerca de 25 a 45s)")
-                
-                resp_trans = client.models.generate_content(
-                    model=mod,
-                    contents=[gemini_file, prompt_transcricao]
-                )
-                texto_transcrito = resp_trans.text.strip()
-                modelo_utilizado = mod
-                break
-            except Exception as e:
-                err_str = str(e)
-                if any(code in err_str for code in ["503", "UNAVAILABLE", "high demand"]):
-                    if idx < len(candidatos) - 1:
-                        time.sleep(2)
-                        continue
-                raise e
-        
-        if not texto_transcrito:
-            raise RuntimeError("Não foi possível gerar a transcrição do áudio.")
-        
-        # Etapa 2: Parsing das falas em lista estruturada
-        padrao = re.compile(r"\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*([^:]+):\s*(.*)")
-        dialogo = []
-        for linha in texto_transcrito.split("\n"):
-            linha_limpa = linha.strip()
-            if not linha_limpa:
-                continue
-            m = padrao.match(linha_limpa)
-            if m:
-                tempo, locutor, fala = m.groups()
-                loc_clean = locutor.strip()
-                papel = "Atendente" if "atendente" in loc_clean.lower() else ("Cliente" if "cliente" in loc_clean.lower() else "Outro")
-                dialogo.append({
-                    "timestamp": tempo,
-                    "locutor": loc_clean,
-                    "papel": papel,
-                    "texto": fala.strip()
-                })
-            else:
-                if dialogo:
-                    dialogo[-1]["texto"] += " " + linha_limpa
-                else:
-                    dialogo.append({
-                        "timestamp": "00:00",
-                        "locutor": "Áudio",
-                        "papel": "Outro",
-                        "texto": linha_limpa
-                    })
-        
-        # Etapa 3: Extração de Metadados com foco na Empresa do Cliente e Status de Resolução
-        if status_placeholder:
-            status_placeholder.info("⚡ Identificando dados do cliente, empresa, protocolos, prazos e desfecho...")
-            
-        prompt_meta = (
-            "Você é um analista de qualidade da INFOBRASIL SISTEMAS.\n"
-            "Analise a transcrição deste atendimento e extraia com precisão os seguintes dados em JSON:\n\n"
-            "1. empresa_cliente_fantasia: Nome fantasia ou marca da empresa do CLIENTE (atenção: NÃO coloque Infobrasil, pois Infobrasil é a nossa empresa de suporte). Ex: 'Supermercado Central', 'Drogaria Silva', 'Padaria Central'. Se não citada, coloque 'Não identificada'.\n"
-            "2. empresa_cliente_razao_social: Razão social da empresa do CLIENTE se mencionada (ex: 'Comercial de Alimentos Ltda'). Se não citada, coloque 'Não citada'.\n"
-            "3. atendente: Nome do atendente/técnico da Infobrasil que prestou o suporte.\n"
-            "4. cliente: Nome da pessoa (cliente) que solicitou o atendimento.\n"
-            "5. protocolo_principal: Número de protocolo gerado ou principal citado neste atendimento (ou 'Não citado').\n"
-            "6. outros_protocolos: Lista com quaisquer outros números de chamados, tickets ou protocolos anteriores citados durante a conversa (ex: ['88412']). Se nenhum outro for citado, lista vazia.\n"
-            "7. status_resolucao: 'Resolvido no atendimento', 'Pendente / Aguardando retorno', 'Em andamento' ou 'Encaminhado para outro setor/nível'.\n"
-            "8. prazo_informado: Prazo ou previsão que o atendente prometeu/acordou com o cliente (ex: 'Em até 2 horas', 'Até o fim da tarde', 'Próximo dia útil' ou 'Não informado').\n"
-            "9. motivo_contato: Descrição concisa do problema/dúvida central (ex: 'Banco de dados travado', 'Erro na emissão de NF-e', 'Lentidão no PDV').\n"
-            "10. resumo_atendimento: Resumo executivo em 2 ou 3 frases sobre o atendimento e o desfecho.\n"
-            "11. sentimento_geral: Classificação do sentimento do cliente: 'Positivo / Satisfeito', 'Neutro' ou 'Insatisfeito / Reclamação'.\n\n"
-            f"Transcrição da chamada:\n{texto_transcrito[:16000]}"
-        )
-        
-        try:
-            resp_meta = client.models.generate_content(
-                model=modelo_utilizado,
-                contents=[prompt_meta],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=MetadadosChamada,
-                    temperature=0.1
-                )
-            )
-            meta_dict = json.loads(resp_meta.text)
-        except Exception:
-            meta_dict = {
-                "empresa_cliente_fantasia": "Não identificada",
-                "empresa_cliente_razao_social": "Não citada",
-                "atendente": "Identificado no diálogo",
-                "cliente": "Identificado no diálogo",
-                "protocolo_principal": "Não citado",
-                "outros_protocolos": [],
-                "status_resolucao": "Não especificado",
-                "prazo_informado": "Não informado",
-                "motivo_contato": "Atendimento telefônico",
-                "resumo_atendimento": "Transcrição realizada com sucesso.",
-                "sentimento_geral": "Neutro"
-            }
-            
-        resultado_final = {
-            "empresa_cliente_fantasia": meta_dict.get("empresa_cliente_fantasia") or "Não identificada",
-            "empresa_cliente_razao_social": meta_dict.get("empresa_cliente_razao_social") or "Não citada",
-            "atendente": meta_dict.get("atendente") or "Não identificado",
-            "cliente": meta_dict.get("cliente") or "Não identificado",
-            "protocolo_principal": meta_dict.get("protocolo_principal") or "Não citado",
-            "outros_protocolos": meta_dict.get("outros_protocolos") or [],
-            "status_resolucao": meta_dict.get("status_resolucao") or "Não especificado",
-            "prazo_informado": meta_dict.get("prazo_informado") or "Não informado",
-            "motivo_contato": meta_dict.get("motivo_contato") or "Não especificado",
-            "resumo_atendimento": meta_dict.get("resumo_atendimento") or "Sem resumo disponível.",
-            "sentimento_geral": meta_dict.get("sentimento_geral") or "Neutro",
-            "dialogo": dialogo,
-            "texto_bruto": texto_transcrito
-        }
-        
-        return resultado_final, modelo_utilizado
-        
-    finally:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except Exception:
-            pass
-        if gemini_file and hasattr(gemini_file, "name"):
-            try:
-                client.files.delete(name=gemini_file.name)
-            except Exception:
-                pass
-
-# Botão de Execução
 if uploaded_file is not None:
-    info_audio = inspecionar_audio(uploaded_file)
+    info_audio = inspecionar_audio(uploaded_file, st.session_state)
     chave_atual = (st.session_state.get("api_key") or os.getenv("GEMINI_API_KEY") or "").strip()
     
     if not info_audio["valido"]:
-        st.error("🚫 **Envio bloqueado:** O arquivo não atende aos limites do sistema (formato sem compactação, tamanho > 64 MB ou duração > 2 horas).")
+        st.error("🚫 **Envio bloqueado:** O arquivo não atende aos limites do sistema (contêiner corrompido, formato sem compactação, tamanho > 64 MB ou duração > 2 horas).")
         st.button(
             "🚫 Transcrição Bloqueada",
             disabled=True,
@@ -482,19 +192,34 @@ if uploaded_file is not None:
             status_box = st.empty()
             with st.spinner("🎧 Processando gravação com IA..."):
                 try:
-                    resultado, modelo_usado = processar_audio(uploaded_file, chave_atual, modelo_selecionado, status_box)
+                    resultado, modelo_usado, meta_aviso = processar_audio(
+                        uploaded_file,
+                        chave_atual,
+                        modelo_selecionado,
+                        status_box,
+                        requer_recuperacao=info_audio.get("requer_recuperacao", False),
+                        duracao_prefixo_valido=info_audio.get("duracao_prefixo_valido", 0.0),
+                        session_cache=st.session_state
+                    )
                     st.session_state["resultado"] = resultado
                     st.session_state["ultimo_arquivo"] = uploaded_file.name
-                    st.session_state["audio_bytes"] = uploaded_file.getvalue()
-                    st.session_state["mime_type"] = (
-                        "audio/ogg" if uploaded_file.name.endswith(".ogg")
-                        else ("audio/mp4" if uploaded_file.name.endswith(".m4a") or uploaded_file.name.endswith(".aac") else "audio/mp3")
-                    )
+                    # Utiliza os mesmos bytes e MIME que foram efetivamente transcritos (FLAC normalizado ou original)
+                    st.session_state["audio_bytes"] = resultado.get("audio_bytes") or uploaded_file.getvalue()
+                    st.session_state["mime_type"] = resultado.get("mime_type") or obter_mime_audio(uploaded_file.name)
                     st.session_state["modelo_usado"] = modelo_usado
+                    if resultado.get("aviso_recuperacao"):
+                        st.session_state["aviso_recuperacao"] = resultado["aviso_recuperacao"]
+                    elif "aviso_recuperacao" in st.session_state:
+                        del st.session_state["aviso_recuperacao"]
+
+                    if meta_aviso:
+                        st.session_state["meta_aviso"] = meta_aviso
+                    elif "meta_aviso" in st.session_state:
+                        del st.session_state["meta_aviso"]
                     status_box.empty()
                     
                     if modelo_usado != modelo_selecionado:
-                        st.warning(f"O modelo `{modelo_selecionado}` estava com alta demanda momentânea (503). Alternamos automaticamente para `{modelo_usado}` e o atendimento foi concluído!")
+                        st.warning(f"O modelo `{modelo_selecionado}` estava momentaneamente indisponível. Alternamos automaticamente para `{modelo_usado}` e o atendimento foi concluído!")
                     else:
                         st.success(f"Transcrição e auditoria concluídas com sucesso usando `{modelo_usado}`!")
                     st.rerun()
@@ -508,7 +233,13 @@ if uploaded_file is not None:
 if "resultado" in st.session_state:
     data = st.session_state["resultado"]
     st.divider()
+
+    if st.session_state.get("aviso_recuperacao"):
+        st.warning(f"⚠️ **Recuperação Parcial:** {st.session_state['aviso_recuperacao']}")
     
+    if st.session_state.get("meta_aviso"):
+        st.warning(f"⚠️ **Aviso no processamento:** {st.session_state['meta_aviso']}")
+
     # 1. Métricas Principais
     st.subheader("📋 Auditoria do Atendimento")
     
@@ -565,6 +296,10 @@ if "resultado" in st.session_state:
     # ABA 1: PLAYER COM LEGENDA AO VIVO
     with tab_player:
         st.markdown("Ouça a gravação com **legenda dinâmica no topo**. Conforme o áudio toca, a fala atual é realçada e a tela rola automaticamente. **Dica:** Clique em qualquer fala para pular o áudio para o segundo exato!")
+        if data.get("recuperacao_parcial") or data.get("audio_recuperado"):
+            dur_rec = data.get("duracao_recuperada")
+            dur_msg = f" ({dur_rec:.1f}s decodificados)" if dur_rec else ""
+            st.caption(f"ℹ️ **Áudio reproduzido:** cópia FLAC lossless recuperada{dur_msg}. Trechos adicionais corrompidos podem não ter sido recuperados.")
         
         audio_bytes = st.session_state.get("audio_bytes")
         mime_type = st.session_state.get("mime_type", "audio/ogg")
@@ -658,6 +393,11 @@ if "resultado" in st.session_state:
     # 2. Formatar texto plano
     linhas_txt = [
         f"=== INFOBRASIL SISTEMAS — AUDITORIA DE ATENDIMENTO: {nome_audio} ===",
+    ]
+    if data.get("aviso_recuperacao"):
+        linhas_txt.append(f"⚠️ AVISO DE INTEGRIDADE: {data['aviso_recuperacao']}")
+
+    linhas_txt.extend([
         f"Empresa do Cliente (Fantasia): {data.get('empresa_cliente_fantasia', 'Não identificada')}",
         f"Razão Social do Cliente: {data.get('empresa_cliente_razao_social', 'Não citada')}",
         f"Atendente (Infobrasil): {data.get('atendente', 'Não identificado')}",
@@ -671,7 +411,7 @@ if "resultado" in st.session_state:
         f"Resumo Executivo: {data.get('resumo_atendimento', '')}",
         "",
         "--- DIÁLOGO COMPLETO ---"
-    ]
+    ])
     for f in dialogo:
         linhas_txt.append(f"[{f.get('timestamp', '00:00')}] {f.get('locutor', 'Locutor')}: {f.get('texto', '')}")
     conteudo_txt = "\n".join(linhas_txt)
@@ -696,9 +436,10 @@ if "resultado" in st.session_state:
             use_container_width=True
         )
     with exp_c3:
+        dados_export_json = {k: v for k, v in data.items() if k != "audio_bytes"}
         st.download_button(
             label="📊 Baixar Dados Estruturados (.json)",
-            data=json.dumps(data, indent=2, ensure_ascii=False),
+            data=json.dumps(dados_export_json, indent=2, ensure_ascii=False),
             file_name=f"auditoria_{Path(nome_audio).stem}.json",
             mime="application/json",
             use_container_width=True
