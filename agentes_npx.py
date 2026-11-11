@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 
 from flask import jsonify, render_template, request, session
 
+from pbx_monitor import ColetorPbx
 from seguranca import registrar_acao_admin
 
 LOGGER = logging.getLogger(__name__)
@@ -761,12 +762,14 @@ def alterar_prioridade(cliente_painel, dados, coletor=None):
     return cliente_painel.executar('update_penalty', {'code': codigo, 'queue': fila, 'penalty': raw_pen})
 
 
-def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel=None):
+def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel=None, coletor_pbx=None):
     cliente = cliente or ClienteNpx()
     cliente_painel = cliente_painel or ClientePainelNpx()
     coletor = ColetorAgentes(cliente)
+    coletor_pbx = coletor_pbx or ColetorPbx()
     layout = LayoutAgentes(conectar)
     bp.coletor_agentes = coletor
+    bp.coletor_pbx = coletor_pbx
     bp.cliente_npx = cliente
     bp.cliente_painel_npx = cliente_painel
 
@@ -807,17 +810,44 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
         lista, em, erro = coletor.dados()
         if lista is None:
             return jsonify(erro='Sem resposta da NPX.'), 502
+
+        # Enriquecimento com dados do PBX e inclusão de analistas PBX-only
+        if coletor_pbx:
+            coletor_pbx.garantir_rodando()
+            agentes_enriquecidos = [dict(a) for a in lista]
+            coletor_pbx.enriquecer_agentes(agentes_enriquecidos)
+
+            ramais_casados = {a['pbxExtension'] for a in agentes_enriquecidos if a.get('pbxExtension')}
+            codigos_existentes = {a['code'] for a in agentes_enriquecidos}
+            pbx_only = coletor_pbx.obter_agentes_pbx_only(codigos_existentes, ramais_casados)
+
+            todos_agentes = agentes_enriquecidos + pbx_only
+            status_pbx = coletor_pbx.obter_status_conexao()
+        else:
+            todos_agentes = [dict(a) for a in lista]
+            for a in todos_agentes:
+                em_pausa = bool(a.get('paused'))
+                st = a.get('status')
+                a['line'] = 'npx' if (em_pausa or (st is not None and st != 0)) else 'off'
+                a['pbxExtension'] = None
+                a['pbxStatus'] = None
+                a['pbxNumber'] = None
+                a['pbxDirection'] = None
+                a['pbxSeconds'] = None
+            status_pbx = {'configured': False, 'available': False, 'error': None}
+
         nomes = nomes_filas()
-        chaves = list(dict.fromkeys(list(nomes) + [a['queue'] for a in lista if a['queue']]))
+        chaves = list(dict.fromkeys(list(nomes) + [a['queue'] for a in todos_agentes if a['queue']]))
         pode_gerenciar = pode()
         if pode_gerenciar:
-            agentes_retorno = lista
+            agentes_retorno = todos_agentes
         else:
-            campos_privados = {'callSrc', 'callDst', 'callClient'}
-            agentes_retorno = [{k: v for k, v in a.items() if k not in campos_privados} for a in lista]
+            campos_privados = {'callSrc', 'callDst', 'callClient', 'pbxNumber'}
+            agentes_retorno = [{k: v for k, v in a.items() if k not in campos_privados} for a in todos_agentes]
         resposta = jsonify(
             atualizado=em.isoformat(), erroNpx=erro, layout=layout.obter(), podeGerenciar=pode_gerenciar,
             painelConfigurado=bool(cliente_painel and cliente_painel.configurado),
+            pbxConnection=status_pbx,
             filas=[{'key': k, 'nome': nomes.get(k, k.replace('_', ' '))} for k in chaves],
             agentes=agentes_retorno)
         resposta.headers['Cache-Control'] = 'no-store'
