@@ -898,10 +898,9 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
         # NPX disponível e com dados:
         agentes_enriquecidos = [dict(a) for a in lista]
         if pbx_disponivel:
-            coletor_pbx.enriquecer_agentes(agentes_enriquecidos)
+            ramais_ambiguos = coletor_pbx.enriquecer_agentes(agentes_enriquecidos)
             ramais_casados = {a['pbxExtension'] for a in agentes_enriquecidos if a.get('pbxExtension')}
             codigos_existentes = {a['code'] for a in agentes_enriquecidos}
-            ramais_ambiguos = getattr(coletor_pbx, 'ultimos_ramais_ambiguos', set())
             pbx_only = coletor_pbx.obter_agentes_pbx_only(codigos_existentes, ramais_casados, ramais_ambiguos=ramais_ambiguos)
             todos_agentes = agentes_enriquecidos + pbx_only
         else:

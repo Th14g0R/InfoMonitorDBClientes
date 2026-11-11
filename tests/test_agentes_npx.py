@@ -1131,7 +1131,7 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
                     a['line'] = 'pbx'
                 else:
                     a['line'] = 'off'
-            return agentes
+            return set()
 
         self.coletor_pbx.enriquecer_agentes = MagicMock(side_effect=enriquecer_mock)
         self.coletor_pbx.obter_status_conexao = MagicMock(return_value={
@@ -1426,9 +1426,55 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
         self.assertEqual(nomes.count('Carol'), 1)
         self.assertEqual(len(dados['agentes']), 2)
 
+    def test_b1_npx_cai_apos_retrato_com_colisao_pbx_aparece_corretamente(self):
+        # B1: Se NPX teve colisão no ciclo anterior e depois cai (None com erro),
+        # obter_agentes_pbx_only não herda estado antigo e os agentes PBX registrados aparecem normalmente.
+        self.cliente_npx.token = 'tok_npx_valido'
+        self.coletor_pbx.cliente.configurado = True
+        self.coletor_pbx.obter_status_conexao.return_value = {
+            'configured': True, 'available': True, 'error': None
+        }
 
-if __name__ == '__main__':
-    unittest.main()
+        # Ciclo 1: NPX ativo com dois agentes colidindo no ramal 2008
+        self.coletor_npx.retrato = [
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 0, 'paused': False},
+            {'code': '4422009', 'name': 'Thiago Jr', 'queue': 'InfoBrasil_Suporte', 'status': 0, 'paused': False},
+        ]
+        coletor_pbx_real = ColetorPbx(
+            cliente=MagicMock(configurado=True),
+            mapa_analistas={
+                'Thiago': {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'},
+                'Carol': {'ramal': '2022', 'departamento': 'InfoBrasil_SPED_Fiscal'},
+            }
+        )
+        coletor_pbx_real.snapshot = {
+            '2008': {'status': 'Free', 'number': None, 'direction': None, 'seconds': 0},
+            '2022': {'status': 'Busy', 'number': '85988887777', 'direction': 'outbound', 'seconds': 20},
+        }
+        self.coletor_pbx.enriquecer_agentes.side_effect = coletor_pbx_real.enriquecer_agentes
+        self.coletor_pbx.obter_agentes_pbx_only.side_effect = coletor_pbx_real.obter_agentes_pbx_only
+
+        resp1 = self.http.get('/agentes/dados')
+        self.assertEqual(resp1.status_code, 200)
+        dados1 = resp1.get_json()
+        # No ciclo 1, Carol entra como PBX-only (2022), mas Thiago não vira PBX-only porque está em colisão na NPX
+        nomes1 = [a['name'] for a in dados1['agentes']]
+        self.assertEqual(nomes1.count('Carol'), 1)
+        self.assertNotIn('pbx-2008', [a['code'] for a in dados1['agentes']])
+
+        # Ciclo 2: NPX cai (retrato = None)
+        self.coletor_npx.retrato = None
+        self.coletor_npx.erro = 'Conexão NPX perdida'
+
+        resp2 = self.http.get('/agentes/dados')
+        self.assertEqual(resp2.status_code, 200)
+        dados2 = resp2.get_json()
+        self.assertEqual(dados2['erroNpx'], 'Conexão NPX perdida')
+        # Agora, sem sessão NPX e sem estado velho herdado, Thiago (2008) e Carol (2022) aparecem ambos como PBX-only!
+        codes2 = [a['code'] for a in dados2['agentes']]
+        self.assertIn('pbx-2008', codes2)
+        self.assertIn('pbx-2022', codes2)
+        self.assertEqual(len(dados2['agentes']), 2)
 
 
 if __name__ == '__main__':

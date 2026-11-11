@@ -562,7 +562,6 @@ class ColetorPbx:
                     codigos_por_ramal.setdefault(r, set()).add(code)
 
         ramais_ambiguos = {r for r, codes in codigos_por_ramal.items() if len(codes) > 1}
-        self.ultimos_ramais_ambiguos = set(ramais_ambiguos)
 
         for a in agentes_npx:
             code = str(a.get('code'))
@@ -604,7 +603,8 @@ class ColetorPbx:
             else:
                 a['line'] = 'off'
 
-        return agentes_npx
+        # B1: Retorna o set de ambiguidades localmente para a requisição, sem poluir self
+        return ramais_ambiguos
 
     def obter_agentes_pbx_only(self, codigos_npx_existentes, ramais_npx_casados=None, ramais_ambiguos=None):
         """Gera cards para analistas do mapa PBX que não possuem sessão na NPX e estão REGISTRADOS."""
@@ -615,7 +615,8 @@ class ColetorPbx:
             snapshot = dict(self.snapshot)
 
         ramais_npx_casados = set(ramais_npx_casados or ())
-        ramais_ambiguos_set = set(ramais_ambiguos if ramais_ambiguos is not None else getattr(self, 'ultimos_ramais_ambiguos', set()))
+        # B1: Default de ambiguidades locais é set(), nunca herda estado antigo em self
+        ramais_ambiguos_set = set(ramais_ambiguos) if ramais_ambiguos is not None else set()
 
         # A6: Ramais ambíguos no próprio mapa de analistas também não devem ser adicionados
         ramais_no_mapa = {}

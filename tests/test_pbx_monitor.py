@@ -284,12 +284,13 @@ class TestColetorPbxP5EP6(unittest.TestCase):
             {'code': '101', 'name': 'Thiago', 'status': 0, 'paused': False},
             {'code': '102', 'name': 'Thiago Junior', 'status': 0, 'paused': False}
         ]
-        res = coletor.enriquecer_agentes(agentes)
+        ambiguos = coletor.enriquecer_agentes(agentes)
+        self.assertIn('2008', ambiguos)
         # P6: Nenhum recebe!
-        self.assertIsNone(res[0]['pbxExtension'])
-        self.assertIsNone(res[1]['pbxExtension'])
-        self.assertEqual(res[0]['line'], 'off')
-        self.assertEqual(res[1]['line'], 'off')
+        self.assertIsNone(agentes[0]['pbxExtension'])
+        self.assertIsNone(agentes[1]['pbxExtension'])
+        self.assertEqual(agentes[0]['line'], 'off')
+        self.assertEqual(agentes[1]['line'], 'off')
 
     def test_p5_pbx_only_somente_registrados(self):
         coletor = ColetorPbx(cliente=MagicMock(), mapa_analistas={
@@ -330,12 +331,54 @@ class TestColetorPbxP5EP6(unittest.TestCase):
             {'code': '101', 'name': 'Thiago', 'status': 0, 'paused': False},
             {'code': '102', 'name': 'Thiago Jr', 'status': 0, 'paused': False}
         ]
-        coletor.enriquecer_agentes(agentes)
-        self.assertIn('2008', coletor.ultimos_ramais_ambiguos)
+        ambiguos = coletor.enriquecer_agentes(agentes)
+        self.assertIn('2008', ambiguos)
 
-        # 2. Ao chamar obter_agentes_pbx_only, nem 2008 (ambíguo na NPX) nem 2022 (ambíguo no mapa) devem entrar
-        pbx_only = coletor.obter_agentes_pbx_only(codigos_npx_existentes=['101', '102'], ramais_npx_casados=set())
+        # 2. Ao chamar obter_agentes_pbx_only com o set local de ambiguidades, nem 2008 nem 2022 devem entrar
+        pbx_only = coletor.obter_agentes_pbx_only(
+            codigos_npx_existentes=['101', '102'],
+            ramais_npx_casados=set(),
+            ramais_ambiguos=ambiguos
+        )
         self.assertEqual(len(pbx_only), 0)
+
+    def test_b1_interleaving_de_dois_enrich_e_sem_estado_compartilhado(self):
+        # B1: Testar que dois enrich intercalados não compartilham self.ultimos_ramais_ambiguos
+        coletor = ColetorPbx(cliente=MagicMock(), mapa_analistas={
+            'Thiago': {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'},
+            'Carol': {'ramal': '2022', 'departamento': 'InfoBrasil_SPED_Fiscal'},
+        })
+        coletor.snapshot = {
+            '2008': {'status': 'Free', 'number': None, 'direction': None, 'seconds': 0},
+            '2022': {'status': 'Busy', 'number': '85987654321', 'direction': 'outbound', 'seconds': 45},
+        }
+
+        # Request 1: Colisão na NPX no ramal 2008
+        req1_agentes = [
+            {'code': '101', 'name': 'Thiago', 'status': 0, 'paused': False},
+            {'code': '102', 'name': 'Thiago Jr', 'status': 0, 'paused': False}
+        ]
+        ambiguos_req1 = coletor.enriquecer_agentes(req1_agentes)
+        self.assertEqual(ambiguos_req1, {'2008'})
+
+        # Request 2 (intercalada): Sem colisão na NPX
+        req2_agentes = [
+            {'code': '101', 'name': 'Thiago', 'status': 1, 'paused': False}
+        ]
+        ambiguos_req2 = coletor.enriquecer_agentes(req2_agentes)
+        self.assertEqual(ambiguos_req2, set())
+
+        # Request 1 prossegue usando seu próprio set local
+        pbx_only_req1 = coletor.obter_agentes_pbx_only(
+            codigos_npx_existentes=['101', '102'],
+            ramais_npx_casados=set(),
+            ramais_ambiguos=ambiguos_req1
+        )
+        # Carol entra (2022), mas 2008 NÃO entra (ambíguo na req1)
+        self.assertEqual([a['name'] for a in pbx_only_req1], ['Carol'])
+
+        # Garante que não há atributo compartilhado de ambiguidade em self
+        self.assertFalse(hasattr(coletor, 'ultimos_ramais_ambiguos'))
 
     def test_requisito_7_dispositivos_fora_do_mapa_ignorados_no_snapshot(self):
         # Requisito 7: Dispositivos registrados fora do mapa (ex: URA 9999, tronco 8888) são ignorados
