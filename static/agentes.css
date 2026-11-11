@@ -93,9 +93,10 @@ body:has(#ag) { background: var(--cor-fundo, #f4f6f9); margin: 0; }
   #ag tr.estourada td, #ag tr.presa td, #ag tr.estourada .pill, #ag tr.presa .pill, #ag tr.l-cham .pill::before, #ag tr.l-pbx-cham .pill::before { animation: none !important; }
 }
 #ag tr td:first-child { box-shadow: inset 4px 0 0 var(--c, transparent); }
-#ag .st-cell { display: flex; align-items: center; gap: 5px; min-width: 0; width: 100%; overflow: hidden; }
-#ag .st-cell .pill { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px 8px; font-size: 12px; }
-#ag .st-cell .tag-linha { flex: none; margin-left: 0; }
+#ag .st-cell { display: flex; align-items: center; gap: 4px; min-width: 0; width: 100%; overflow: hidden; }
+#ag .st-cell .pill { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px 6px; font-size: 11.5px; gap: 4px; }
+#ag .st-cell .pill::before { width: 6px; height: 6px; }
+#ag .st-cell .tag-linha { flex: none; margin-left: 0; font-size: 9px; padding: 1px 4px; border-radius: 3px; letter-spacing: .02em; }
 #ag .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; font-size: 13px; font-weight: 600;
   color: var(--c); background: color-mix(in srgb, var(--c) 15%, var(--card)); max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 #ag .pill::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
