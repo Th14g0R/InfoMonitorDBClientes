@@ -160,19 +160,18 @@
     const tagLinha = a.line === 'pbx' ? '<span class="tag-linha tag-pbx">PBX</span>'
                    : (a.line === 'npx' || (!a.line && a.status != null) ? '<span class="tag-linha tag-npx">NPX</span>' : '');
 
-    let sub = esc(a.code);
-    if (a.line === 'pbx') {
-      if (a.pbxExtension) sub += ' · ramal PBX ' + esc(a.pbxExtension);
-      else if (a.extension && a.extension != a.code) sub += ' · ramal ' + esc(a.extension);
-    } else {
-      if (a.extension && a.extension != a.code) sub += ' · ramal ' + esc(a.extension);
-      if (a.pbxExtension) sub += ' · ramal PBX ' + esc(a.pbxExtension);
-    }
+    const sub = a.line === 'pbx'
+      ? `${esc(a.code)}${a.pbxExtension ? ' · ramal PBX ' + esc(a.pbxExtension) : (a.extension && a.extension != a.code ? ' · ramal ' + esc(a.extension) : '')}`
+      : `${esc(a.code)}${a.extension && a.extension != a.code ? ' · ramal ' + esc(a.extension) : ''}`;
+
+    const tempoTxt = a.line === 'pbx'
+      ? (a.pbxSeconds == null ? '–' : fmtSeg(a.pbxSeconds))
+      : (a.seconds == null && !a.paused ? '–' : fmtSeg(segs(a)));
 
     return `<tr class="${st[3]}${est ? ' estourada presa' : ''}" style="--c:${st[1]}">
       <td>${nome}<br><span class="mut">${sub}</span></td>
       <td><span class="pill" style="--c:${st[1]}">${esc(st[0])}</span>${tagLinha}</td>
-      <td class="tempo">${(a.seconds == null && a.pbxSeconds == null && !a.paused) ? '–' : fmtSeg(segs(a))}</td>
+      <td class="tempo">${tempoTxt}</td>
       <td>${esc(a.penalty ?? '–')}</td>
       <td>${situacaoHtml(a)}</td><td>${btn}</td></tr>`;
   }
@@ -302,19 +301,19 @@
     const tagLinha = ehPbx ? ' <span class="tag-linha tag-pbx">PBX</span>'
                            : (a.line === 'npx' || (!a.line && a.status != null) ? ' <span class="tag-linha tag-npx">NPX</span>' : '');
 
-    let subRamal = `Código ${esc(a.code)}`;
-    if (a.line === 'pbx') {
-      if (a.pbxExtension) subRamal += ` · ramal PBX ${esc(a.pbxExtension)}`;
-      else if (a.extension && a.extension != a.code) subRamal += ` · ramal ${esc(a.extension)}`;
-    } else {
-      if (a.extension && a.extension != a.code) subRamal += ` · ramal ${esc(a.extension)}`;
-      if (a.pbxExtension) subRamal += ` · ramal PBX ${esc(a.pbxExtension)}`;
-    }
-    subRamal += ` · fila <b>${esc(fila(a.queue).nome)}</b>`;
+    const subRamal = ehPbx
+      ? `Código ${esc(a.code)}${a.pbxExtension ? ' · ramal PBX ' + esc(a.pbxExtension) : (a.extension && a.extension != a.code ? ' · ramal ' + esc(a.extension) : '')} · fila <b>${esc(fila(a.queue).nome)}</b>`
+      : `Código ${esc(a.code)} · ramal ${esc(a.extension || a.code)} · fila <b>${esc(fila(a.queue).nome)}</b>`;
 
     let callTxt = '';
-    if (c && c.num) {
-      callTxt = ` 📞 ${c.dir} <b>${esc(fmtFone(c.num))}</b>${a.pbxSeconds ? ` (${fmtSeg(a.pbxSeconds)})` : ''}`;
+    if (ehPbx) {
+      if (c && c.num) {
+        callTxt = ` 📞 ${c.dir} <b>${esc(fmtFone(c.num))}</b>${a.pbxSeconds ? ` (${fmtSeg(a.pbxSeconds)})` : ''}`;
+      }
+    } else {
+      if (c && !a.paused && c.num) {
+        callTxt = ` 📞 ${c.dir} <b>${esc(fmtFone(c.num))}</b>`;
+      }
     }
 
     $('dNome').innerHTML = `${esc(a.name)}${tagLinha}`;
@@ -341,38 +340,41 @@
       $('dPausa').textContent = 'Agente ativo / fora de pausa';
     }
 
+    const destinos = filas.filter(f => f.key !== a.queue && f.key !== 'PBX_Sem_Fila');
     if (inicial) {
-      const destinos = filas.filter(f => f.key !== a.queue);
       $('dFila').innerHTML = destinos.length
         ? destinos.map(f => `<option value="${esc(f.key)}">${esc(f.nome)}</option>`).join('')
         : '<option value="" disabled>Nenhuma outra fila disponível</option>';
+      const penAtual = Number(a.penalty);
+      $('dPen').value = Number.isInteger(penAtual) && penAtual >= 1 && penAtual <= 10 ? penAtual : 1;
+    }
 
-      if (ehPbx) {
-        $('bTransf').disabled = true;
-        $('bTransf').title = 'Transferência de fila é exclusiva para agentes NPX.';
-        $('bPen').disabled = true;
-        $('bPen').title = 'Prioridade de fila é exclusiva para agentes NPX.';
-        $('bRemoverFila').disabled = true;
-        $('bRemoverFila').title = 'Remoção de fila é exclusiva para agentes NPX.';
-        $('bDeslogar').disabled = true;
-        $('bDeslogar').title = 'Deslogar agente é exclusivo para agentes NPX.';
-        $('dlgMsg').textContent = 'ℹ Agente conectado via PBX. Ações de fila e pausa são gerenciadas pelo NPX.';
+    // Recalcula elegibilidade das ações a cada atualização
+    if (ehPbx) {
+      $('bTransf').disabled = true;
+      $('bTransf').title = 'Transferência de fila é exclusiva para agentes NPX.';
+      $('bPen').disabled = true;
+      $('bPen').title = 'Prioridade de fila é exclusiva para agentes NPX.';
+      $('bRemoverFila').disabled = true;
+      $('bRemoverFila').title = 'Remoção de fila é exclusiva para agentes NPX.';
+      $('bDeslogar').disabled = true;
+      $('bDeslogar').title = 'Deslogar agente é exclusivo para agentes NPX.';
+      $('dlgMsg').textContent = 'ℹ Agente conectado via PBX. Ações de fila e pausa são gerenciadas pelo NPX.';
+      $('dlgMsg').style.color = 'var(--mut)';
+    } else {
+      $('bTransf').disabled = !painelConfigurado || !destinos.length;
+      $('bTransf').title = '';
+      $('bPen').disabled = !painelConfigurado;
+      $('bPen').title = '';
+      $('bRemoverFila').disabled = !painelConfigurado;
+      $('bRemoverFila').title = '';
+      $('bDeslogar').disabled = false;
+      $('bDeslogar').title = '';
+      if (!painelConfigurado) {
+        $('dlgMsg').textContent = 'Ações do painel aguardando configuração de credenciais no servidor.';
         $('dlgMsg').style.color = 'var(--mut)';
-      } else {
-        $('bTransf').disabled = !painelConfigurado || !destinos.length;
-        $('bTransf').title = '';
-        $('bPen').disabled = !painelConfigurado;
-        $('bPen').title = '';
-        $('bRemoverFila').disabled = !painelConfigurado;
-        $('bRemoverFila').title = '';
-        $('bDeslogar').disabled = false;
-        $('bDeslogar').title = '';
-        const penAtual = Number(a.penalty);
-        $('dPen').value = Number.isInteger(penAtual) && penAtual >= 1 && penAtual <= 10 ? penAtual : 1;
-        if (!painelConfigurado) {
-          $('dlgMsg').textContent = 'Ações do painel aguardando configuração de credenciais no servidor.';
-          $('dlgMsg').style.color = 'var(--mut)';
-        }
+      } else if ($('dlgMsg').textContent.startsWith('ℹ Agente conectado via PBX')) {
+        $('dlgMsg').textContent = '';
       }
     }
   }
@@ -380,7 +382,7 @@
     $('bTirar').onclick = e => tirar(sel.agente.code, sel.agente.name, $('dlgMsg'), e.currentTarget);
     $('bPausar').onclick = e => colocarPausa(sel.agente.code, sel.agente.name, $('dlgMsg'), e.currentTarget);
     $('bTransf').onclick = e => acao(e.currentTarget, async (alvoMsg) => {
-      const a = sel.agente, para = $('dFila').value; if (!para) return;
+      const a = sel.agente, para = $('dFila').value; if (!para || para === 'PBX_Sem_Fila') return;
       if (!confirm(`Transferir ${a.name} de ${fila(a.queue).nome} para ${fila(para).nome}?`)) return;
       const j = await post('/admin/agentes/transferir', {code: a.code, de: a.queue, para: para, extension: a.extension});
       resultado(j, `${a.name} agora está em ${fila(para).nome}.`, alvoMsg);
@@ -533,6 +535,9 @@
   addEventListener('resize', () => { checaTelaCheia(); if ((largAnterior > 900) !== (innerWidth > 900)) render(); largAnterior = innerWidth; });
   checaTelaCheia();
   aplicarControles();
+  if (typeof window !== 'undefined') {
+    window._testAgentes = { carregar, atualizarDialogo, getDados: () => dados };
+  }
 
   carregar();
   setInterval(carregar, 5000);
