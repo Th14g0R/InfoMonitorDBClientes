@@ -817,6 +817,27 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
                     return jsonify(ok=False, mensagem='Ação indisponível para agentes operando via PBX ou offline na NPX.'), 400
         return None
 
+    def _responder_dados(todos_agentes, em, erro_npx, status_pbx):
+        nomes = nomes_filas()
+        chaves = list(dict.fromkeys(list(nomes) + [a['queue'] for a in todos_agentes if a.get('queue')]))
+        pode_gerenciar = pode()
+        if pode_gerenciar:
+            agentes_retorno = todos_agentes
+        else:
+            campos_privados = {'callSrc', 'callDst', 'callClient', 'pbxNumber'}
+            agentes_retorno = [{k: v for k, v in a.items() if k not in campos_privados} for a in todos_agentes]
+        resposta = jsonify(
+            atualizado=em.isoformat() if em else datetime.now(FUSO).isoformat(),
+            erroNpx=erro_npx,
+            layout=layout.obter(),
+            podeGerenciar=pode_gerenciar,
+            painelConfigurado=bool(cliente_painel and cliente_painel.configurado),
+            pbxConnection=status_pbx,
+            filas=[{'key': k, 'nome': nomes.get(k, k.replace('_', ' '))} for k in chaves],
+            agentes=agentes_retorno)
+        resposta.headers['Cache-Control'] = 'no-store'
+        return resposta
+
     @bp.route('/agentes', endpoint='agentes')
     def pagina_agentes():
         return render_template('agentes.html', pode_gerenciar=pode(), configurado=cliente.configurado,
@@ -824,44 +845,54 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
 
     @bp.route('/agentes/dados', endpoint='agentes_dados')
     def dados_agentes():
-        if not cliente.configurado:
-            return jsonify(erro='NPX_API_TOKEN não configurado no .env do servidor.'), 503
-        lista, em, erro = coletor.dados()
-        if lista is None:
-            return jsonify(erro='Sem resposta da NPX.'), 502
-
-        # P3 e P4: Enriquecimento com PBX somente se configurado E disponível
+        npx_configurado = bool(cliente and cliente.configurado)
         pbx_configurado = bool(coletor_pbx and coletor_pbx.cliente.configurado)
-        status_pbx = {'configured': False, 'available': False, 'error': None}
 
+        # Sem ambas configuradas: mantém o 503 original
+        if not npx_configurado and not pbx_configurado:
+            return jsonify(erro='NPX_API_TOKEN não configurado no .env do servidor.'), 503
+
+        # Inicia PBX antes e de forma independente de coletor.dados()
+        status_pbx = {'configured': False, 'available': False, 'error': None}
         if pbx_configurado:
             coletor_pbx.garantir_rodando()
             status_pbx = coletor_pbx.obter_status_conexao()
-            if status_pbx.get('available'):
-                agentes_enriquecidos = [dict(a) for a in lista]
-                coletor_pbx.enriquecer_agentes(agentes_enriquecidos)
 
-                ramais_casados = {a['pbxExtension'] for a in agentes_enriquecidos if a.get('pbxExtension')}
-                codigos_existentes = {a['code'] for a in agentes_enriquecidos}
-                pbx_only = coletor_pbx.obter_agentes_pbx_only(codigos_existentes, ramais_casados)
+        pbx_disponivel = bool(status_pbx.get('available'))
 
-                todos_agentes = agentes_enriquecidos + pbx_only
-            else:
-                # P3: Erro ou desatualizado -> não usa snapshot velho nem adiciona PBX-only
-                todos_agentes = [dict(a) for a in lista]
-                for a in todos_agentes:
-                    em_pausa = bool(a.get('paused'))
-                    st = a.get('status')
-                    a['line'] = 'npx' if (em_pausa or (st is not None and st != 0)) else 'off'
-                    a['pbxExtension'] = None
-                    a['pbxStatus'] = None
-                    a['pbxNumber'] = None
-                    a['pbxDirection'] = None
-                    a['pbxSeconds'] = None
+        # Se NPX não configurado mas PBX configurado: responde 200 com dados PBX
+        if not npx_configurado:
+            em = datetime.now(FUSO)
+            erro_npx = 'NPX_API_TOKEN não configurado no .env do servidor.'
+            todos_agentes = coletor_pbx.obter_agentes_pbx_only(set()) if pbx_disponivel else []
+            return _responder_dados(todos_agentes, em, erro_npx, status_pbx)
+
+        # NPX configurado: obtém dados da NPX
+        # Se PBX tem cache disponível, não bloqueia 12s se NPX ainda não tiver retrato
+        espera_npx = 0 if pbx_disponivel else 12
+        lista, em, erro = coletor.dados(espera=espera_npx)
+
+        # Se NPX indisponível (lista is None):
+        if lista is None:
+            # NPX indisponível sem PBX disponível: mantém 502 original
+            if not pbx_disponivel:
+                return jsonify(erro=erro or 'Sem resposta da NPX.'), 502
+            # PBX disponível: responde 200 com PBX-only registrados e erroNpx
+            em = datetime.now(FUSO)
+            erro_npx = erro or 'Sem resposta da NPX.'
+            todos_agentes = coletor_pbx.obter_agentes_pbx_only(set())
+            return _responder_dados(todos_agentes, em, erro_npx, status_pbx)
+
+        # NPX disponível e com dados:
+        agentes_enriquecidos = [dict(a) for a in lista]
+        if pbx_disponivel:
+            coletor_pbx.enriquecer_agentes(agentes_enriquecidos)
+            ramais_casados = {a['pbxExtension'] for a in agentes_enriquecidos if a.get('pbxExtension')}
+            codigos_existentes = {a['code'] for a in agentes_enriquecidos}
+            pbx_only = coletor_pbx.obter_agentes_pbx_only(codigos_existentes, ramais_casados)
+            todos_agentes = agentes_enriquecidos + pbx_only
         else:
-            # P4: PBX não configurado -> campos PBX nulos, sem mapa offline
-            todos_agentes = [dict(a) for a in lista]
-            for a in todos_agentes:
+            for a in agentes_enriquecidos:
                 em_pausa = bool(a.get('paused'))
                 st = a.get('status')
                 a['line'] = 'npx' if (em_pausa or (st is not None and st != 0)) else 'off'
@@ -870,23 +901,9 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
                 a['pbxNumber'] = None
                 a['pbxDirection'] = None
                 a['pbxSeconds'] = None
+            todos_agentes = agentes_enriquecidos
 
-        nomes = nomes_filas()
-        chaves = list(dict.fromkeys(list(nomes) + [a['queue'] for a in todos_agentes if a['queue']]))
-        pode_gerenciar = pode()
-        if pode_gerenciar:
-            agentes_retorno = todos_agentes
-        else:
-            campos_privados = {'callSrc', 'callDst', 'callClient', 'pbxNumber'}
-            agentes_retorno = [{k: v for k, v in a.items() if k not in campos_privados} for a in todos_agentes]
-        resposta = jsonify(
-            atualizado=em.isoformat(), erroNpx=erro, layout=layout.obter(), podeGerenciar=pode_gerenciar,
-            painelConfigurado=bool(cliente_painel and cliente_painel.configurado),
-            pbxConnection=status_pbx,
-            filas=[{'key': k, 'nome': nomes.get(k, k.replace('_', ' '))} for k in chaves],
-            agentes=agentes_retorno)
-        resposta.headers['Cache-Control'] = 'no-store'
-        return resposta
+        return _responder_dados(todos_agentes, em, erro, status_pbx)
 
     @bp.route('/admin/agentes/layout', methods=['POST'], endpoint='agentes_layout')
     def salvar_layout():

@@ -1299,6 +1299,68 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
         self.assertEqual(r_pausa_npx_offline.status_code, 400)
         self.assertIn('indisponível para agentes operando via PBX ou offline na NPX', r_pausa_npx_offline.get_json()['mensagem'])
 
+    def test_npx_sem_token_com_pbx_livre_responde_200(self):
+        # NPX sem token configurado, mas PBX configurado e disponível -> HTTP 200 com erroNpx
+        self.cliente_npx.token = ''
+        self.coletor_pbx.cliente.configurado = True
+        self.coletor_pbx.obter_status_conexao.return_value = {
+            'configured': True, 'available': True, 'error': None
+        }
+        resp = self.http.get('/agentes/dados')
+        self.assertEqual(resp.status_code, 200)
+        dados = resp.get_json()
+        self.assertEqual(dados['erroNpx'], 'NPX_API_TOKEN não configurado no .env do servidor.')
+        self.assertTrue(dados['pbxConnection']['available'])
+        # Apenas os agentes PBX registrados entram
+        self.assertEqual(len(dados['agentes']), 1)
+        self.assertEqual(dados['agentes'][0]['name'], 'Carol')
+        self.assertEqual(dados['agentes'][0]['line'], 'pbx')
+
+    def test_sem_ambas_configuradas_mantem_503_original(self):
+        self.cliente_npx.token = ''
+        self.coletor_pbx.cliente.configurado = False
+        resp = self.http.get('/agentes/dados')
+        self.assertEqual(resp.status_code, 503)
+        self.assertIn('NPX_API_TOKEN não configurado', resp.get_json()['erro'])
+
+    def test_npx_primeira_falha_com_pbx_busy_responde_200(self):
+        # NPX configurado mas sem resposta (None) e com erro; PBX disponível -> HTTP 200
+        self.cliente_npx.token = 'tok_npx_valido'
+        self.coletor_npx.retrato = None
+        self.coletor_npx.erro = 'Falha temporária de rede NPX'
+        self.coletor_pbx.cliente.configurado = True
+        self.coletor_pbx.obter_status_conexao.return_value = {
+            'configured': True, 'available': True, 'error': None
+        }
+        resp = self.http.get('/agentes/dados')
+        self.assertEqual(resp.status_code, 200)
+        dados = resp.get_json()
+        self.assertEqual(dados['erroNpx'], 'Falha temporária de rede NPX')
+        self.assertEqual(len(dados['agentes']), 1)
+        self.assertEqual(dados['agentes'][0]['name'], 'Carol')
+        self.assertEqual(dados['agentes'][0]['pbxStatus'], 'Busy')
+
+    def test_volta_npx_com_dedupe_e_sem_rede_na_composicao(self):
+        # NPX volta com Thiago logado; PBX também tem Thiago (2008) e Carol (2022)
+        self.cliente_npx.token = 'tok_npx_valido'
+        self.coletor_npx.retrato = [
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 1, 'paused': False}
+        ]
+        self.coletor_npx.erro = None
+        self.coletor_pbx.cliente.configurado = True
+        self.coletor_pbx.obter_status_conexao.return_value = {
+            'configured': True, 'available': True, 'error': None
+        }
+        resp = self.http.get('/agentes/dados')
+        self.assertEqual(resp.status_code, 200)
+        dados = resp.get_json()
+        self.assertIsNone(dados['erroNpx'])
+        # Deduplicação: Thiago aparece uma única vez (enriquecido com ramal 2008), sem duplicar
+        nomes = [a['name'] for a in dados['agentes']]
+        self.assertEqual(nomes.count('Thiago'), 1)
+        self.assertEqual(nomes.count('Carol'), 1)
+        self.assertEqual(len(dados['agentes']), 2)
+
 
 if __name__ == '__main__':
     unittest.main()
