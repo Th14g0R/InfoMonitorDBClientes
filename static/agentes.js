@@ -170,7 +170,7 @@
 
     return `<tr class="${st[3]}${est ? ' estourada presa' : ''}" style="--c:${st[1]}">
       <td>${nome}<br><span class="mut" title="${esc(a.code)}">${sub}</span></td>
-      <td><div class="st-cell"><span class="pill" style="--c:${st[1]}">${esc(st[0])}</span>${tagLinha}</div></td>
+      <td><div class="st-cell"><span class="pill" style="--c:${st[1]}"><span class="pill-txt">${esc(st[0])}</span></span>${tagLinha}</div></td>
       <td class="tempo">${tempoTxt}</td>
       <td>${esc(a.penalty ?? '–')}</td>
       <td>${situacaoHtml(a)}</td><td>${btn}</td></tr>`;
