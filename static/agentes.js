@@ -15,6 +15,12 @@
     '-1': ['Em pausa', 'var(--pausa)', 0, 'l-pausa'], '5': ['Recebendo', 'var(--cham)', 1, 'l-cham'],
     '2': ['Em ligação', 'var(--lig)', 2, 'l-lig'], '1': ['Livre', 'var(--livre)', 3, 'l-livre'], '0': ['Offline', 'var(--off)', 4, 'l-off'],
   };
+  const ST_PBX = {
+    'Ringing': ['Recebendo', 'var(--pbx-cham)', 1, 'l-pbx-cham'],
+    'Busy': ['Em ligação', 'var(--pbx-lig)', 2, 'l-pbx-lig'],
+    'Free': ['Livre', 'var(--pbx-livre)', 3, 'l-pbx-livre'],
+    'Offline': ['Offline', 'var(--off)', 4, 'l-pbx-off'],
+  };
   const COLS = [['name', 'Agente'], ['status', 'Status'], ['tempo', 'Tempo'], ['penalty', 'Prior.'], ['situacao', 'Situação']];
   const GRUPO = '<colgroup><col class="c-ag"><col class="c-st"><col class="c-tp"><col class="c-pr"><col class="c-si"><col class="c-ac"></colgroup>';
 
@@ -23,8 +29,21 @@
   let timerSalvar = null;
 
   // ---------- utilidades ----------
-  const stDe = a => a.paused ? ST['-1'] : (ST[String(a.status)] || [a.erro || 'Desconhecido', 'var(--off)', 5, 'l-off']);
-  const segs = a => a.paused ? (a.pauseMinutes != null ? a.pauseMinutes * 60 : (a.seconds || 0)) : (a.seconds || 0);
+  const stDe = a => {
+    if (a.line === 'pbx') {
+      return ST_PBX[String(a.pbxStatus || '')] || [a.pbxStatus || a.erro || 'Desconhecido', 'var(--off)', 5, 'l-pbx-off'];
+    }
+    if (a.line === 'off') {
+      return ST['0'];
+    }
+    return a.paused ? ST['-1'] : (ST[String(a.status)] || [a.erro || 'Desconhecido', 'var(--off)', 5, 'l-off']);
+  };
+  const segs = a => a.line === 'pbx' ? (a.pbxSeconds || 0) : (a.paused ? (a.pauseMinutes != null ? a.pauseMinutes * 60 : (a.seconds || 0)) : (a.seconds || 0));
+  const ehLivre = a => a.line === 'pbx' ? (a.pbxStatus === 'Free') : (!a.paused && a.status === 1);
+  const ehCham = a => a.line === 'pbx' ? (a.pbxStatus === 'Ringing') : (!a.paused && a.status === 5);
+  const ehLig = a => a.line === 'pbx' ? (a.pbxStatus === 'Busy') : (!a.paused && a.status === 2);
+  const ehPausa = a => (!a.line || a.line === 'npx') && !!a.paused;
+
   function fmtSeg(t) {
     t = Math.round(t || 0); const h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), s = t % 60;
     return h ? `${h}h ${String(m).padStart(2, '0')}m` : `${m}m ${String(s).padStart(2, '0')}s`;
@@ -49,10 +68,24 @@
   const soPausa = () => PODE && $('soPausa') && $('soPausa').checked;
 
   function chamada(a) {
+    if (a.line === 'pbx') {
+      const num = a.pbxNumber || '';
+      const dir = a.pbxDirection === 'outbound' ? 'para' : 'de';
+      return (num || a.pbxStatus === 'Busy' || a.pbxStatus === 'Ringing') ? {num, dir} : null;
+    }
     const num = a.callSrc || a.callDst || a.callClient || '';
     return num ? {num, dir: a.callDst && !a.callSrc ? 'para' : 'de'} : null;
   }
   function situacaoTexto(a) {
+    if (a.line === 'pbx') {
+      const dur = a.pbxSeconds ? ` (${fmtSeg(a.pbxSeconds)})` : '';
+      if (a.pbxStatus === 'Busy' || a.pbxStatus === 'Ringing') {
+        const num = a.pbxNumber ? fmtFone(a.pbxNumber) : (a.pbxStatus === 'Ringing' ? 'Chamando' : 'Em ligação');
+        return `${num}${dur}`;
+      }
+      if (a.pbxStatus === 'Free') return 'Livre';
+      return a.pbxStatus || '';
+    }
     if (a.paused) {
       const tipo = a.pauseType || 'Pausa';
       if (maxValido(a.pauseMaxMinutes) && a.pauseMinutes != null && Number.isFinite(Number(a.pauseMinutes))) {
@@ -63,6 +96,20 @@
     const c = chamada(a); return c ? c.num : '';
   }
   function situacaoHtml(a) {
+    if (a.line === 'pbx') {
+      const dur = a.pbxSeconds != null && a.pbxSeconds > 0 ? ` <span class="mut">(${fmtSeg(a.pbxSeconds)})</span>` : '';
+      if (a.pbxStatus === 'Busy' || a.pbxStatus === 'Ringing') {
+        const c = chamada(a);
+        if (c && c.num) {
+          return `📞 <span class="mut">${c.dir}</span> <span class="fone">${esc(fmtFone(c.num))}</span>${dur}`;
+        }
+        return `<span class="mut">${a.pbxStatus === 'Ringing' ? 'Chamando' : 'Em ligação'}</span>${dur}`;
+      }
+      if (a.pbxStatus === 'Free') {
+        return '<span class="mut">Livre</span>';
+      }
+      return '<span class="mut">—</span>';
+    }
     if (a.paused) {
       const tipo = esc(a.pauseType || 'Pausa');
       if (maxValido(a.pauseMaxMinutes) && a.pauseMinutes != null && Number.isFinite(Number(a.pauseMinutes))) {
@@ -110,10 +157,22 @@
     const nome = PODE ? `<button type="button" class="nome" data-abrir="${esc(a.code)}" data-fila="${esc(a.queue)}">${esc(a.name)}</button>`
                       : `<span class="nome">${esc(a.name)}</span>`;
     const btn = PODE && a.paused ? `<button type="button" class="${est ? 'btn-pausa' : ''}" data-tirar="${esc(a.code)}" data-nome="${esc(a.name)}">Tirar pausa</button>` : '';
+    const tagLinha = a.line === 'pbx' ? '<span class="tag-linha tag-pbx">PBX</span>'
+                   : (a.line === 'npx' || (!a.line && a.status != null) ? '<span class="tag-linha tag-npx">NPX</span>' : '');
+
+    let sub = esc(a.code);
+    if (a.line === 'pbx') {
+      if (a.pbxExtension) sub += ' · ramal PBX ' + esc(a.pbxExtension);
+      else if (a.extension && a.extension != a.code) sub += ' · ramal ' + esc(a.extension);
+    } else {
+      if (a.extension && a.extension != a.code) sub += ' · ramal ' + esc(a.extension);
+      if (a.pbxExtension) sub += ' · ramal PBX ' + esc(a.pbxExtension);
+    }
+
     return `<tr class="${st[3]}${est ? ' estourada presa' : ''}" style="--c:${st[1]}">
-      <td>${nome}<br><span class="mut">${esc(a.code)}${a.extension && a.extension != a.code ? ' · ramal ' + esc(a.extension) : ''}</span></td>
-      <td><span class="pill" style="--c:${st[1]}">${esc(st[0])}</span></td>
-      <td class="tempo">${a.seconds == null && !a.paused ? '–' : fmtSeg(segs(a))}</td>
+      <td>${nome}<br><span class="mut">${sub}</span></td>
+      <td><span class="pill" style="--c:${st[1]}">${esc(st[0])}</span>${tagLinha}</td>
+      <td class="tempo">${(a.seconds == null && a.pbxSeconds == null && !a.paused) ? '–' : fmtSeg(segs(a))}</td>
       <td>${esc(a.penalty ?? '–')}</td>
       <td>${situacaoHtml(a)}</td><td>${btn}</td></tr>`;
   }
@@ -122,10 +181,10 @@
     const lista = ordenar(todos.filter(a => !soPausa() || a.paused));
     const n = f => todos.filter(f).length;
     const cont = `<div class="cont">
-        <span style="color:var(--livre)">${n(a => !a.paused && a.status === 1)} livres</span>
-        <span style="color:var(--cham)">${n(a => !a.paused && a.status === 5)} recebendo</span>
-        <span style="color:var(--lig)">${n(a => !a.paused && a.status === 2)} em ligação</span>
-        <span style="color:var(--pausa)">${n(a => a.paused)} em pausa</span></div>`;
+        <span style="color:var(--livre)">${n(ehLivre)} livres</span>
+        <span style="color:var(--cham)">${n(ehCham)} recebendo</span>
+        <span style="color:var(--lig)">${n(ehLig)} em ligação</span>
+        <span style="color:var(--pausa)">${n(ehPausa)} em pausa</span></div>`;
     const corpo = lista.length
       ? `<div class="wrap"><table>${GRUPO}<thead><tr>${cab}</tr></thead><tbody>${lista.map(linha).join('')}</tbody></table></div>`
       : `<div class="vazio mut">${todos.length ? 'Ninguém em pausa nesta fila.' : 'Nenhum agente logado.'}</div>`;
@@ -138,10 +197,10 @@
     const u = [...new Map(dados.map(a => [a.code, a])).values()];
     const conta = f => u.filter(f).length;
     $('nLog').textContent = u.length;
-    $('nLivre').textContent = conta(a => !a.paused && a.status === 1);
-    $('nCham').textContent = conta(a => !a.paused && a.status === 5);
-    $('nLig').textContent = conta(a => !a.paused && a.status === 2);
-    $('nPausa').textContent = conta(a => a.paused);
+    $('nLivre').textContent = conta(ehLivre);
+    $('nCham').textContent = conta(ehCham);
+    $('nLig').textContent = conta(ehLig);
+    $('nPausa').textContent = conta(ehPausa);
     $('nPresa').textContent = conta(estourada);
     const o = layout.ord || {};
     const cab = COLS.map(([c, t]) => `<th ${PODE ? `data-col="${c}"` : ''} title="${c === 'penalty' ? 'Prioridade (1 = atende primeiro)' : t}" class="${o.col === c ? 'ativo' : ''}">${t}<span class="seta">${o.col === c ? (o.dir > 0 ? '▲' : '▼') : '↕'}</span></th>`).join('') + '<th></th>';
@@ -166,6 +225,18 @@
       if (!r.ok) throw new Error(j.erro || r.status);
       dados = j.agentes || []; filas = j.filas || [];
       painelConfigurado = j.painelConfigurado !== false;
+      const pbxConn = j.pbxConnection || null;
+      const avisoPbx = $('avisoPbx');
+      if (avisoPbx) {
+        if (pbxConn && pbxConn.configured && !pbxConn.available) {
+          avisoPbx.style.display = '';
+          const detalhe = pbxConn.error ? `: ${esc(pbxConn.error)}` : '';
+          avisoPbx.textContent = `ℹ Telefonia PBX indisponível no momento${detalhe}`;
+        } else {
+          avisoPbx.style.display = 'none';
+          avisoPbx.textContent = '';
+        }
+      }
       // quem só visualiza segue sempre o layout do administrador; quem edita só recebe na abertura
       if (!PODE || primeiraCarga) { layout = j.layout || layout; aplicarControles(); }
       primeiraCarga = false;
@@ -227,33 +298,81 @@
     if (!a) { $('dInfo').textContent = 'Agente não está mais logado.'; return; }
     sel.agente = a;
     const st = stDe(a), c = chamada(a);
-    $('dNome').textContent = a.name;
-    $('dInfo').innerHTML = `Código ${esc(a.code)} · ramal ${esc(a.extension || a.code)} · fila <b>${esc(fila(a.queue).nome)}</b><br>
-      <span class="pill" style="--c:${st[1]}">${esc(st[0])}</span>${c && !a.paused ? ` 📞 ${c.dir} <b>${esc(fmtFone(c.num))}</b>` : ''}`;
+    const ehPbx = a.line === 'pbx';
+    const tagLinha = ehPbx ? ' <span class="tag-linha tag-pbx">PBX</span>'
+                           : (a.line === 'npx' || (!a.line && a.status != null) ? ' <span class="tag-linha tag-npx">NPX</span>' : '');
+
+    let subRamal = `Código ${esc(a.code)}`;
+    if (a.line === 'pbx') {
+      if (a.pbxExtension) subRamal += ` · ramal PBX ${esc(a.pbxExtension)}`;
+      else if (a.extension && a.extension != a.code) subRamal += ` · ramal ${esc(a.extension)}`;
+    } else {
+      if (a.extension && a.extension != a.code) subRamal += ` · ramal ${esc(a.extension)}`;
+      if (a.pbxExtension) subRamal += ` · ramal PBX ${esc(a.pbxExtension)}`;
+    }
+    subRamal += ` · fila <b>${esc(fila(a.queue).nome)}</b>`;
+
+    let callTxt = '';
+    if (c && c.num) {
+      callTxt = ` 📞 ${c.dir} <b>${esc(fmtFone(c.num))}</b>${a.pbxSeconds ? ` (${fmtSeg(a.pbxSeconds)})` : ''}`;
+    }
+
+    $('dNome').innerHTML = `${esc(a.name)}${tagLinha}`;
+    $('dInfo').innerHTML = `${subRamal}<br>
+      <span class="pill" style="--c:${st[1]}">${esc(st[0])}</span>${callTxt}`;
     $('aPausa').style.display = '';
-    if (a.paused) {
+
+    if (ehPbx) {
+      $('bTirar').style.display = 'none';
+      $('bPausar').style.display = '';
+      $('bPausar').disabled = true;
+      $('bPausar').title = 'Ações de pausa são exclusivas da integração NPX.';
+      $('dPausa').textContent = 'Agente em linha PBX (pausa não disponível)';
+    } else if (a.paused) {
       $('bTirar').style.display = '';
       $('bPausar').style.display = 'none';
+      $('bTirar').title = '';
       $('dPausa').textContent = `${a.pauseType || 'Pausa'} há ${fmtSeg(segs(a))}`;
     } else {
       $('bTirar').style.display = 'none';
       $('bPausar').style.display = '';
       $('bPausar').disabled = !painelConfigurado;
+      $('bPausar').title = '';
       $('dPausa').textContent = 'Agente ativo / fora de pausa';
     }
+
     if (inicial) {
       const destinos = filas.filter(f => f.key !== a.queue);
       $('dFila').innerHTML = destinos.length
         ? destinos.map(f => `<option value="${esc(f.key)}">${esc(f.nome)}</option>`).join('')
         : '<option value="" disabled>Nenhuma outra fila disponível</option>';
-      $('bTransf').disabled = !painelConfigurado || !destinos.length;
-      $('bPen').disabled = !painelConfigurado;
-      $('bRemoverFila').disabled = !painelConfigurado;
-      const penAtual = Number(a.penalty);
-      $('dPen').value = Number.isInteger(penAtual) && penAtual >= 1 && penAtual <= 10 ? penAtual : 1;
-      if (!painelConfigurado) {
-        $('dlgMsg').textContent = 'Ações do painel aguardando configuração de credenciais no servidor.';
+
+      if (ehPbx) {
+        $('bTransf').disabled = true;
+        $('bTransf').title = 'Transferência de fila é exclusiva para agentes NPX.';
+        $('bPen').disabled = true;
+        $('bPen').title = 'Prioridade de fila é exclusiva para agentes NPX.';
+        $('bRemoverFila').disabled = true;
+        $('bRemoverFila').title = 'Remoção de fila é exclusiva para agentes NPX.';
+        $('bDeslogar').disabled = true;
+        $('bDeslogar').title = 'Deslogar agente é exclusivo para agentes NPX.';
+        $('dlgMsg').textContent = 'ℹ Agente conectado via PBX. Ações de fila e pausa são gerenciadas pelo NPX.';
         $('dlgMsg').style.color = 'var(--mut)';
+      } else {
+        $('bTransf').disabled = !painelConfigurado || !destinos.length;
+        $('bTransf').title = '';
+        $('bPen').disabled = !painelConfigurado;
+        $('bPen').title = '';
+        $('bRemoverFila').disabled = !painelConfigurado;
+        $('bRemoverFila').title = '';
+        $('bDeslogar').disabled = false;
+        $('bDeslogar').title = '';
+        const penAtual = Number(a.penalty);
+        $('dPen').value = Number.isInteger(penAtual) && penAtual >= 1 && penAtual <= 10 ? penAtual : 1;
+        if (!painelConfigurado) {
+          $('dlgMsg').textContent = 'Ações do painel aguardando configuração de credenciais no servidor.';
+          $('dlgMsg').style.color = 'var(--mut)';
+        }
       }
     }
   }
