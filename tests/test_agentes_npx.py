@@ -16,6 +16,7 @@ from flask import Blueprint, Flask
 
 import agentes_npx
 import seguranca
+from pbx_monitor import ColetorPbx
 from agentes_npx import (
     ClienteNpx,
     ClientePainelNpx,
@@ -1276,28 +1277,92 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
 
         headers = {'X-CSRF-Token': 'token_csrf_abc'}
 
-        # 1. Agente PBX-only (código pbx-2022): recusa em todas as ações
+        # 1. A5: Agente sintético (código pbx-2022) é rejeitado pela validação de código original antes
         r_pausa = self.http.post('/admin/agentes/pbx-2022/colocar-pausa', headers=headers)
         self.assertEqual(r_pausa.status_code, 400)
-        self.assertIn('indisponível para agentes operando exclusivamente via PBX', r_pausa.get_json()['mensagem'])
+        self.assertIn('Código de agente inválido', r_pausa.get_json()['mensagem'])
 
         r_deslogar = self.http.post('/admin/agentes/pbx-2022/deslogar', headers=headers)
         self.assertEqual(r_deslogar.status_code, 400)
+        self.assertIn('Código de agente inválido', r_deslogar.get_json()['mensagem'])
 
         r_transf = self.http.post('/admin/agentes/transferir', json={'code': 'pbx-2022', 'queue': 'InfoBrasil_Suporte'}, headers=headers)
         self.assertEqual(r_transf.status_code, 400)
+        self.assertIn('Código de agente inválido', r_transf.get_json()['mensagem'])
 
-        # 2. Tentativa de transferir agente NPX normal para fila sintética PBX_Sem_Fila -> recusa
+        # 2. A5: Verificação de autorização deve vir ANTES da recusa PBX -> se não autorizado, retorna 403 (nunca 400)
+        self.permitido = False
+        r_unauth = self.http.post('/admin/agentes/4422008/colocar-pausa', headers=headers)
+        self.assertEqual(r_unauth.status_code, 403)
+        self.assertIn('Sem permissão para gerenciar agentes', r_unauth.get_json()['mensagem'])
+        self.permitido = True
+
+        # 3. Tentativa de transferir agente NPX normal para fila sintética PBX_Sem_Fila -> recusa
         r_transf_sint = self.http.post('/admin/agentes/transferir', json={'code': '4422008', 'queue': 'PBX_Sem_Fila'}, headers=headers)
         self.assertEqual(r_transf_sint.status_code, 400)
 
-        # 3. Agente NPX que está offline na NPX (status=0, paused=False) mas ativo no PBX (line='pbx')
+        # 4. Agente NPX que está offline na NPX (status=0, paused=False) mas ativo no PBX (line='pbx')
         self.coletor_npx.retrato = [
             {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 0, 'paused': False}
         ]
         r_pausa_npx_offline = self.http.post('/admin/agentes/4422008/colocar-pausa', headers=headers)
         self.assertEqual(r_pausa_npx_offline.status_code, 400)
         self.assertIn('indisponível para agentes operando via PBX ou offline na NPX', r_pausa_npx_offline.get_json()['mensagem'])
+
+    def test_a3_recusar_se_line_pbx_enriquece_retrato_inteiro_globalmente(self):
+        # A3: Testar que se dois agentes colidirem na NPX no mesmo ramal, a validação de recusa PBX
+        # enriquece o retrato inteiro e não apenas o agente isolado, detectando a ambiguidade global.
+        self.permitido = True
+        with self.http.session_transaction() as sess:
+            sess['user_id'] = 1
+            sess['user_nome'] = 'Admin'
+            sess['_csrf_token'] = 'token_csrf_abc'
+
+        headers = {'X-CSRF-Token': 'token_csrf_abc'}
+
+        # Usar a implementação real de ColetorPbx.enriquecer_agentes para demonstrar o comportamento
+        coletor_pbx_real = ColetorPbx(
+            cliente=MagicMock(configurado=True),
+            mapa_analistas={'Thiago': {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'}}
+        )
+        coletor_pbx_real.snapshot = {
+            '2008': {'status': 'Busy', 'number': '85999998888', 'direction': 'inbound', 'seconds': 30}
+        }
+        self.coletor_pbx.enriquecer_agentes.side_effect = coletor_pbx_real.enriquecer_agentes
+
+        # Dois agentes NPX disputam o mesmo ramal (colisão de analista)
+        self.coletor_npx.retrato = [
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 0, 'paused': False},
+            {'code': '4422009', 'name': 'Thiago Jr', 'queue': 'InfoBrasil_Suporte', 'status': 0, 'paused': False},
+        ]
+
+        # Com enriquecimento global, ambos ficam com ramal=None e line='off'
+        # Logo, recusar_se_line_pbx NÃO deve considerar line='pbx'
+        r = self.http.post('/admin/agentes/4422008/colocar-pausa', headers=headers)
+        self.assertNotEqual(r.get_json().get('mensagem'), 'Ação indisponível para agentes operando via PBX ou offline na NPX.')
+
+    def test_a7_fila_sintetica_nao_aparece_em_filas_se_sem_agentes_pbx(self):
+        # A7: PBX_Sem_Fila removida de NOMES_PADRAO. Se nenhum agente estiver nessa fila,
+        # ela NÃO deve aparecer na lista de filas retornadas.
+        self.assertNotIn('PBX_Sem_Fila', agentes_npx.NOMES_PADRAO)
+        self.coletor_pbx.obter_agentes_pbx_only = MagicMock(return_value=[])
+        self.coletor_npx.retrato = [
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 1, 'paused': False}
+        ]
+        resp = self.http.get('/agentes/dados')
+        dados = resp.get_json()
+        chaves_filas = [f['key'] for f in dados['filas']]
+        self.assertNotIn('PBX_Sem_Fila', chaves_filas)
+
+        # Se houver agente na fila PBX_Sem_Fila, deve ser serializada com nome 'PBX (sem fila)'
+        self.coletor_pbx.obter_agentes_pbx_only = MagicMock(return_value=[{
+            'code': 'pbx-2022', 'name': 'Carol', 'queue': 'PBX_Sem_Fila', 'status': 0, 'paused': False, 'line': 'pbx'
+        }])
+        resp2 = self.http.get('/agentes/dados')
+        dados2 = resp2.get_json()
+        fila_sint = next((f for f in dados2['filas'] if f['key'] == 'PBX_Sem_Fila'), None)
+        self.assertIsNotNone(fila_sint)
+        self.assertEqual(fila_sint['nome'], 'PBX (sem fila)')
 
     def test_npx_sem_token_com_pbx_livre_responde_200(self):
         # NPX sem token configurado, mas PBX configurado e disponível -> HTTP 200 com erroNpx

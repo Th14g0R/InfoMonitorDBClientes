@@ -58,22 +58,24 @@ def validar_pbx_base_url(url_raw):
     url_limpa = str(url_raw).strip()
     try:
         parsed = urlparse.urlsplit(url_limpa)
+        if parsed.scheme.lower() != 'https':
+            LOGGER.warning('[PBX] PBX_BASE_URL deve utilizar obrigatoriamente HTTPS.')
+            return ''
+        if not parsed.hostname or parsed.username or parsed.password:
+            LOGGER.warning('[PBX] PBX_BASE_URL inválida (userinfo não permitido).')
+            return ''
+        if parsed.query or parsed.fragment:
+            LOGGER.warning('[PBX] PBX_BASE_URL inválida (query ou fragment não permitidos).')
+            return ''
+        porta_num = parsed.port
     except Exception:
+        LOGGER.warning('[PBX] PBX_BASE_URL inválida (falha no parse ou porta inválida).')
         return ''
-    
-    if parsed.scheme.lower() != 'https':
-        LOGGER.warning('[PBX] PBX_BASE_URL deve utilizar obrigatoriamente HTTPS.')
-        return ''
-    if not parsed.hostname or parsed.username or parsed.password:
-        LOGGER.warning('[PBX] PBX_BASE_URL inválida (userinfo não permitido).')
-        return ''
-    if parsed.query or parsed.fragment:
-        LOGGER.warning('[PBX] PBX_BASE_URL inválida (query ou fragment não permitidos).')
-        return ''
-    
+
     caminho = parsed.path.rstrip('/')
-    porta = f":{parsed.port}" if parsed.port and parsed.port != 443 else ""
-    return f"https://{parsed.hostname}{porta}{caminho}"
+    porta = f":{porta_num}" if porta_num and porta_num != 443 else ""
+    hostname = f"[{parsed.hostname}]" if ':' in parsed.hostname and not parsed.hostname.startswith('[') else parsed.hostname
+    return f"https://{hostname}{porta}{caminho}"
 
 
 def traduzir_departamento(departamento):
@@ -105,12 +107,13 @@ class ClientePbx:
         self.token = str(token or '').strip()
         self.key = str(key or '').strip()
         
-        # P9: Parâmetro explícito vence a variável de ambiente.
-        # Variável de ambiente só desativa se for o valor exato 'false' (case-insensitive).
+        # P9 / A1: Parâmetro explícito vence a variável de ambiente.
+        # Variável de ambiente só desativa se for o valor EXATO 'false' (sem strip, sem lower).
+        # Variantes como 'FALSE', 'False', ' false ' mantêm a verificação TLS habilitada.
         if tls_reject_unauthorized is not None:
             self.tls_reject_unauthorized = bool(tls_reject_unauthorized)
         else:
-            env_tls = os.environ.get('PBX_TLS_REJECT_UNAUTHORIZED', '').strip().lower()
+            env_tls = os.environ.get('PBX_TLS_REJECT_UNAUTHORIZED', '')
             self.tls_reject_unauthorized = (env_tls != 'false')
 
         self.timeout = float(timeout)
@@ -547,6 +550,7 @@ class ColetorPbx:
                     codigos_por_ramal.setdefault(r, set()).add(code)
 
         ramais_ambiguos = {r for r, codes in codigos_por_ramal.items() if len(codes) > 1}
+        self.ultimos_ramais_ambiguos = set(ramais_ambiguos)
 
         for a in agentes_npx:
             code = str(a.get('code'))
@@ -590,7 +594,7 @@ class ColetorPbx:
 
         return agentes_npx
 
-    def obter_agentes_pbx_only(self, codigos_npx_existentes, ramais_npx_casados=None):
+    def obter_agentes_pbx_only(self, codigos_npx_existentes, ramais_npx_casados=None, ramais_ambiguos=None):
         """Gera cards para analistas do mapa PBX que não possuem sessão na NPX e estão REGISTRADOS."""
         if not self.mapa_analistas:
             return []
@@ -598,13 +602,26 @@ class ColetorPbx:
         with self._trava:
             snapshot = dict(self.snapshot)
 
-        ramais_npx_casados = ramais_npx_casados or set()
+        ramais_npx_casados = set(ramais_npx_casados or ())
+        ramais_ambiguos_set = set(ramais_ambiguos if ramais_ambiguos is not None else getattr(self, 'ultimos_ramais_ambiguos', set()))
+
+        # A6: Ramais ambíguos no próprio mapa de analistas também não devem ser adicionados
+        ramais_no_mapa = {}
+        for nome, info in self.mapa_analistas.items():
+            r = info.get('ramal')
+            if r:
+                ramais_no_mapa.setdefault(r, []).append(nome)
+        for r, nomes in ramais_no_mapa.items():
+            if len(nomes) > 1:
+                ramais_ambiguos_set.add(r)
+
+        ramais_excluidos = ramais_npx_casados | ramais_ambiguos_set
         codigos_set = set(str(c) for c in codigos_npx_existentes)
         cards_pbx = []
 
         for nome, info in self.mapa_analistas.items():
             ramal = info.get('ramal')
-            if not ramal or ramal in ramais_npx_casados:
+            if not ramal or ramal in ramais_excluidos:
                 continue
 
             codigo_pbx = f"pbx-{ramal}"

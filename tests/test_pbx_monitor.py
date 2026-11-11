@@ -41,6 +41,15 @@ class TestClientePbx(unittest.TestCase):
         self.assertEqual(validar_pbx_base_url('https://pbx.infobrasil.com.br/'), 'https://pbx.infobrasil.com.br')
         self.assertEqual(validar_pbx_base_url('https://pbx.infobrasil.com.br:8443/central'), 'https://pbx.infobrasil.com.br:8443/central')
 
+        # A2: IPv6 com colchetes preservados
+        self.assertEqual(validar_pbx_base_url('https://[2001:db8::1]:8443/central'), 'https://[2001:db8::1]:8443/central')
+        self.assertEqual(validar_pbx_base_url('https://[2001:db8::1]/central'), 'https://[2001:db8::1]/central')
+
+        # A2: Porta inválida (abc ou fora de range 0-65535) não deve derrubar o app
+        self.assertEqual(validar_pbx_base_url('https://pbx.com.br:abc/api'), '')
+        self.assertEqual(validar_pbx_base_url('https://pbx.com.br:99999/api'), '')
+        self.assertEqual(validar_pbx_base_url('https://pbx.com.br:-1/api'), '')
+
         # HTTP não é aceito
         self.assertEqual(validar_pbx_base_url('http://pbx.infobrasil.com.br'), '')
         self.assertEqual(validar_pbx_base_url('http://192.168.243.2:8080'), '')
@@ -83,14 +92,16 @@ class TestClientePbx(unittest.TestCase):
             c_exp_true = ClientePbx(base_url='https://pbx.local', token='t', key='k', tls_reject_unauthorized=True)
             self.assertTrue(c_exp_true.tls_reject_unauthorized)
 
-        # 2. Somente valor exato 'false' desativa TLS via env
+        # 2. A1: Somente valor EXATO 'false' (sem strip, sem lower) desativa TLS via env
         with patch.dict(os.environ, {'PBX_TLS_REJECT_UNAUTHORIZED': 'false'}):
             c_env_false = ClientePbx(base_url='https://pbx.local', token='t', key='k')
             self.assertFalse(c_env_false.tls_reject_unauthorized)
 
-        with patch.dict(os.environ, {'PBX_TLS_REJECT_UNAUTHORIZED': '0'}):
-            c_env_outro = ClientePbx(base_url='https://pbx.local', token='t', key='k')
-            self.assertTrue(c_env_outro.tls_reject_unauthorized)
+        # Variantes de maiúsculas ou espaços NÃO desativam: verificação TLS continua True
+        for variante in ('FALSE', 'False', ' false ', '0', 'no', 'disabled'):
+            with patch.dict(os.environ, {'PBX_TLS_REJECT_UNAUTHORIZED': variante}):
+                c_env_variante = ClientePbx(base_url='https://pbx.local', token='t', key='k')
+                self.assertTrue(c_env_variante.tls_reject_unauthorized, f"Falha para variante: {variante!r}")
 
     @patch('pbx_monitor.urlrequest.build_opener')
     def test_quote_token_key_safe_vazio(self, mock_build_opener):
@@ -301,6 +312,30 @@ class TestColetorPbxP5EP6(unittest.TestCase):
         self.assertEqual(pbx_only[0]['name'], 'Carol')
         self.assertEqual(pbx_only[0]['code'], 'pbx-2022')
         self.assertEqual(pbx_only[0]['line'], 'pbx')
+
+    def test_a6_ramais_ambiguos_excluidos_de_pbx_only(self):
+        # A6: Ramais ambíguos na NPX ou no mapa devem ser excluídos de PBX-only para não duplicar pessoas
+        coletor = ColetorPbx(cliente=MagicMock(), mapa_analistas={
+            'Thiago': {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'},
+            'Carol': {'ramal': '2022', 'departamento': 'InfoBrasil_SPED_Fiscal'},
+            'Caroline': {'ramal': '2022', 'departamento': 'InfoBrasil_SPED_Fiscal'},  # Ambiguidade no mapa!
+        })
+        coletor.snapshot = {
+            '2008': {'status': 'Free', 'number': None, 'direction': None, 'seconds': 0},
+            '2022': {'status': 'Busy', 'number': '85987654321', 'direction': 'outbound', 'seconds': 45},
+        }
+
+        # 1. Colisão na NPX: dois agentes disputam o ramal 2008
+        agentes = [
+            {'code': '101', 'name': 'Thiago', 'status': 0, 'paused': False},
+            {'code': '102', 'name': 'Thiago Jr', 'status': 0, 'paused': False}
+        ]
+        coletor.enriquecer_agentes(agentes)
+        self.assertIn('2008', coletor.ultimos_ramais_ambiguos)
+
+        # 2. Ao chamar obter_agentes_pbx_only, nem 2008 (ambíguo na NPX) nem 2022 (ambíguo no mapa) devem entrar
+        pbx_only = coletor.obter_agentes_pbx_only(codigos_npx_existentes=['101', '102'], ramais_npx_casados=set())
+        self.assertEqual(len(pbx_only), 0)
 
 
 if __name__ == '__main__':
