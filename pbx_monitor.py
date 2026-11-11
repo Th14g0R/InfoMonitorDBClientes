@@ -343,6 +343,15 @@ def processar_snapshot_pbx(dispositivos_lista, registrados_lista, chamadas_lista
             active_calls.setdefault(dst, []).append(call)
 
     # 3. Consolidação por ramal
+    # Requisito 7: O mapa é a única fonte explícita de identidade. Dispositivos fora do mapa são ignorados.
+    ramais_validos = None
+    if mapa_analistas:
+        ramais_validos = {
+            str(info['ramal']).strip()
+            for info in mapa_analistas.values()
+            if isinstance(info, dict) and info.get('ramal')
+        }
+
     consolidado = {}
 
     for dev in registrados_lista:
@@ -353,6 +362,9 @@ def processar_snapshot_pbx(dispositivos_lista, registrados_lista, chamadas_lista
             if match:
                 ramal = match.group(1)
         if not ramal:
+            continue
+
+        if ramais_validos is not None and ramal not in ramais_validos:
             continue
 
         if ramal not in ramal_to_username and username:

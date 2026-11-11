@@ -337,6 +337,48 @@ class TestColetorPbxP5EP6(unittest.TestCase):
         pbx_only = coletor.obter_agentes_pbx_only(codigos_npx_existentes=['101', '102'], ramais_npx_casados=set())
         self.assertEqual(len(pbx_only), 0)
 
+    def test_requisito_7_dispositivos_fora_do_mapa_ignorados_no_snapshot(self):
+        # Requisito 7: Dispositivos registrados fora do mapa (ex: URA 9999, tronco 8888) são ignorados
+        mapa = {
+            'Thiago': {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'}
+        }
+        dispositivos = [
+            {'username': '852008.Thiago', 'linha_ip': '2008'},
+            {'username': '859999.URA', 'linha_ip': '9999'},
+            {'username': '858888.TRONCO', 'linha_ip': '8888'},
+        ]
+        registrados = [
+            {'device_username': '852008.Thiago', 'device_registered': True},
+            {'device_username': '859999.URA', 'device_registered': True},
+            {'device_username': '858888.TRONCO', 'device_registered': True},
+        ]
+        chamadas = []
+        snap = processar_snapshot_pbx(dispositivos, registrados, chamadas, mapa_analistas=mapa)
+        self.assertIn('2008', snap)
+        self.assertNotIn('9999', snap)
+        self.assertNotIn('8888', snap)
+
+    def test_requisito_7_departamento_vazio_ou_desconhecido_vira_pbx_sem_fila(self):
+        # Requisito 7: Analista do mapa registrado sem sessão NPX e com departamento vazio ou desconhecido
+        # deve receber a fila sintética PBX_Sem_Fila
+        mapa = {
+            'Analista Sem Dept': {'ramal': '2030', 'departamento': ''},
+            'Analista Dept Desconhecido': {'ramal': '2031', 'departamento': 'Setor Fantasma'},
+        }
+        coletor = ColetorPbx(cliente=MagicMock(), mapa_analistas=mapa)
+        coletor.snapshot = {
+            '2030': {'status': 'Free', 'number': None, 'direction': None, 'seconds': 0},
+            '2031': {'status': 'Busy', 'number': '85999991111', 'direction': 'inbound', 'seconds': 50},
+        }
+        pbx_only = coletor.obter_agentes_pbx_only(codigos_npx_existentes=set())
+        self.assertEqual(len(pbx_only), 2)
+        agentes_por_nome = {a['name']: a for a in pbx_only}
+        self.assertEqual(agentes_por_nome['Analista Sem Dept']['queue'], FILA_PBX_SEM_FILA)
+        self.assertEqual(agentes_por_nome['Analista Dept Desconhecido']['queue'], FILA_PBX_SEM_FILA)
+        # Nomes mantidos exatamente como no mapa (sem inferência por username)
+        self.assertIn('Analista Sem Dept', agentes_por_nome)
+        self.assertIn('Analista Dept Desconhecido', agentes_por_nome)
+
 
 if __name__ == '__main__':
     unittest.main()

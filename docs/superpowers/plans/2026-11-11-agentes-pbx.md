@@ -75,6 +75,13 @@ Em cada objeto da lista `agentes`:
 - Se `podeGerenciar == False`:
   - `pbxNumber` é omitido/definido como `None` na serialização final de `/agentes/dados`, alinhado à proteção de `callSrc`, `callDst` e `callClient`.
 
+### 1.6. Requisito 7 — Mapa como Única Fonte Explícita de Identidade
+- O arquivo `config/analysts_map.json` é a **única fonte explícita de identidade dos analistas**.
+- Não há qualquer inferência ou derivação de nomes a partir de `username`, nem exposição de dispositivos fora do mapa (evita exibir URAs, troncos, ramais virtuais ou genéricos).
+- Dispositivos SIP registrados na central PBX que não possuam correspondência no mapa de analistas são completamente ignorados.
+- Analistas cadastrados no mapa que estejam registrados no PBX sem sessão aberta na NPX e cujo departamento seja vazio ou desconhecido recebem a fila sintética `PBX_Sem_Fila` (com exibição `"PBX (sem fila)"`).
+- **Novos analistas:** Qualquer novo analista adicionado à operação necessita obrigatoriamente de uma entrada no arquivo `config/analysts_map.json` (`nome`, `ramal`, `departamento`) para ser reconhecido e exibido no painel. Nenhuma nova variável de ambiente ou faixa de ramais foi adicionada, preservando o escopo estrito.
+
 ---
 
 ## 2. Componentes e Arquivos
