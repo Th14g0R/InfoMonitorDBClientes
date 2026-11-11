@@ -161,7 +161,7 @@
                    : (a.line === 'npx' || (!a.line && a.status != null) ? '<span class="tag-linha tag-npx">NPX</span>' : '');
 
     const sub = a.line === 'pbx'
-      ? `${esc(a.code)}${a.pbxExtension ? ' · ramal ' + esc(a.pbxExtension) : (a.extension && a.extension != a.code ? ' · ramal ' + esc(a.extension) : '')}`
+      ? (a.pbxExtension ? 'ramal ' + esc(a.pbxExtension) : (a.extension ? 'ramal ' + esc(a.extension) : esc(a.code)))
       : `${esc(a.code)}${a.extension && a.extension != a.code ? ' · ramal ' + esc(a.extension) : ''}`;
 
     const tempoTxt = a.line === 'pbx'
