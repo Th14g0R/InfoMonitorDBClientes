@@ -56,17 +56,22 @@ Em cada objeto da lista `agentes`:
 
 ### 1.3. Agentes PBX-Only
 - Analistas do mapa PBX cadastrados que não possuam sessão aberta na NPX.
-- Se o PBX estiver ativo/registrado, entram na lista de agentes com:
+- Somente adiciona se estiverem REGISTRADOS no PBX (Free, Busy, Ringing), evitando inundar o painel com ramais offline desnecessários.
+- Entram na lista de agentes com:
   - `code`: `f"pbx-{ramal}"`
   - `name`: Nome do analista no mapa
-  - `queue`: Departamento traduzido para `InfoBrasil_*` (ou `''` se desconhecido)
+  - `queue`: Departamento traduzido para `InfoBrasil_*`, ou fila sintética `PBX_Sem_Fila` (exibida como `PBX (sem fila)`) se desconhecida.
   - `extension`: ramal (ex: `"2008"`)
   - `status`: `0`
   - `paused`: `False`
-  - `line`: `'pbx'` (se registrado) ou `'off'` (se offline)
+  - `line`: `'pbx'`
   - `pbxExtension`, `pbxStatus`, `pbxNumber`, `pbxDirection`, `pbxSeconds` preenchidos.
+- A fila sintética `PBX_Sem_Fila` é excluída de destinos válidos de transferência e mutações na NPX.
 
-### 1.4. Privacidade e LGPD
+### 1.4. Proteção de Ações Backend (Recusa para line=pbx)
+- Qualquer mutação operacional via POST (`/admin/agentes/*`: tirar pausa, colocar pausa, remover fila, transferir, prioridade, deslogar) direcionada a um agente com `line == 'pbx'` (seja PBX-only ou NPX offline casado com PBX) é expressamente recusada com HTTP 400, impedindo mutações indevidas na NPX.
+
+### 1.5. Privacidade e LGPD
 - Se `podeGerenciar == False`:
   - `pbxNumber` é omitido/definido como `None` na serialização final de `/agentes/dados`, alinhado à proteção de `callSrc`, `callDst` e `callClient`.
 

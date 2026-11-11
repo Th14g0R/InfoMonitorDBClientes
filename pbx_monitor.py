@@ -4,10 +4,11 @@ Consulta a API REST do PBX em segundo plano de forma independente e paralela à 
 obtendo o registro SIP dos dispositivos (MicroSIP), ramais e chamadas ativas.
 
 Segurança e Privacidade:
-- Credenciais lidas exclusivamente de variáveis de ambiente.
-- Redirecionamentos HTTP são bloqueados para impedir vazamento de credenciais.
+- Base URL obrigatoriamente HTTPS, sem userinfo, query ou fragment.
+- Token e chave sanitizados e codificados com quote(safe='').
+- Redirecionamentos HTTP são estritamente bloqueados para impedir vazamento de credenciais.
 - Logs são genéricos e nunca registram URLs completas, tokens, chaves ou corpos.
-- Verificação TLS habilitada por padrão (desativável apenas com PBX_TLS_REJECT_UNAUTHORIZED='false').
+- Verificação TLS habilitada por padrão (desativável exclusivamente com PBX_TLS_REJECT_UNAUTHORIZED='false').
 - Na exibição pública (/agentes/dados), números de telefone são omitidos para usuários sem permissão.
 """
 import json
@@ -17,7 +18,7 @@ import re
 import ssl
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
@@ -28,6 +29,9 @@ FUSO = ZoneInfo('America/Fortaleza')
 INTERVALO_PBX = 3.0
 TIMEOUT_PADRAO = 2.5
 VALIDADE_PBX = 15.0
+
+FILA_PBX_SEM_FILA = 'PBX_Sem_Fila'
+NOME_PBX_SEM_FILA = 'PBX (sem fila)'
 
 # Mapeamento para filas oficiais conhecidas pelo sistema
 TRADUCAO_FILAS = {
@@ -47,12 +51,37 @@ TRADUCAO_FILAS = {
 }
 
 
-def traduzir_departamento(departamento):
-    """Traduz departamento do mapa para fila InfoBrasil_* oficial ou '' (grupo PBX sem fila)."""
-    if not departamento:
+def validar_pbx_base_url(url_raw):
+    """Valida URL base do PBX: obrigatoriamente HTTPS, sem userinfo, query ou fragment."""
+    if not url_raw:
         return ''
+    url_limpa = str(url_raw).strip()
+    try:
+        parsed = urlparse.urlsplit(url_limpa)
+    except Exception:
+        return ''
+    
+    if parsed.scheme.lower() != 'https':
+        LOGGER.warning('[PBX] PBX_BASE_URL deve utilizar obrigatoriamente HTTPS.')
+        return ''
+    if not parsed.hostname or parsed.username or parsed.password:
+        LOGGER.warning('[PBX] PBX_BASE_URL inválida (userinfo não permitido).')
+        return ''
+    if parsed.query or parsed.fragment:
+        LOGGER.warning('[PBX] PBX_BASE_URL inválida (query ou fragment não permitidos).')
+        return ''
+    
+    caminho = parsed.path.rstrip('/')
+    porta = f":{parsed.port}" if parsed.port and parsed.port != 443 else ""
+    return f"https://{parsed.hostname}{porta}{caminho}"
+
+
+def traduzir_departamento(departamento):
+    """Traduz departamento do mapa para fila InfoBrasil_* oficial ou FILA_PBX_SEM_FILA."""
+    if not departamento:
+        return FILA_PBX_SEM_FILA
     dept_limpo = str(departamento).strip().lower()
-    return TRADUCAO_FILAS.get(dept_limpo, '')
+    return TRADUCAO_FILAS.get(dept_limpo, FILA_PBX_SEM_FILA)
 
 
 class BlockRedirectHandler(urlrequest.HTTPRedirectHandler):
@@ -64,7 +93,7 @@ class BlockRedirectHandler(urlrequest.HTTPRedirectHandler):
 
 class ClientePbx:
     """Cliente HTTP REST para os endpoints da API PBX."""
-    def __init__(self, base_url=None, token=None, key=None, tls_reject_unauthorized=True, timeout=TIMEOUT_PADRAO):
+    def __init__(self, base_url=None, token=None, key=None, tls_reject_unauthorized=None, timeout=TIMEOUT_PADRAO):
         if base_url is None:
             base_url = os.environ.get('PBX_BASE_URL', '')
         if token is None:
@@ -72,15 +101,17 @@ class ClientePbx:
         if key is None:
             key = os.environ.get('PBX_API_KEY', '')
 
-        self.base_url = str(base_url or '').strip().rstrip('/')
+        self.base_url = validar_pbx_base_url(base_url)
         self.token = str(token or '').strip()
         self.key = str(key or '').strip()
         
-        env_tls = os.environ.get('PBX_TLS_REJECT_UNAUTHORIZED', '').strip().lower()
-        if env_tls == 'false':
-            self.tls_reject_unauthorized = False
-        else:
+        # P9: Parâmetro explícito vence a variável de ambiente.
+        # Variável de ambiente só desativa se for o valor exato 'false' (case-insensitive).
+        if tls_reject_unauthorized is not None:
             self.tls_reject_unauthorized = bool(tls_reject_unauthorized)
+        else:
+            env_tls = os.environ.get('PBX_TLS_REJECT_UNAUTHORIZED', '').strip().lower()
+            self.tls_reject_unauthorized = (env_tls != 'false')
 
         self.timeout = float(timeout)
         self._opener = None
@@ -91,15 +122,11 @@ class ClientePbx:
 
     def _obter_opener(self):
         if self._opener is None:
+            ctx = ssl.create_default_context()
             if not self.tls_reject_unauthorized:
-                ctx = ssl.create_default_context()
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
-                https_handler = urlrequest.HTTPSHandler(context=ctx)
-            else:
-                ctx = ssl.create_default_context()
-                https_handler = urlrequest.HTTPSHandler(context=ctx)
-            
+            https_handler = urlrequest.HTTPSHandler(context=ctx)
             self._opener = urlrequest.build_opener(BlockRedirectHandler(), https_handler)
         return self._opener
 
@@ -108,7 +135,9 @@ class ClientePbx:
         if not self.configurado:
             raise RuntimeError('Cliente PBX não configurado.')
 
-        url_completa = f"{self.base_url}/api/{endpoint}/{self.token}/{self.key}"
+        token_quoted = urlparse.quote(self.token, safe='')
+        key_quoted = urlparse.quote(self.key, safe='')
+        url_completa = f"{self.base_url}/api/{endpoint}/{token_quoted}/{key_quoted}"
         req = urlrequest.Request(
             url_completa,
             headers={
@@ -142,17 +171,23 @@ class ClientePbx:
     def listar_dispositivos(self):
         """Consulta mapeamento de dispositivos (/api/listDevices)."""
         res = self._requisicao('listDevices', 'listDevices')
-        return res if isinstance(res, list) else []
+        if not isinstance(res, list):
+            raise RuntimeError('Central PBX retornou dados inválidos para listDevices (não é lista)')
+        return res
 
     def listar_dispositivos_registrados(self):
         """Consulta status SIP dos dispositivos (/api/listDevicesRegistered)."""
         res = self._requisicao('listDevicesRegistered', 'listDevicesRegistered')
-        return res if isinstance(res, list) else []
+        if not isinstance(res, list):
+            raise RuntimeError('Central PBX retornou dados inválidos para listDevicesRegistered (não é lista)')
+        return res
 
     def listar_chamadas_online(self):
         """Consulta chamadas em andamento (/api/onlineCalls)."""
         res = self._requisicao('onlineCalls', 'onlineCalls')
-        return res if isinstance(res, list) else []
+        if not isinstance(res, list):
+            raise RuntimeError('Central PBX retornou dados inválidos para onlineCalls (não é lista)')
+        return res
 
 
 def carregar_mapa_analistas(caminho=None):
@@ -171,7 +206,6 @@ def carregar_mapa_analistas(caminho=None):
         with open(caminho, 'r', encoding='utf-8') as f:
             conteudo = json.load(f)
         if isinstance(conteudo, dict):
-            # Sanitiza para garantir {nome: {"ramal": str, "departamento": str}}
             limpo = {}
             for k, v in conteudo.items():
                 if isinstance(v, dict) and v.get('ramal'):
@@ -198,34 +232,39 @@ def casar_analista(nome_agente, codigo_agente=None, extensao_agente=None, mapa_a
     nome_alvo = str(nome_agente or '').strip()
     nome_lower = nome_alvo.lower()
 
+    ramal_por_nome = None
+    dept_por_nome = None
+
     # 1. Correspondência exata por nome
     if nome_alvo in mapa_analistas:
         item = mapa_analistas[nome_alvo]
-        return item['ramal'], item.get('departamento', '')
+        ramal_por_nome, dept_por_nome = item['ramal'], item.get('departamento', '')
+    else:
+        # Correspondência insensível a maiúsculas/minúsculas
+        matches_exatos = [
+            (k, v) for k, v in mapa_analistas.items() if k.lower() == nome_lower
+        ]
+        if len(matches_exatos) == 1:
+            item = matches_exatos[0][1]
+            ramal_por_nome, dept_por_nome = item['ramal'], item.get('departamento', '')
+        elif len(matches_exatos) > 1:
+            return None, None
+        else:
+            # Correspondência parcial bidirecional (substring)
+            matches_parciais = [
+                (k, v) for k, v in mapa_analistas.items()
+                if (k.lower() in nome_lower or nome_lower in k.lower()) and len(nome_lower) >= 3
+            ]
+            if len(matches_parciais) == 1:
+                item = matches_parciais[0][1]
+                ramal_por_nome, dept_por_nome = item['ramal'], item.get('departamento', '')
+            elif len(matches_parciais) > 1:
+                # Colisão de nomes parciais
+                return None, None
 
-    # 2. Correspondência insensível a maiúsculas/minúsculas exata
-    matches_exatos = [
-        (k, v) for k, v in mapa_analistas.items() if k.lower() == nome_lower
-    ]
-    if len(matches_exatos) == 1:
-        item = matches_exatos[0][1]
-        return item['ramal'], item.get('departamento', '')
-
-    # 3. Correspondência parcial bidirecional (substring)
-    matches_parciais = [
-        (k, v) for k, v in mapa_analistas.items()
-        if (k.lower() in nome_lower or nome_lower in k.lower()) and len(nome_lower) >= 3
-    ]
-    if len(matches_parciais) == 1:
-        item = matches_parciais[0][1]
-        return item['ramal'], item.get('departamento', '')
-    elif len(matches_parciais) > 1:
-        # Colisão ambígua: múltiplos analistas combinam com o nome parcial!
-        # Não escolhe arbitrariamente.
-        LOGGER.debug('[PBX] Colisão ambígua de nome parcial para analista "%s"', nome_alvo)
-        return None, None
-
-    # 4. Correspondência pelos 4 dígitos finais do código ou extensão
+    # Correspondência por 4 dígitos finais do código/extensão
+    ramal_por_sufixo = None
+    dept_por_sufixo = None
     for valor_id in (extensao_agente, codigo_agente):
         if not valor_id:
             continue
@@ -237,12 +276,41 @@ def casar_analista(nome_agente, codigo_agente=None, extensao_agente=None, mapa_a
             ]
             if len(matches_ramal) == 1:
                 item = matches_ramal[0][1]
-                return item['ramal'], item.get('departamento', '')
+                ramal_por_sufixo, dept_por_sufixo = item['ramal'], item.get('departamento', '')
+                break
             elif len(matches_ramal) > 1:
-                # Colisão de ramal ambígua!
+                # Colisão de sufixo no mapa
                 return None, None
 
-    return None, None
+    # Verificação de consistência: se ambos casaram e divergiram, conflito!
+    if ramal_por_nome and ramal_por_sufixo and ramal_por_nome != ramal_por_sufixo:
+        LOGGER.debug('[PBX] Conflito entre casamento de nome (%s) e sufixo (%s) para analista "%s"',
+                     ramal_por_nome, ramal_por_sufixo, nome_alvo)
+        return None, None
+
+    ramal_final = ramal_por_nome or ramal_por_sufixo
+    dept_final = dept_por_nome if ramal_por_nome else dept_por_sufixo
+    return (ramal_final, dept_final) if ramal_final else (None, None)
+
+
+def eh_identificador_analista(identificador, ramal, username=None):
+    """Verifica se um identificador pertence ao próprio analista (ramal, username ou variação)."""
+    if not identificador:
+        return False
+    ident = str(identificador).strip().lower()
+    ramal_s = str(ramal or '').strip().lower()
+    user_s = str(username or '').strip().lower()
+
+    if ramal_s and (ident == ramal_s or ident == f"85{ramal_s}" or ident.endswith(ramal_s)):
+        return True
+    if user_s:
+        if ident == user_s or ident == user_s.split('.')[0]:
+            return True
+        partes = user_s.split('.')
+        nome_parte = partes[1] if len(partes) > 1 else user_s
+        if len(nome_parte) > 2 and nome_parte in ident:
+            return True
+    return False
 
 
 def processar_snapshot_pbx(dispositivos_lista, registrados_lista, chamadas_lista, mapa_analistas=None, agora=None):
@@ -251,41 +319,47 @@ def processar_snapshot_pbx(dispositivos_lista, registrados_lista, chamadas_lista
 
     # 1. Mapa de username -> ramal a partir de listDevices
     username_to_ramal = {}
+    ramal_to_username = {}
     for dev in dispositivos_lista:
         u = dev.get('username')
         linha = dev.get('linha_ip')
         if u and linha:
-            username_to_ramal[str(u).strip()] = str(linha).strip()
+            u_str = str(u).strip()
+            l_str = str(linha).strip()
+            username_to_ramal[u_str] = l_str
+            ramal_to_username[l_str] = u_str
 
-    # 2. Mapa de chamadas ativas indexado por ramal e username
-    #    Uma chamada tem { source, destination, status_text, starttime, callerid }
+    # 2. Mapa de chamadas ativas indexado por identificadores
     active_calls = {}
     for call in chamadas_lista:
         src = str(call.get('source') or '').strip()
         dst = str(call.get('destination') or '').strip()
         if src:
-            active_calls[src] = call
-        if dst:
-            active_calls[dst] = call
+            active_calls.setdefault(src, []).append(call)
+        if dst and dst != src:
+            active_calls.setdefault(dst, []).append(call)
 
     # 3. Consolidação por ramal
     consolidado = {}
-    ramais_vistos = set()
 
     for dev in registrados_lista:
         username = str(dev.get('device_username') or '').strip()
         ramal = username_to_ramal.get(username)
         if not ramal:
-            # Fallback regex para extrair 4 dígitos (ex: "852008.Thiago" -> "2008")
             match = re.search(r'85(\d{4})', username)
             if match:
                 ramal = match.group(1)
         if not ramal:
             continue
 
-        ramais_vistos.add(ramal)
+        if ramal not in ramal_to_username and username:
+            ramal_to_username[ramal] = username
+
         is_registered = dev.get('device_registered') is True
-        call_info = active_calls.get(ramal) or active_calls.get(username)
+        
+        # Procura chamadas associadas ao ramal ou ao username
+        calls_para_ramal = (active_calls.get(ramal) or []) + (active_calls.get(username) or [])
+        call_info = calls_para_ramal[0] if calls_para_ramal else None
 
         if not is_registered:
             consolidado[ramal] = {
@@ -300,26 +374,34 @@ def processar_snapshot_pbx(dispositivos_lista, registrados_lista, chamadas_lista
             caller_id = str(call_info.get('callerid') or call_info.get('cli') or call_info.get('from') or '').strip()
             status_text = str(call_info.get('status_text') or '').upper()
 
-            # Status Busy vs Ringing
+            # Status Ringing derivado apenas se explicitamente conhecido
             status_pbx = 'Ringing' if ('RING' in status_text) else 'Busy'
 
-            # Direção e número
-            # Outbound: o analista ligou (src == ramal)
-            # Inbound: o analista recebeu (dst == ramal)
-            if src == ramal and dst != ramal:
+            src_analista = eh_identificador_analista(src, ramal, username)
+            dst_analista = eh_identificador_analista(dst, ramal, username)
+
+            # P1: Direção e número com equivalência de identificadores
+            if src_analista and not dst_analista:
                 direction = 'outbound'
                 number = dst
-            elif dst == ramal and src != ramal:
+            elif not src_analista and dst_analista:
                 direction = 'inbound'
                 number = src or caller_id
-            elif src == ramal and dst == ramal:
+            elif src_analista and dst_analista:
                 direction = 'inbound'
-                number = 'Ligação Ativa'
+                if caller_id and not eh_identificador_analista(caller_id, ramal, username):
+                    number = caller_id
+                else:
+                    number = 'Ligação Ativa'
             else:
                 direction = 'outbound' if dst else 'inbound'
                 number = dst or src or caller_id
 
-            # Tratamento de duração
+            # Guarda final: nunca exibir identificador do próprio analista como número
+            if eh_identificador_analista(number, ramal, username) or not number:
+                number = 'Ligação Ativa'
+
+            # Duração limitada entre 0 e 86400s (24h)
             seconds = 0
             starttime_raw = call_info.get('starttime')
             if starttime_raw:
@@ -328,7 +410,7 @@ def processar_snapshot_pbx(dispositivos_lista, registrados_lista, chamadas_lista
                     if dt_call.tzinfo is None:
                         dt_call = dt_call.replace(tzinfo=FUSO)
                     diff = (agora - dt_call).total_seconds()
-                    seconds = max(0, int(diff))
+                    seconds = max(0, min(86400, int(diff)))
                 except Exception:
                     seconds = 0
 
@@ -345,18 +427,6 @@ def processar_snapshot_pbx(dispositivos_lista, registrados_lista, chamadas_lista
                 'direction': None,
                 'seconds': 0,
             }
-
-    # Também adiciona ramais cadastrados no mapa mas ausentes na resposta de dispositivos
-    if mapa_analistas:
-        for info in mapa_analistas.values():
-            r = info.get('ramal')
-            if r and r not in consolidado:
-                consolidado[r] = {
-                    'status': 'Offline',
-                    'number': None,
-                    'direction': None,
-                    'seconds': 0,
-                }
 
     return consolidado
 
@@ -455,18 +525,35 @@ class ColetorPbx:
             }
 
     def enriquecer_agentes(self, agentes_npx):
-        """Aplica os campos pbx* e line em cada agente da lista NPX com precedência estrita."""
+        """Aplica os campos pbx* e line em cada agente da lista NPX com unicidade estrita."""
         with self._trava:
             snapshot = dict(self.snapshot)
 
+        # P6: Pré-cálculo de casamento por código único para detectar colisões
+        # Se dois códigos NPX distintos casarem com o mesmo ramal -> nenhum recebe!
+        candidatos_por_codigo = {}
+        codigos_por_ramal = {}
         for a in agentes_npx:
-            ramal, _ = casar_analista(
-                a.get('name'),
-                codigo_agente=a.get('code'),
-                extensao_agente=a.get('extension'),
-                mapa_analistas=self.mapa_analistas,
-            )
-            
+            code = str(a.get('code'))
+            if code not in candidatos_por_codigo:
+                r, _ = casar_analista(
+                    a.get('name'),
+                    codigo_agente=code,
+                    extensao_agente=a.get('extension'),
+                    mapa_analistas=self.mapa_analistas,
+                )
+                candidatos_por_codigo[code] = r
+                if r:
+                    codigos_por_ramal.setdefault(r, set()).add(code)
+
+        ramais_ambiguos = {r for r, codes in codigos_por_ramal.items() if len(codes) > 1}
+
+        for a in agentes_npx:
+            code = str(a.get('code'))
+            ramal = candidatos_por_codigo.get(code)
+            if ramal in ramais_ambiguos:
+                ramal = None
+
             pbx_info = snapshot.get(ramal) if ramal else None
             
             if pbx_info:
@@ -487,7 +574,7 @@ class ColetorPbx:
             a['pbxSeconds'] = pbx_seconds
 
             # Precedência estrita:
-            # 1. NPX ativa (status != 0) ou em pausa (paused == True) -> 'npx'
+            # 1. NPX em pausa ou com status != 0 (status None não é ativo!)
             # 2. PBX registrada (Free, Busy, Ringing) -> 'pbx'
             # 3. Senão -> 'off'
             em_pausa = bool(a.get('paused'))
@@ -504,7 +591,7 @@ class ColetorPbx:
         return agentes_npx
 
     def obter_agentes_pbx_only(self, codigos_npx_existentes, ramais_npx_casados=None):
-        """Gera cards para analistas do mapa PBX que não possuem sessão na NPX."""
+        """Gera cards para analistas do mapa PBX que não possuem sessão na NPX e estão REGISTRADOS."""
         if not self.mapa_analistas:
             return []
 
@@ -512,7 +599,7 @@ class ColetorPbx:
             snapshot = dict(self.snapshot)
 
         ramais_npx_casados = ramais_npx_casados or set()
-        codigos_set = set(codigos_npx_existentes)
+        codigos_set = set(str(c) for c in codigos_npx_existentes)
         cards_pbx = []
 
         for nome, info in self.mapa_analistas.items():
@@ -520,19 +607,21 @@ class ColetorPbx:
             if not ramal or ramal in ramais_npx_casados:
                 continue
 
-            # Código sintético seguro para o agente PBX-only
             codigo_pbx = f"pbx-{ramal}"
             if codigo_pbx in codigos_set:
                 continue
 
-            dept_traduzido = traduzir_departamento(info.get('departamento'))
             pbx_info = snapshot.get(ramal, {})
-            pbx_status = pbx_info.get('status') or 'Offline'
+            pbx_status = pbx_info.get('status')
+
+            # P5: PBX-only SÓ ADICIONA SE REGISTRADO (não inundar painel com todo mapa offline)
+            if pbx_status not in ('Free', 'Busy', 'Ringing'):
+                continue
+
+            dept_traduzido = traduzir_departamento(info.get('departamento'))
             pbx_number = pbx_info.get('number')
             pbx_direction = pbx_info.get('direction')
             pbx_seconds = pbx_info.get('seconds') or 0
-
-            line = 'pbx' if pbx_status in ('Free', 'Busy', 'Ringing') else 'off'
 
             cards_pbx.append({
                 'code': codigo_pbx,
@@ -551,7 +640,7 @@ class ColetorPbx:
                 'callDst': None,
                 'callClient': None,
                 'erro': None,
-                'line': line,
+                'line': 'pbx',
                 'pbxExtension': ramal,
                 'pbxStatus': pbx_status,
                 'pbxNumber': pbx_number,

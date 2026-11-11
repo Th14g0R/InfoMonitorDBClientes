@@ -1235,8 +1235,8 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
         carol = next(a for a in dados['agentes'] if a['name'] == 'Carol')
         self.assertEqual(carol['pbxNumber'], '85988887777')
 
-    def test_resiliencia_e_tolerancia_a_falha_do_pbx(self):
-        # Central PBX com erro / indisponível
+    def test_resiliencia_e_tolerancia_a_falha_do_pbx_p3(self):
+        # P3: Central PBX com erro / desatualizada: NÃO usa snapshot velho nem adiciona PBX-only
         self.coletor_pbx.obter_status_conexao.return_value = {
             'configured': True, 'available': False, 'error': 'Central PBX indisponível'
         }
@@ -1245,8 +1245,59 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
         dados = resp.get_json()
         self.assertFalse(dados['pbxConnection']['available'])
         self.assertEqual(dados['pbxConnection']['error'], 'Central PBX indisponível')
-        # Agentes NPX continuam respondendo sem qualquer interrupção
-        self.assertEqual(len(dados['agentes']), 2)
+        # Apenas Thiago (da NPX) está presente, Carol (PBX-only) NÃO entra
+        self.assertEqual(len(dados['agentes']), 1)
+        thiago = dados['agentes'][0]
+        self.assertEqual(thiago['name'], 'Thiago')
+        self.assertIsNone(thiago['pbxExtension'])
+        self.assertIsNone(thiago['pbxStatus'])
+
+    def test_p4_quando_pbx_nao_configurado(self):
+        self.coletor_pbx.cliente.configurado = False
+        resp = self.http.get('/agentes/dados')
+        self.assertEqual(resp.status_code, 200)
+        dados = resp.get_json()
+        self.assertFalse(dados['pbxConnection']['configured'])
+        self.assertFalse(dados['pbxConnection']['available'])
+        self.assertEqual(len(dados['agentes']), 1)
+        self.assertIsNone(dados['agentes'][0]['pbxExtension'])
+
+    def test_validar_fila_rejeita_fila_sintetica_pbx_sem_fila(self):
+        with self.assertRaises(ValueError) as ctx:
+            agentes_npx._validar_fila('PBX_Sem_Fila', self.coletor_npx)
+        self.assertIn('Fila inválida', str(ctx.exception))
+
+    def test_recusa_de_acoes_backend_para_line_pbx(self):
+        self.permitido = True
+        with self.http.session_transaction() as sess:
+            sess['user_id'] = 1
+            sess['user_nome'] = 'Admin'
+            sess['_csrf_token'] = 'token_csrf_abc'
+
+        headers = {'X-CSRF-Token': 'token_csrf_abc'}
+
+        # 1. Agente PBX-only (código pbx-2022): recusa em todas as ações
+        r_pausa = self.http.post('/admin/agentes/pbx-2022/colocar-pausa', headers=headers)
+        self.assertEqual(r_pausa.status_code, 400)
+        self.assertIn('indisponível para agentes operando exclusivamente via PBX', r_pausa.get_json()['mensagem'])
+
+        r_deslogar = self.http.post('/admin/agentes/pbx-2022/deslogar', headers=headers)
+        self.assertEqual(r_deslogar.status_code, 400)
+
+        r_transf = self.http.post('/admin/agentes/transferir', json={'code': 'pbx-2022', 'queue': 'InfoBrasil_Suporte'}, headers=headers)
+        self.assertEqual(r_transf.status_code, 400)
+
+        # 2. Tentativa de transferir agente NPX normal para fila sintética PBX_Sem_Fila -> recusa
+        r_transf_sint = self.http.post('/admin/agentes/transferir', json={'code': '4422008', 'queue': 'PBX_Sem_Fila'}, headers=headers)
+        self.assertEqual(r_transf_sint.status_code, 400)
+
+        # 3. Agente NPX que está offline na NPX (status=0, paused=False) mas ativo no PBX (line='pbx')
+        self.coletor_npx.retrato = [
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 0, 'paused': False}
+        ]
+        r_pausa_npx_offline = self.http.post('/admin/agentes/4422008/colocar-pausa', headers=headers)
+        self.assertEqual(r_pausa_npx_offline.status_code, 400)
+        self.assertIn('indisponível para agentes operando via PBX ou offline na NPX', r_pausa_npx_offline.get_json()['mensagem'])
 
 
 if __name__ == '__main__':

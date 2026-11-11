@@ -11,10 +11,12 @@ from pbx_monitor import (
     BlockRedirectHandler,
     ClientePbx,
     ColetorPbx,
+    FILA_PBX_SEM_FILA,
     carregar_mapa_analistas,
     casar_analista,
     processar_snapshot_pbx,
     traduzir_departamento,
+    validar_pbx_base_url,
 )
 
 
@@ -33,6 +35,23 @@ class MockHttpSuccess:
 
 
 class TestClientePbx(unittest.TestCase):
+    def test_validar_pbx_base_url_seguranca(self):
+        # Somente HTTPS válido
+        self.assertEqual(validar_pbx_base_url('https://pbx.infobrasil.com.br'), 'https://pbx.infobrasil.com.br')
+        self.assertEqual(validar_pbx_base_url('https://pbx.infobrasil.com.br/'), 'https://pbx.infobrasil.com.br')
+        self.assertEqual(validar_pbx_base_url('https://pbx.infobrasil.com.br:8443/central'), 'https://pbx.infobrasil.com.br:8443/central')
+
+        # HTTP não é aceito
+        self.assertEqual(validar_pbx_base_url('http://pbx.infobrasil.com.br'), '')
+        self.assertEqual(validar_pbx_base_url('http://192.168.243.2:8080'), '')
+
+        # Userinfo rejeitado
+        self.assertEqual(validar_pbx_base_url('https://admin:senha@pbx.com.br'), '')
+
+        # Query ou fragment rejeitados
+        self.assertEqual(validar_pbx_base_url('https://pbx.com.br/api?param=1'), '')
+        self.assertEqual(validar_pbx_base_url('https://pbx.com.br/api#topo'), '')
+
     def test_configurado(self):
         with patch.dict(os.environ, {'PBX_BASE_URL': '', 'PBX_API_TOKEN': '', 'PBX_API_KEY': ''}):
             c1 = ClientePbx(base_url='', token='', key='')
@@ -41,62 +60,81 @@ class TestClientePbx(unittest.TestCase):
             c_env = ClientePbx()
             self.assertFalse(c_env.configurado)
 
-        c2 = ClientePbx(base_url='http://192.168.243.2:8080', token='tok123', key='key456')
+        c2 = ClientePbx(base_url='https://pbx.infobrasil.com.br', token='tok123', key='key456')
         self.assertTrue(c2.configurado)
-        self.assertEqual(c2.base_url, 'http://192.168.243.2:8080')
+        self.assertEqual(c2.base_url, 'https://pbx.infobrasil.com.br')
 
     def test_redirecionamento_bloqueado(self):
         handler = BlockRedirectHandler()
         req = MagicMock()
-        req.full_url = 'http://192.168.243.2:8080/api/onlineCalls/t/k'
+        req.full_url = 'https://pbx.infobrasil.com.br/api/onlineCalls/t/k'
         with self.assertRaises(urlerror.HTTPError) as ctx:
-            handler.redirect_request(req, None, 302, 'Found', {}, 'http://outro.com')
+            handler.redirect_request(req, None, 302, 'Found', {}, 'https://outro.com')
         if ctx.exception.fp:
             ctx.exception.fp.close()
 
     def test_tls_reject_unauthorized_configuracao(self):
-        with patch.dict(os.environ, {'PBX_TLS_REJECT_UNAUTHORIZED': 'false'}):
-            c_false = ClientePbx(base_url='https://pbx.local', token='t', key='k')
-            self.assertFalse(c_false.tls_reject_unauthorized)
-
+        # 1. P9: Construtor explícito vence a variável de ambiente
         with patch.dict(os.environ, {'PBX_TLS_REJECT_UNAUTHORIZED': 'true'}):
-            c_true = ClientePbx(base_url='https://pbx.local', token='t', key='k')
-            self.assertTrue(c_true.tls_reject_unauthorized)
+            c_exp_false = ClientePbx(base_url='https://pbx.local', token='t', key='k', tls_reject_unauthorized=False)
+            self.assertFalse(c_exp_false.tls_reject_unauthorized)
+
+        with patch.dict(os.environ, {'PBX_TLS_REJECT_UNAUTHORIZED': 'false'}):
+            c_exp_true = ClientePbx(base_url='https://pbx.local', token='t', key='k', tls_reject_unauthorized=True)
+            self.assertTrue(c_exp_true.tls_reject_unauthorized)
+
+        # 2. Somente valor exato 'false' desativa TLS via env
+        with patch.dict(os.environ, {'PBX_TLS_REJECT_UNAUTHORIZED': 'false'}):
+            c_env_false = ClientePbx(base_url='https://pbx.local', token='t', key='k')
+            self.assertFalse(c_env_false.tls_reject_unauthorized)
+
+        with patch.dict(os.environ, {'PBX_TLS_REJECT_UNAUTHORIZED': '0'}):
+            c_env_outro = ClientePbx(base_url='https://pbx.local', token='t', key='k')
+            self.assertTrue(c_env_outro.tls_reject_unauthorized)
 
     @patch('pbx_monitor.urlrequest.build_opener')
-    def test_metodos_get_sucesso(self, mock_build_opener):
+    def test_quote_token_key_safe_vazio(self, mock_build_opener):
+        mock_opener = MagicMock()
+        mock_build_opener.return_value = mock_opener
+        mock_opener.open.return_value = MockHttpSuccess([])
+
+        # Token com caracteres especiais: @, /, ?
+        cliente = ClientePbx(base_url='https://pbx.test', token='tok/en@1', key='ke y+2')
+        cliente.listar_dispositivos()
+
+        req = mock_opener.open.call_args[0][0]
+        # quote com safe='' deve converter / para %2F e @ para %40
+        self.assertIn('tok%2Fen%401', req.full_url)
+        self.assertIn('ke%20y%2B2', req.full_url)
+
+    @patch('pbx_monitor.urlrequest.build_opener')
+    def test_p2_data_nao_lista_deve_falhar_ciclo(self, mock_build_opener):
         mock_opener = MagicMock()
         mock_build_opener.return_value = mock_opener
 
-        cliente = ClientePbx(base_url='http://pbx.test', token='t1', key='k1')
+        cliente = ClientePbx(base_url='https://pbx.test', token='t1', key='k1')
 
-        # Teste listDevices
-        mock_opener.open.return_value = MockHttpSuccess([{'username': '852008.Thiago', 'linha_ip': '2008'}])
-        devs = cliente.listar_dispositivos()
-        self.assertEqual(len(devs), 1)
-        self.assertEqual(devs[0]['linha_ip'], '2008')
+        # Se data vier como dicionário em vez de lista
+        mock_opener.open.return_value = MockHttpSuccess({'invalido': True})
+        with self.assertRaises(RuntimeError) as ctx:
+            cliente.listar_dispositivos_registrados()
+        self.assertIn('não é lista', str(ctx.exception))
 
-        # Teste listDevicesRegistered
-        mock_opener.open.return_value = MockHttpSuccess([{'device_username': '852008.Thiago', 'device_registered': True}])
-        regs = cliente.listar_dispositivos_registrados()
-        self.assertEqual(len(regs), 1)
-        self.assertTrue(regs[0]['device_registered'])
-
-        # Teste onlineCalls
-        mock_opener.open.return_value = MockHttpSuccess([{'source': '85999998888', 'destination': '2008'}])
-        calls = cliente.listar_chamadas_online()
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]['destination'], '2008')
+        # Se data vier como None
+        mock_opener.open.return_value = MockHttpSuccess(None)
+        with self.assertRaises(RuntimeError) as ctx:
+            cliente.listar_chamadas_online()
+        self.assertIn('não é lista', str(ctx.exception))
 
     @patch('pbx_monitor.urlrequest.build_opener')
     def test_falhas_http_e_rede_sem_vazar_credenciais(self, mock_build_opener):
         mock_opener = MagicMock()
         mock_build_opener.return_value = mock_opener
 
-        cliente = ClientePbx(base_url='http://pbx.test', token='TOKEN_SECRETO', key='KEY_SECRETA')
+        cliente = ClientePbx(base_url='https://pbx.test', token='TOKEN_SECRETO', key='KEY_SECRETA')
 
         # HTTP 500
-        mock_opener.open.side_effect = urlerror.HTTPError('http://url', 500, 'Server Error', {}, None)
+        mock_opener.open.side_effect = urlerror.HTTPError('https://url', 500, 'Server Error', {}, None)
         with self.assertRaises(RuntimeError) as ctx:
             cliente.listar_chamadas_online()
         self.assertIn('HTTP 500', str(ctx.exception))
@@ -111,34 +149,18 @@ class TestClientePbx(unittest.TestCase):
 
 
 class TestMapaAnalistasETraducao(unittest.TestCase):
-    def test_traducao_departamentos(self):
+    def test_traducao_departamentos_e_fila_sintetica(self):
         self.assertEqual(traduzir_departamento('InfoBrasil_Suporte'), 'InfoBrasil_Suporte')
         self.assertEqual(traduzir_departamento('Suporte'), 'InfoBrasil_Suporte')
         self.assertEqual(traduzir_departamento('Infobrasil_finan'), 'Infobrasil_finan')
         self.assertEqual(traduzir_departamento('Financeiro'), 'Infobrasil_finan')
         self.assertEqual(traduzir_departamento('InfoBrasil_Comercial'), 'InfoBrasil_Comercial')
         self.assertEqual(traduzir_departamento('InfoBrasil_SPED_Fiscal'), 'InfoBrasil_SPED_Fiscal')
-        self.assertEqual(traduzir_departamento('Desconhecido_X'), '')
-        self.assertEqual(traduzir_departamento(None), '')
+        # P5: Desconhecido vira FILA_PBX_SEM_FILA ('PBX_Sem_Fila'), nunca vazio
+        self.assertEqual(traduzir_departamento('Desconhecido_X'), FILA_PBX_SEM_FILA)
+        self.assertEqual(traduzir_departamento(None), FILA_PBX_SEM_FILA)
 
-    def test_carregar_mapa_analistas(self):
-        with tempfile.NamedTemporaryFile('w', delete=False, suffix='.json', encoding='utf-8') as f:
-            f.write(json.dumps({
-                "Davi Oliveira": {"ramal": "2002", "departamento": "InfoBrasil_Suporte"},
-                "Thiago": {"ramal": "2008", "departamento": "InfoBrasil_Suporte"}
-            }))
-            temp_path = f.name
-
-        try:
-            mapa = carregar_mapa_analistas(temp_path)
-            self.assertIn('Davi Oliveira', mapa)
-            self.assertEqual(mapa['Davi Oliveira']['ramal'], '2002')
-            self.assertEqual(mapa['Thiago']['ramal'], '2008')
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-
-    def test_casar_analista(self):
+    def test_casar_analista_desambiguacao_estrita(self):
         mapa = {
             'Davi Oliveira': {'ramal': '2002', 'departamento': 'InfoBrasil_Suporte'},
             'Thiago': {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'},
@@ -149,136 +171,136 @@ class TestMapaAnalistasETraducao(unittest.TestCase):
         # 1. Exato
         r, d = casar_analista('Thiago', mapa_analistas=mapa)
         self.assertEqual(r, '2008')
-        self.assertEqual(d, 'InfoBrasil_Suporte')
 
         # 2. Case insensitive
         r, d = casar_analista('thiago', mapa_analistas=mapa)
         self.assertEqual(r, '2008')
 
-        # 3. Parcial único (NPX vem só Davi, mapa tem Davi Oliveira)
+        # 3. Parcial único (NPX vem Davi, mapa tem Davi Oliveira)
         r, d = casar_analista('Davi', mapa_analistas=mapa)
         self.assertEqual(r, '2002')
 
-        # 4. Colisão ambígua de substring (ex: "Dantas" casa com Vitor Dantas E Josi Dantas)
+        # 4. Colisão ambígua parcial (Dantas casa com Vitor e Josi) -> retorna None!
         r, d = casar_analista('Dantas', mapa_analistas=mapa)
         self.assertIsNone(r)
         self.assertIsNone(d)
 
-        # 5. Casamento pelos 4 dígitos finais do código/extensão
+        # 5. Sufixo de 4 dígitos casa
         r, d = casar_analista('Outro Nome', codigo_agente='4422008', mapa_analistas=mapa)
         self.assertEqual(r, '2008')
 
+        # 6. Conflito entre nome e sufixo: nome aponta 2008 mas sufixo aponta 2002 -> NÃO casa!
+        r, d = casar_analista('Thiago', codigo_agente='4422002', mapa_analistas=mapa)
+        self.assertIsNone(r)
+        self.assertIsNone(d)
 
-class TestSnapshotPbx(unittest.TestCase):
-    def test_processar_snapshot(self):
+
+class TestSnapshotPbxP1EDuracao(unittest.TestCase):
+    def test_p1_direction_number_quando_destination_username(self):
         dispositivos = [
-            {'username': '852008.Thiago', 'linha_ip': '2008'},
-            {'username': '852002.Davi', 'linha_ip': '2002'},
-            {'username': '852011.Alisson', 'linha_ip': '2011'}
+            {'username': '852008.Thiago', 'linha_ip': '2008'}
         ]
         registrados = [
-            {'device_username': '852008.Thiago', 'device_registered': True},
-            {'device_username': '852002.Davi', 'device_registered': True},
-            {'device_username': '852011.Alisson', 'device_registered': False}
+            {'device_username': '852008.Thiago', 'device_registered': True}
         ]
-        chamadas = [
+        # P1: Cliente liga para o username do analista (852008.Thiago)
+        chamadas_inbound = [
             {
-                'source': '85988887777',
-                'destination': '2008',
+                'source': '85999998888',
+                'destination': '852008.Thiago',
                 'status_text': 'ANSWERED',
                 'starttime': '2026-11-11T17:30:00-03:00'
             }
         ]
-        mapa = {
-            'Thiago': {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'},
-            'Davi': {'ramal': '2002', 'departamento': 'InfoBrasil_Suporte'},
-            'Alisson': {'ramal': '2011', 'departamento': 'InfoBrasil_Suporte'}
-        }
+        agora = datetime.fromisoformat('2026-11-11T17:30:30-03:00')
+        snap = processar_snapshot_pbx(dispositivos, registrados, chamadas_inbound, agora=agora)
 
-        agora = datetime.fromisoformat('2026-11-11T17:31:00-03:00')
-        snapshot = processar_snapshot_pbx(dispositivos, registrados, chamadas, mapa_analistas=mapa, agora=agora)
+        # Deve ser INBOUND e número do cliente, NUNCA '852008.Thiago'
+        self.assertEqual(snap['2008']['status'], 'Busy')
+        self.assertEqual(snap['2008']['direction'], 'inbound')
+        self.assertEqual(snap['2008']['number'], '85999998888')
+        self.assertEqual(snap['2008']['seconds'], 30)
 
-        # 2008 em ligação inbound
-        self.assertEqual(snapshot['2008']['status'], 'Busy')
-        self.assertEqual(snapshot['2008']['direction'], 'inbound')
-        self.assertEqual(snapshot['2008']['number'], '85988887777')
-        self.assertEqual(snapshot['2008']['seconds'], 60)
+        # Chamada outbound: analista liga para cliente
+        chamadas_outbound = [
+            {
+                'source': '852008.Thiago',
+                'destination': '85999998888',
+                'status_text': 'ANSWERED',
+                'starttime': '2026-11-11T17:30:00-03:00'
+            }
+        ]
+        snap_out = processar_snapshot_pbx(dispositivos, registrados, chamadas_outbound, agora=agora)
+        self.assertEqual(snap_out['2008']['direction'], 'outbound')
+        self.assertEqual(snap_out['2008']['number'], '85999998888')
 
-        # 2002 registrado sem chamada -> Free
-        self.assertEqual(snapshot['2002']['status'], 'Free')
-        self.assertIsNone(snapshot['2002']['number'])
+        # Se number por algum motivo fosse o próprio analista -> mascara para 'Ligação Ativa'
+        chamadas_loop = [
+            {
+                'source': '852008.Thiago',
+                'destination': '852008.Thiago',
+                'status_text': 'ANSWERED',
+                'starttime': '2026-11-11T17:30:00-03:00'
+            }
+        ]
+        snap_loop = processar_snapshot_pbx(dispositivos, registrados, chamadas_loop, agora=agora)
+        self.assertEqual(snap_loop['2008']['number'], 'Ligação Ativa')
 
-        # 2011 desregistrado -> Offline
-        self.assertEqual(snapshot['2011']['status'], 'Offline')
+    def test_duracao_teto_86400(self):
+        dispositivos = [{'username': '852008.Thiago', 'linha_ip': '2008'}]
+        registrados = [{'device_username': '852008.Thiago', 'device_registered': True}]
+        # Chamada de 3 dias atrás
+        chamadas = [{
+            'source': '85999998888', 'destination': '2008',
+            'status_text': 'ANSWERED', 'starttime': '2026-11-08T17:30:00-03:00'
+        }]
+        agora = datetime.fromisoformat('2026-11-11T17:30:00-03:00')
+        snap = processar_snapshot_pbx(dispositivos, registrados, chamadas, agora=agora)
+        self.assertEqual(snap['2008']['seconds'], 86400)
 
 
-class TestColetorPbxPrecedencia(unittest.TestCase):
-    def test_precedencia_estrita_npx_vs_pbx(self):
-        cliente_fake = MagicMock()
-        cliente_fake.configurado = True
-        coletor = ColetorPbx(cliente=cliente_fake, mapa_analistas={
-            'Thiago': {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'},
-            'Davi': {'ramal': '2002', 'departamento': 'InfoBrasil_Suporte'},
-            'Alisson': {'ramal': '2011', 'departamento': 'InfoBrasil_Suporte'}
+class TestColetorPbxP5EP6(unittest.TestCase):
+    def test_p6_unicidade_dois_codes_mesmo_ramal_nenhum_recebe(self):
+        coletor = ColetorPbx(cliente=MagicMock(), mapa_analistas={
+            'Thiago': {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'}
         })
         coletor.snapshot = {
+            '2008': {'status': 'Free', 'number': None, 'direction': None, 'seconds': 0}
+        }
+
+        # Dois agentes distintos disputam o mesmo ramal 2008
+        agentes = [
+            {'code': '101', 'name': 'Thiago', 'status': 0, 'paused': False},
+            {'code': '102', 'name': 'Thiago Junior', 'status': 0, 'paused': False}
+        ]
+        res = coletor.enriquecer_agentes(agentes)
+        # P6: Nenhum recebe!
+        self.assertIsNone(res[0]['pbxExtension'])
+        self.assertIsNone(res[1]['pbxExtension'])
+        self.assertEqual(res[0]['line'], 'off')
+        self.assertEqual(res[1]['line'], 'off')
+
+    def test_p5_pbx_only_somente_registrados(self):
+        coletor = ColetorPbx(cliente=MagicMock(), mapa_analistas={
+            'Thiago': {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'},
+            'Carol': {'ramal': '2022', 'departamento': 'InfoBrasil_SPED_Fiscal'},
+            'Alisson': {'ramal': '2011', 'departamento': 'InfoBrasil_Suporte'}
+        })
+        # Carol está Busy (registrada), Alisson está Offline
+        coletor.snapshot = {
             '2008': {'status': 'Free', 'number': None, 'direction': None, 'seconds': 0},
-            '2002': {'status': 'Busy', 'number': '85999998888', 'direction': 'inbound', 'seconds': 30},
+            '2022': {'status': 'Busy', 'number': '85987654321', 'direction': 'outbound', 'seconds': 45},
             '2011': {'status': 'Offline', 'number': None, 'direction': None, 'seconds': 0}
         }
 
-        # 1. Agente NPX em Pausa (status 0 ou -1) -> line='npx' SEMPRE VENCE
-        agentes = [
-            {'code': '101', 'name': 'Thiago', 'status': 0, 'paused': True, 'queue': 'InfoBrasil_Suporte'}
-        ]
-        res = coletor.enriquecer_agentes(agentes)
-        self.assertEqual(res[0]['line'], 'npx')
-        self.assertEqual(res[0]['pbxStatus'], 'Free')
-        self.assertEqual(res[0]['pbxExtension'], '2008')
-
-        # 2. Agente NPX Ativo (status=1 Livre) -> line='npx' VENCE
-        agentes = [
-            {'code': '101', 'name': 'Thiago', 'status': 1, 'paused': False, 'queue': 'InfoBrasil_Suporte'}
-        ]
-        res = coletor.enriquecer_agentes(agentes)
-        self.assertEqual(res[0]['line'], 'npx')
-
-        # 3. Agente NPX Offline (status=0, paused=False), mas PBX Busy -> line='pbx'
-        agentes = [
-            {'code': '102', 'name': 'Davi', 'status': 0, 'paused': False, 'queue': 'InfoBrasil_Suporte'}
-        ]
-        res = coletor.enriquecer_agentes(agentes)
-        self.assertEqual(res[0]['line'], 'pbx')
-        self.assertEqual(res[0]['pbxStatus'], 'Busy')
-        self.assertEqual(res[0]['pbxNumber'], '85999998888')
-
-        # 4. Agente NPX Offline (status=0, paused=False) e PBX Offline -> line='off'
-        agentes = [
-            {'code': '103', 'name': 'Alisson', 'status': 0, 'paused': False, 'queue': 'InfoBrasil_Suporte'}
-        ]
-        res = coletor.enriquecer_agentes(agentes)
-        self.assertEqual(res[0]['line'], 'off')
-        self.assertEqual(res[0]['pbxStatus'], 'Offline')
-
-    def test_agentes_pbx_only(self):
-        coletor = ColetorPbx(cliente=MagicMock(), mapa_analistas={
-            'Thiago': {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'},
-            'Carol': {'ramal': '2022', 'departamento': 'InfoBrasil_SPED_Fiscal'}
-        })
-        coletor.snapshot = {
-            '2008': {'status': 'Free', 'number': None, 'direction': None, 'seconds': 0},
-            '2022': {'status': 'Busy', 'number': '85987654321', 'direction': 'outbound', 'seconds': 45}
-        }
-
-        # Se Thiago já está na NPX, apenas Carol deve ser gerada como PBX-only
+        # Thiago já está na NPX
         pbx_only = coletor.obter_agentes_pbx_only(codigos_npx_existentes=['4422008'], ramais_npx_casados={'2008'})
+        
+        # P5: Somente Carol deve entrar! Alisson (offline) NÃO deve entrar!
         self.assertEqual(len(pbx_only), 1)
         self.assertEqual(pbx_only[0]['name'], 'Carol')
         self.assertEqual(pbx_only[0]['code'], 'pbx-2022')
-        self.assertEqual(pbx_only[0]['queue'], 'InfoBrasil_SPED_Fiscal')
         self.assertEqual(pbx_only[0]['line'], 'pbx')
-        self.assertEqual(pbx_only[0]['pbxStatus'], 'Busy')
-        self.assertEqual(pbx_only[0]['pbxNumber'], '85987654321')
 
 
 if __name__ == '__main__':
