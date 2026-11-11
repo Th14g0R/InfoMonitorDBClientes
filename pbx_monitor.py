@@ -65,9 +65,16 @@ class BlockRedirectHandler(urlrequest.HTTPRedirectHandler):
 class ClientePbx:
     """Cliente HTTP REST para os endpoints da API PBX."""
     def __init__(self, base_url=None, token=None, key=None, tls_reject_unauthorized=True, timeout=TIMEOUT_PADRAO):
-        self.base_url = (base_url or os.environ.get('PBX_BASE_URL', '')).strip().rstrip('/')
-        self.token = (token or os.environ.get('PBX_API_TOKEN', '')).strip()
-        self.key = (key or os.environ.get('PBX_API_KEY', '')).strip()
+        if base_url is None:
+            base_url = os.environ.get('PBX_BASE_URL', '')
+        if token is None:
+            token = os.environ.get('PBX_API_TOKEN', '')
+        if key is None:
+            key = os.environ.get('PBX_API_KEY', '')
+
+        self.base_url = str(base_url or '').strip().rstrip('/')
+        self.token = str(token or '').strip()
+        self.key = str(key or '').strip()
         
         env_tls = os.environ.get('PBX_TLS_REJECT_UNAUTHORIZED', '').strip().lower()
         if env_tls == 'false':

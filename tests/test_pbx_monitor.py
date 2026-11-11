@@ -34,8 +34,12 @@ class MockHttpSuccess:
 
 class TestClientePbx(unittest.TestCase):
     def test_configurado(self):
-        c1 = ClientePbx(base_url='', token='', key='')
-        self.assertFalse(c1.configurado)
+        with patch.dict(os.environ, {'PBX_BASE_URL': '', 'PBX_API_TOKEN': '', 'PBX_API_KEY': ''}):
+            c1 = ClientePbx(base_url='', token='', key='')
+            self.assertFalse(c1.configurado)
+
+            c_env = ClientePbx()
+            self.assertFalse(c_env.configurado)
 
         c2 = ClientePbx(base_url='http://192.168.243.2:8080', token='tok123', key='key456')
         self.assertTrue(c2.configurado)
