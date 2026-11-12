@@ -39,10 +39,10 @@
     return a.paused ? ST['-1'] : (ST[String(a.status)] || [a.erro || 'Desconhecido', 'var(--off)', 5, 'l-off']);
   };
   const segs = a => a.line === 'pbx' ? (a.pbxSeconds || 0) : (a.paused ? (a.pauseMinutes != null ? a.pauseMinutes * 60 : (a.seconds || 0)) : (a.seconds || 0));
-  const ehLivre = a => a.line === 'pbx' ? (!a.paused && a.pbxStatus === 'Free') : (!a.paused && a.status === 1);
-  const ehCham = a => a.line === 'pbx' ? (a.pbxStatus === 'Ringing') : (!a.paused && a.status === 5);
   const ehLig = a => a.line === 'pbx' ? (a.pbxStatus === 'Busy') : (!a.paused && a.status === 2);
-  const ehPausa = a => !!a.paused;
+  const ehCham = a => a.line === 'pbx' ? (a.pbxStatus === 'Ringing') : (!a.paused && a.status === 5);
+  const ehPausa = a => !!a.paused && !ehLig(a) && !ehCham(a);
+  const ehLivre = a => a.line === 'pbx' ? (!a.paused && a.pbxStatus === 'Free') : (!a.paused && a.status === 1);
 
   function fmtSeg(t) {
     t = Math.round(t || 0); const h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), s = t % 60;
