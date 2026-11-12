@@ -39,10 +39,10 @@
     return a.paused ? ST['-1'] : (ST[String(a.status)] || [a.erro || 'Desconhecido', 'var(--off)', 5, 'l-off']);
   };
   const segs = a => a.line === 'pbx' ? (a.pbxSeconds || 0) : (a.paused ? (a.pauseMinutes != null ? a.pauseMinutes * 60 : (a.seconds || 0)) : (a.seconds || 0));
-  const ehLivre = a => a.line === 'pbx' ? (a.pbxStatus === 'Free') : (!a.paused && a.status === 1);
-  const ehCham = a => a.line === 'pbx' ? (a.pbxStatus === 'Ringing') : (!a.paused && a.status === 5);
   const ehLig = a => a.line === 'pbx' ? (a.pbxStatus === 'Busy') : (!a.paused && a.status === 2);
-  const ehPausa = a => (!a.line || a.line === 'npx') && !!a.paused;
+  const ehCham = a => a.line === 'pbx' ? (a.pbxStatus === 'Ringing') : (!a.paused && a.status === 5);
+  const ehPausa = a => !!a.paused && !ehLig(a) && !ehCham(a);
+  const ehLivre = a => a.line === 'pbx' ? (!a.paused && a.pbxStatus === 'Free') : (!a.paused && a.status === 1);
 
   function fmtSeg(t) {
     t = Math.round(t || 0); const h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), s = t % 60;
@@ -86,12 +86,26 @@
   function situacaoTexto(a) {
     if (a.line === 'pbx') {
       const dur = a.pbxSeconds ? ` (${fmtSeg(a.pbxSeconds)})` : '';
+      let res = '';
       if (a.pbxStatus === 'Busy' || a.pbxStatus === 'Ringing') {
         const num = a.pbxNumber ? fmtFone(a.pbxNumber) : (a.pbxStatus === 'Ringing' ? 'Chamando' : 'Em ligação');
-        return `${num}${dur}`;
+        res = `${num}${dur}`;
+      } else if (a.pbxStatus === 'Free') {
+        res = 'Livre';
+      } else {
+        res = a.pbxStatus || '';
       }
-      if (a.pbxStatus === 'Free') return 'Livre';
-      return a.pbxStatus || '';
+      if (a.paused) {
+        const tipo = a.pauseType || 'Pausa';
+        let pausaInfo = tipo;
+        if (maxValido(a.pauseMaxMinutes) && a.pauseMinutes != null && Number.isFinite(Number(a.pauseMinutes))) {
+          pausaInfo = `${tipo} · ${Math.round(a.pauseMinutes)}m de ${Math.round(a.pauseMaxMinutes)}m`;
+        } else if (a.pauseStart) {
+          pausaInfo = `${tipo} desde ${fmtHora(a.pauseStart)}`;
+        }
+        res = res ? `${res} · ⏸ ${pausaInfo}` : `⏸ ${pausaInfo}`;
+      }
+      return res;
     }
     if (a.paused) {
       const tipo = a.pauseType || 'Pausa';
@@ -105,17 +119,33 @@
   function situacaoHtml(a) {
     if (a.line === 'pbx') {
       const dur = a.pbxSeconds != null && a.pbxSeconds > 0 ? ` <span class="mut">(${fmtSeg(a.pbxSeconds)})</span>` : '';
+      let chamadaHtml = '';
       if (a.pbxStatus === 'Busy' || a.pbxStatus === 'Ringing') {
         const c = chamada(a);
         if (c && c.num) {
-          return `📞 <span class="mut">${c.dir}</span> <span class="fone">${esc(fmtFone(c.num))}</span>${dur}`;
+          chamadaHtml = `📞 <span class="mut">${c.dir}</span> <span class="fone">${esc(fmtFone(c.num))}</span>${dur}`;
+        } else {
+          chamadaHtml = `<span class="mut">${a.pbxStatus === 'Ringing' ? 'Chamando' : 'Em ligação'}</span>${dur}`;
         }
-        return `<span class="mut">${a.pbxStatus === 'Ringing' ? 'Chamando' : 'Em ligação'}</span>${dur}`;
+      } else if (a.pbxStatus === 'Free') {
+        chamadaHtml = '<span class="mut">Livre</span>';
+      } else {
+        chamadaHtml = '<span class="mut">—</span>';
       }
-      if (a.pbxStatus === 'Free') {
-        return '<span class="mut">Livre</span>';
+      if (a.paused) {
+        const tipo = esc(a.pauseType || 'Pausa');
+        let pausaTxt = tipo;
+        if (maxValido(a.pauseMaxMinutes) && a.pauseMinutes != null && Number.isFinite(Number(a.pauseMinutes))) {
+          pausaTxt = `${tipo} <span class="mut">· ${Math.round(a.pauseMinutes)}m de ${Math.round(a.pauseMaxMinutes)}m</span>`;
+        } else if (a.pauseStart) {
+          pausaTxt = `${tipo}${a.pauseStart ? ` <span class="mut">desde ${fmtHora(a.pauseStart)}</span>` : ''}`;
+        }
+        if (chamadaHtml && chamadaHtml !== '<span class="mut">—</span>') {
+          return `${chamadaHtml} <span class="mut" title="Em pausa na NPX">· ⏸ ${pausaTxt}</span>`;
+        }
+        return `⏸ ${pausaTxt}`;
       }
-      return '<span class="mut">—</span>';
+      return chamadaHtml;
     }
     if (a.paused) {
       const tipo = esc(a.pauseType || 'Pausa');
@@ -168,8 +198,8 @@
                    : (!String(a.code).startsWith('pbx-') ? '<span class="tag-linha tag-npx">NPX</span>' : '');
 
     const sub = a.line === 'pbx'
-      ? (a.pbxExtension ? 'ramal ' + esc(a.pbxExtension) : (a.extension ? 'ramal ' + esc(a.extension) : esc(a.code)))
-      : `${esc(a.code)}${a.extension && a.extension != a.code ? ' · ramal ' + esc(a.extension) : ''}`;
+      ? esc(a.pbxExtension || a.extension || a.code)
+      : `${esc(a.code)}${a.extension && a.extension != a.code ? ' · ' + esc(a.extension) : ''}`;
 
     const tempoTxt = a.line === 'pbx'
       ? (a.pbxSeconds == null ? '–' : fmtSeg(a.pbxSeconds))
@@ -312,9 +342,10 @@
     const tagLinha = ehPbx ? ' <span class="tag-linha tag-pbx">PBX</span>'
                            : (!String(a.code).startsWith('pbx-') ? ' <span class="tag-linha tag-npx">NPX</span>' : '');
 
-    const subRamal = ehPbx
-      ? `Código ${esc(a.code)}${a.pbxExtension ? ' · ramal ' + esc(a.pbxExtension) : (a.extension && a.extension != a.code ? ' · ramal ' + esc(a.extension) : '')} · fila <b>${esc(fila(a.queue).nome)}</b>`
-      : `Código ${esc(a.code)} · ramal ${esc(a.extension || a.code)} · fila <b>${esc(fila(a.queue).nome)}</b>`;
+    const extNum = ehPbx ? (a.pbxExtension || a.extension) : (a.extension || a.code);
+    const subRamal = String(a.code).startsWith('pbx-')
+      ? `${esc(extNum || a.code)} · fila <b>${esc(fila(a.queue).nome)}</b>`
+      : `Código ${esc(a.code)}${extNum && extNum != a.code ? ' · ' + esc(extNum) : ''} · fila <b>${esc(fila(a.queue).nome)}</b>`;
 
     let callTxt = '';
     if (ehPbx) {
@@ -332,17 +363,26 @@
       <span class="pill" style="--c:${st[1]}">${esc(st[0])}</span>${callTxt}`;
     $('aPausa').style.display = '';
 
+    const durPausa = a.pauseMinutes != null ? a.pauseMinutes * 60 : (a.seconds || 0);
     if (ehPbx) {
-      $('bTirar').style.display = 'none';
-      $('bPausar').style.display = '';
-      $('bPausar').disabled = true;
-      $('bPausar').title = 'Ações de pausa são exclusivas da integração NPX.';
-      $('dPausa').textContent = 'Agente em linha PBX (pausa não disponível)';
+      if (a.paused) {
+        $('bTirar').style.display = '';
+        $('bTirar').disabled = false;
+        $('bTirar').title = '';
+        $('bPausar').style.display = 'none';
+        $('dPausa').textContent = `${a.pauseType || 'Pausa'} há ${fmtSeg(durPausa)} (NPX)`;
+      } else {
+        $('bTirar').style.display = 'none';
+        $('bPausar').style.display = '';
+        $('bPausar').disabled = true;
+        $('bPausar').title = 'Ações de pausa são exclusivas da integração NPX.';
+        $('dPausa').textContent = 'Agente em linha PBX (pausa não disponível)';
+      }
     } else if (a.paused) {
       $('bTirar').style.display = '';
       $('bPausar').style.display = 'none';
       $('bTirar').title = '';
-      $('dPausa').textContent = `${a.pauseType || 'Pausa'} há ${fmtSeg(segs(a))}`;
+      $('dPausa').textContent = `${a.pauseType || 'Pausa'} há ${fmtSeg(durPausa)}`;
     } else {
       $('bTirar').style.display = 'none';
       $('bPausar').style.display = '';
@@ -361,7 +401,23 @@
     }
 
     // Recalcula elegibilidade das ações a cada atualização
-    if (ehPbx) {
+    if (a.queue === 'PBX_Sem_Fila') {
+      $('bTransf').disabled = true;
+      $('bTransf').title = 'Agente sem sessão de fila ativa.';
+      $('bPen').disabled = true;
+      $('bPen').title = 'Agente sem sessão de fila ativa.';
+      $('bRemoverFila').disabled = true;
+      $('bRemoverFila').title = 'Agente sem sessão de fila ativa.';
+      $('bDeslogar').disabled = true;
+      $('bDeslogar').title = 'Agente sem sessão de fila ativa.';
+      $('bPausar').disabled = true;
+      $('bPausar').title = 'Agente sem sessão de fila ativa.';
+      $('bTirar').disabled = true;
+      $('bTirar').title = 'Agente sem sessão de fila ativa.';
+      $('dPausa').textContent = 'Agente sem sessão ativa em fila';
+      $('dlgMsg').textContent = 'ℹ Agente sem sessão ativa em fila (apenas registrado no SIP/PBX).';
+      $('dlgMsg').style.color = 'var(--mut)';
+    } else if (ehPbx) {
       $('bTransf').disabled = true;
       $('bTransf').title = 'Transferência de fila é exclusiva para agentes NPX.';
       $('bPen').disabled = true;
@@ -370,7 +426,11 @@
       $('bRemoverFila').title = 'Remoção de fila é exclusiva para agentes NPX.';
       $('bDeslogar').disabled = true;
       $('bDeslogar').title = 'Deslogar agente é exclusivo para agentes NPX.';
-      $('dlgMsg').textContent = 'ℹ Agente conectado via PBX. Ações de fila e pausa são gerenciadas pelo NPX.';
+      if (a.paused) {
+        $('dlgMsg').textContent = 'ℹ Agente conectado via PBX em pausa na NPX. Apenas retirar pausa está disponível.';
+      } else {
+        $('dlgMsg').textContent = 'ℹ Agente conectado via PBX. Ações de fila e pausa são gerenciadas pelo NPX.';
+      }
       $('dlgMsg').style.color = 'var(--mut)';
     } else {
       $('bTransf').disabled = !painelConfigurado || !destinos.length;
@@ -384,7 +444,7 @@
       if (!painelConfigurado) {
         $('dlgMsg').textContent = 'Ações do painel aguardando configuração de credenciais no servidor.';
         $('dlgMsg').style.color = 'var(--mut)';
-      } else if ($('dlgMsg').textContent.startsWith('ℹ Agente conectado via PBX')) {
+      } else if ($('dlgMsg').textContent.startsWith('ℹ Agente conectado via PBX') || $('dlgMsg').textContent.startsWith('ℹ Agente sem sessão')) {
         $('dlgMsg').textContent = '';
       }
     }

@@ -588,18 +588,21 @@ class ColetorPbx:
             a['pbxDirection'] = pbx_direction
             a['pbxSeconds'] = pbx_seconds
 
-            # Precedência estrita:
-            # 1. NPX em pausa ou com status != 0 (status None não é ativo!)
-            # 2. PBX registrada (Free, Busy, Ringing) -> 'pbx'
-            # 3. Senão -> 'off'
+            # Precedência estrita e separação de fone/fila:
+            # 1. Analista ativo na NPX (status != 0) e NÃO em pausa -> 'npx' (NPX ativa primária mantida)
+            # 2. PBX registrado (Free, Busy, Ringing) -> 'pbx' (ex: analista em pausa NPX ou status 0)
+            # 3. Analista em pausa na NPX (ou ativo) com PBX offline/ausente -> 'npx'
+            # 4. Senão -> 'off'
             em_pausa = bool(a.get('paused'))
             status_npx = a.get('status')
             npx_ativo = status_npx is not None and status_npx != 0
 
-            if em_pausa or npx_ativo:
+            if npx_ativo and not em_pausa:
                 a['line'] = 'npx'
             elif pbx_status in ('Free', 'Busy', 'Ringing'):
                 a['line'] = 'pbx'
+            elif em_pausa or npx_ativo:
+                a['line'] = 'npx'
             else:
                 a['line'] = 'off'
 

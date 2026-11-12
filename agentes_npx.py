@@ -799,7 +799,7 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
             status_http = 200
         return jsonify(ok=ok, mensagem=resultado.get('mensagem')), status_http
 
-    def recusar_se_line_pbx(codigo):
+    def recusar_se_line_pbx(codigo, acao=None):
         if not codigo:
             return None
         cod_str = str(codigo)
@@ -821,6 +821,9 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
                     a['line'] = 'npx' if (em_pausa or (st is not None and st != 0)) else 'off'
             agentes_com_cod = [a for a in retrato_enriquecido if str(a.get('code')) == cod_str]
             if any(a.get('line') == 'pbx' for a in agentes_com_cod):
+                # Exceção: Tirar pausa NPX é permitido se o agente estiver pausado na NPX mesmo com line pbx
+                if acao == 'tirar_pausa' and any(a.get('paused') for a in agentes_com_cod):
+                    return None
                 return jsonify(ok=False, mensagem='Ação indisponível para agentes operando via PBX ou offline na NPX.'), 400
         return None
 
@@ -938,7 +941,7 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
             return jsonify(ok=False, mensagem=str(erro)), 400
         if not pode():
             return negar()
-        recusa = recusar_se_line_pbx(codigo)
+        recusa = recusar_se_line_pbx(codigo, acao='tirar_pausa')
         if recusa:
             return recusa
         if cliente_painel and cliente_painel.configurado:
