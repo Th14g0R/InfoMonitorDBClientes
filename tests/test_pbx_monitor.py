@@ -448,6 +448,131 @@ class TestColetorPbxP5EP6(unittest.TestCase):
         self.assertIn('Analista Sem Dept', agentes_por_nome)
         self.assertIn('Analista Dept Desconhecido', agentes_por_nome)
 
+    def test_analista_em_pausa_npx_com_pbx_ocupado_ou_livre_recebe_line_pbx_preservando_pausa(self):
+        # Caso Bruno: Analista em pausa na NPX (Trein. Remoto) e no PBX ocupado/livre
+        # Deve receber line='pbx' com ramal, status e chamada PBX,
+        # MAS preservando intactos todos os metadados de pausa NPX (paused, pauseType, pauseStart, etc.)
+        mapa = {
+            'Bruno': {'ramal': '2005', 'departamento': 'InfoBrasil_Suporte'}
+        }
+        coletor = ColetorPbx(cliente=MagicMock(), mapa_analistas=mapa)
+
+        # 1. PBX Busy (em ligação)
+        coletor.snapshot = {
+            '2005': {'status': 'Busy', 'number': '85999998888', 'direction': 'inbound', 'seconds': 120}
+        }
+        agentes_npx_bruno = [
+            {
+                'code': '4422005',
+                'name': 'Bruno',
+                'queue': 'InfoBrasil_Suporte',
+                'status': 0,
+                'paused': True,
+                'pauseType': 'Trein. Remoto',
+                'pauseStart': '2026-11-12T09:30:00-03:00',
+                'pauseMinutes': 30,
+                'pauseMaxMinutes': 60,
+                'seconds': 1800,
+            }
+        ]
+        coletor.enriquecer_agentes(agentes_npx_bruno)
+        b = agentes_npx_bruno[0]
+        self.assertEqual(b['line'], 'pbx')
+        self.assertEqual(b['pbxExtension'], '2005')
+        self.assertEqual(b['pbxStatus'], 'Busy')
+        self.assertEqual(b['pbxNumber'], '85999998888')
+        self.assertEqual(b['pbxDirection'], 'inbound')
+        self.assertEqual(b['pbxSeconds'], 120)
+        # Preserva estado de pausa NPX
+        self.assertTrue(b['paused'])
+        self.assertEqual(b['pauseType'], 'Trein. Remoto')
+        self.assertEqual(b['pauseMinutes'], 30)
+        self.assertEqual(b['pauseMaxMinutes'], 60)
+        self.assertEqual(b['queue'], 'InfoBrasil_Suporte')
+
+        # 2. PBX Free (livre no softphone PBX, mas ainda em pausa na NPX)
+        coletor.snapshot = {
+            '2005': {'status': 'Free', 'number': None, 'direction': None, 'seconds': 0}
+        }
+        coletor.enriquecer_agentes(agentes_npx_bruno)
+        b2 = agentes_npx_bruno[0]
+        self.assertEqual(b2['line'], 'pbx')
+        self.assertEqual(b2['pbxExtension'], '2005')
+        self.assertEqual(b2['pbxStatus'], 'Free')
+        self.assertTrue(b2['paused'])
+        self.assertEqual(b2['pauseType'], 'Trein. Remoto')
+
+        # 3. PBX Offline -> linha volta para 'npx' preservando a pausa
+        coletor.snapshot = {
+            '2005': {'status': 'Offline', 'number': None, 'direction': None, 'seconds': 0}
+        }
+        coletor.enriquecer_agentes(agentes_npx_bruno)
+        b3 = agentes_npx_bruno[0]
+        self.assertEqual(b3['line'], 'npx')
+        self.assertEqual(b3['pbxExtension'], '2005')
+        self.assertEqual(b3['pbxStatus'], 'Offline')
+        self.assertTrue(b3['paused'])
+        self.assertEqual(b3['pauseType'], 'Trein. Remoto')
+
+    def test_matriz_precedencia_completa_npx_pbx(self):
+        # Matriz solicitada pelo revisor:
+        # 1. ativa + Busy -> NPX
+        # 2. ativa + Free -> NPX
+        # 3. pausa + Busy -> PBX
+        # 4. pausa + Free -> PBX
+        # 5. pausa + Offline -> NPX
+        # 6. status0 + Free -> PBX
+        # 7. status0 + Offline -> off
+        mapa = {
+            'Analista': {'ramal': '2010', 'departamento': 'InfoBrasil_Suporte'}
+        }
+        coletor = ColetorPbx(cliente=MagicMock(), mapa_analistas=mapa)
+
+        # 1. ativa (status=1, paused=False) + PBX Busy -> NPX
+        coletor.snapshot = {'2010': {'status': 'Busy', 'number': '85999991111', 'direction': 'inbound', 'seconds': 20}}
+        agentes1 = [{'code': '4422010', 'name': 'Analista', 'status': 1, 'paused': False}]
+        coletor.enriquecer_agentes(agentes1)
+        self.assertEqual(agentes1[0]['line'], 'npx')
+
+        # 2. ativa (status=1, paused=False) + PBX Free -> NPX
+        coletor.snapshot = {'2010': {'status': 'Free', 'number': None, 'direction': None, 'seconds': 0}}
+        agentes2 = [{'code': '4422010', 'name': 'Analista', 'status': 1, 'paused': False}]
+        coletor.enriquecer_agentes(agentes2)
+        self.assertEqual(agentes2[0]['line'], 'npx')
+
+        # 3. pausa (status=0, paused=True) + PBX Busy -> PBX
+        coletor.snapshot = {'2010': {'status': 'Busy', 'number': '85999991111', 'direction': 'inbound', 'seconds': 20}}
+        agentes3 = [{'code': '4422010', 'name': 'Analista', 'status': 0, 'paused': True, 'pauseType': 'Almoco'}]
+        coletor.enriquecer_agentes(agentes3)
+        self.assertEqual(agentes3[0]['line'], 'pbx')
+        self.assertTrue(agentes3[0]['paused'])
+
+        # 4. pausa (status=0, paused=True) + PBX Free -> PBX
+        coletor.snapshot = {'2010': {'status': 'Free', 'number': None, 'direction': None, 'seconds': 0}}
+        agentes4 = [{'code': '4422010', 'name': 'Analista', 'status': 0, 'paused': True, 'pauseType': 'Almoco'}]
+        coletor.enriquecer_agentes(agentes4)
+        self.assertEqual(agentes4[0]['line'], 'pbx')
+        self.assertTrue(agentes4[0]['paused'])
+
+        # 5. pausa (status=0, paused=True) + PBX Offline -> NPX
+        coletor.snapshot = {'2010': {'status': 'Offline', 'number': None, 'direction': None, 'seconds': 0}}
+        agentes5 = [{'code': '4422010', 'name': 'Analista', 'status': 0, 'paused': True, 'pauseType': 'Almoco'}]
+        coletor.enriquecer_agentes(agentes5)
+        self.assertEqual(agentes5[0]['line'], 'npx')
+        self.assertTrue(agentes5[0]['paused'])
+
+        # 6. status0 (status=0, paused=False) + PBX Free -> PBX
+        coletor.snapshot = {'2010': {'status': 'Free', 'number': None, 'direction': None, 'seconds': 0}}
+        agentes6 = [{'code': '4422010', 'name': 'Analista', 'status': 0, 'paused': False}]
+        coletor.enriquecer_agentes(agentes6)
+        self.assertEqual(agentes6[0]['line'], 'pbx')
+
+        # 7. status0 (status=0, paused=False) + PBX Offline -> off
+        coletor.snapshot = {'2010': {'status': 'Offline', 'number': None, 'direction': None, 'seconds': 0}}
+        agentes7 = [{'code': '4422010', 'name': 'Analista', 'status': 0, 'paused': False}]
+        coletor.enriquecer_agentes(agentes7)
+        self.assertEqual(agentes7[0]['line'], 'off')
+
 
 if __name__ == '__main__':
     unittest.main()

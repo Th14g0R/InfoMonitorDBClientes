@@ -1701,6 +1701,98 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
         self.assertEqual(r_transf.status_code, 400)
         self.assertIn('Fila inválida', r_transf.get_json()['mensagem'])
 
+    def test_tirar_pausa_permitido_para_analista_em_pausa_com_line_pbx(self):
+        # Caso Bruno: Analista em pausa na NPX mas operando no PBX (line='pbx')
+        # Tirar pausa DEVE ser permitido para despausar na NPX, enquanto outras ações PBX continuam recusadas (400)
+        self.permitido = True
+        with self.http.session_transaction() as sess:
+            sess['user_id'] = 1
+            sess['user_nome'] = 'Admin'
+            sess['_csrf_token'] = 'token_csrf_abc'
+        headers = {'X-CSRF-Token': 'token_csrf_abc'}
+
+        self.coletor_npx.retrato = [
+            {
+                'code': '4422005',
+                'name': 'Bruno',
+                'queue': 'InfoBrasil_Suporte',
+                'extension': '4422005',
+                'status': 0,
+                'paused': True,
+                'pauseType': 'Trein. Remoto',
+                'pauseStart': '2026-11-12T09:30:00-03:00',
+                'pauseMinutes': 30,
+                'pauseMaxMinutes': 60,
+                'seconds': 1800,
+            }
+        ]
+
+        def enriquecer_bruno_pbx(agentes):
+            for a in agentes:
+                a['pbxExtension'] = '2005'
+                a['pbxStatus'] = 'Busy'
+                a['pbxNumber'] = '85999998888'
+                a['pbxDirection'] = 'inbound'
+                a['pbxSeconds'] = 120
+                a['line'] = 'pbx'
+            return set()
+
+        self.coletor_pbx.enriquecer_agentes = MagicMock(side_effect=enriquecer_bruno_pbx)
+        self.coletor_pbx.cliente.configurado = True
+        self.coletor_pbx.obter_status_conexao.return_value = {
+            'configured': True, 'available': True, 'error': None
+        }
+
+        # 1. Tirar pausa: PERMITIDO (200) quando paused=True no próprio retrato do servidor
+        r_tirar = self.http.post('/admin/agentes/4422005/tirar-pausa', headers=headers)
+        self.assertEqual(r_tirar.status_code, 200)
+        self.assertTrue(r_tirar.get_json()['ok'])
+        self.assertEqual(self.cliente_painel.executados[-1], ('invert_pause_status', {'code': '4422005', 'pause': '0'}))
+
+        # 2. Ignora paused do cliente: se no servidor paused=False, tirar-pausa DEVE RECUSAR (400) mesmo que cliente envie paused=True
+        self.coletor_npx.retrato[0]['paused'] = False
+        r_tirar_sem_pausa = self.http.post('/admin/agentes/4422005/tirar-pausa', json={'paused': True}, headers=headers)
+        self.assertEqual(r_tirar_sem_pausa.status_code, 400)
+        self.assertIn('Ação indisponível para agentes operando via PBX', r_tirar_sem_pausa.get_json()['mensagem'])
+        self.coletor_npx.retrato[0]['paused'] = True  # restaura para testes seguintes
+
+        # 3. Código sintético pbx-2005 deve retornar 400 (rejeitado em _codigo)
+        r_sint = self.http.post('/admin/agentes/pbx-2005/tirar-pausa', headers=headers)
+        self.assertEqual(r_sint.status_code, 400)
+        self.assertIn('Código de agente inválido', r_sint.get_json()['mensagem'])
+
+        # 4. Autorização: se usuário não tiver permissão, retorna 403 antes da recusa PBX
+        self.permitido = False
+        r_unauth = self.http.post('/admin/agentes/4422005/tirar-pausa', headers=headers)
+        self.assertEqual(r_unauth.status_code, 403)
+        self.assertIn('Sem permissão para gerenciar agentes', r_unauth.get_json()['mensagem'])
+        self.permitido = True
+
+        # 5. CSRF: se token CSRF estiver ausente, deve falhar antes de executar ação
+        r_csrf = self.http.post('/admin/agentes/4422005/tirar-pausa')
+        self.assertEqual(r_csrf.status_code, 400)
+
+        # 6. Outras ações continuam recusadas (400) para o agente em line='pbx'
+        r_colocar = self.http.post('/admin/agentes/4422005/colocar-pausa', headers=headers)
+        self.assertEqual(r_colocar.status_code, 400)
+        self.assertIn('Ação indisponível para agentes operando via PBX', r_colocar.get_json()['mensagem'])
+
+        r_remover = self.http.post('/admin/agentes/4422005/remover-fila', json={'fila': 'InfoBrasil_Suporte'}, headers=headers)
+        self.assertEqual(r_remover.status_code, 400)
+        self.assertIn('Ação indisponível para agentes operando via PBX', r_remover.get_json()['mensagem'])
+
+        r_deslogar = self.http.post('/admin/agentes/4422005/deslogar', headers=headers)
+        self.assertEqual(r_deslogar.status_code, 400)
+        self.assertIn('Ação indisponível para agentes operando via PBX', r_deslogar.get_json()['mensagem'])
+
+        r_transf = self.http.post('/admin/agentes/transferir', json={'code': '4422005', 'para': 'InfoBrasil_Comercial'}, headers=headers)
+        self.assertEqual(r_transf.status_code, 400)
+        self.assertIn('Ação indisponível para agentes operando via PBX', r_transf.get_json()['mensagem'])
+
+        r_prio = self.http.post('/admin/agentes/prioridade', json={'code': '4422005', 'priority': 2}, headers=headers)
+        self.assertEqual(r_prio.status_code, 400)
+        self.assertIn('Ação indisponível para agentes operando via PBX', r_prio.get_json()['mensagem'])
+
 
 if __name__ == '__main__':
     unittest.main()
