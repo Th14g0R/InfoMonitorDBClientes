@@ -3,10 +3,12 @@
   --bg: var(--cor-fundo, #f4f6f9); --card: var(--cor-superficie, #fff); --tx: var(--cor-texto, #1d2733);
   --mut: var(--cor-texto-suave, #6b7785); --line: var(--cor-borda, #e3e8ee); --shade: rgba(0,0,0,.04);
   --livre: #16a34a; --lig: #dc2626; --pausa: #2563eb; --cham: #ea580c; --off: #9aa5b1; --tint: 9%; --tint2: 18%;
+  --pbx-livre: #22c55e; --pbx-lig: #ef4444; --pbx-cham: #f97316;
   color: var(--tx); font-size: 15px; line-height: 1.4;
 }
 [data-theme="dark"] #ag {
   --shade: rgba(255,255,255,.04); --livre: #22c55e; --lig: #ef4444; --pausa: #3b82f6; --cham: #f97316; --off: #6b7785;
+  --pbx-livre: #4ade80; --pbx-lig: #f87171; --pbx-cham: #fb923c;
   --tint: 14%; --tint2: 26%;
 }
 body:has(#ag) { background: var(--cor-fundo, #f4f6f9); margin: 0; }
@@ -30,6 +32,8 @@ body:has(#ag) { background: var(--cor-fundo, #f4f6f9); margin: 0; }
 #ag.duas-colunas .ag-corpo { max-width: 1800px; }
 #ag .ag-aviso { padding: 12px 14px; border-radius: 8px; margin-bottom: 12px; border: 1px solid var(--cor-aviso-borda, #fde68a);
   background: var(--cor-aviso-bg, #fffbeb); color: var(--cor-aviso, #b45309); }
+#ag .ag-aviso-pbx { padding: 9px 14px; font-size: 13px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--shade); color: var(--mut); margin-bottom: 12px; }
 /* tela cheia: só título, hora e dados */
 :root.tela-cheia #ag .ag-ctl, :root.tela-cheia #ag .dica, :root.tela-cheia #ag .alca, :root.tela-cheia #ag .ag-menu { display: none !important; }
 :root.tela-cheia #ag .ag-corpo { max-width: none; }
@@ -78,19 +82,32 @@ body:has(#ag) { background: var(--cor-fundo, #f4f6f9); margin: 0; }
 #ag tr.l-cham td  { background: color-mix(in srgb, var(--cham)  var(--tint2), transparent); }
 #ag tr.l-pausa td { background: color-mix(in srgb, var(--pausa) var(--tint), transparent); }
 #ag tr.l-off td   { background: color-mix(in srgb, var(--off)   var(--tint), transparent); color: var(--mut); }
+#ag tr.l-pbx-livre td { background: color-mix(in srgb, var(--pbx-livre) var(--tint), transparent); }
+#ag tr.l-pbx-lig td   { background: color-mix(in srgb, var(--pbx-lig)   var(--tint), transparent); }
+#ag tr.l-pbx-cham td  { background: color-mix(in srgb, var(--pbx-cham)  var(--tint2), transparent); }
+#ag tr.l-pbx-off td   { background: color-mix(in srgb, var(--off)       var(--tint), transparent); color: var(--mut); }
 #ag tr.presa td, #ag tr.estourada td { background: color-mix(in srgb, var(--pausa) var(--tint2), transparent); animation: ag-pulso-azul 3s ease-in-out infinite; }
 #ag tr.estourada .pill, #ag tr.presa .pill { animation: ag-pulso-azul 3s ease-in-out infinite; }
 @keyframes ag-pulso-azul { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
 @media (prefers-reduced-motion: reduce) {
-  #ag tr.estourada td, #ag tr.presa td, #ag tr.estourada .pill, #ag tr.presa .pill, #ag tr.l-cham .pill::before { animation: none !important; }
+  #ag tr.estourada td, #ag tr.presa td, #ag tr.estourada .pill, #ag tr.presa .pill, #ag tr.l-cham .pill::before, #ag tr.l-pbx-cham .pill::before { animation: none !important; }
 }
 #ag tr td:first-child { box-shadow: inset 4px 0 0 var(--c, transparent); }
+#ag td:has(.st-cell) { padding-left: 4px; padding-right: 4px; }
+#ag .st-cell { display: flex; align-items: center; gap: 3px; min-width: 0; width: 100%; }
+#ag .st-cell .pill { min-width: 0; flex: 1 1 auto; padding: 2px 5px; font-size: 10.5px; gap: 3px; border-radius: 6px; }
+#ag .st-cell .pill::before { width: 5px; height: 5px; }
+#ag .st-cell .pill-txt { display: block; white-space: normal; overflow-wrap: anywhere; line-height: 1.15; min-width: 0; }
+#ag .st-cell .tag-linha { flex: none; margin-left: 0; font-size: 8.5px; padding: 1px 3px; border-radius: 3px; letter-spacing: .02em; }
 #ag .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; font-size: 13px; font-weight: 600;
   color: var(--c); background: color-mix(in srgb, var(--c) 15%, var(--card)); max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 #ag .pill::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
-#ag tr.l-cham .pill::before { animation: ag-pisca 1s infinite; }
+#ag tr.l-cham .pill::before, #ag tr.l-pbx-cham .pill::before { animation: ag-pisca 1s infinite; }
 @keyframes ag-pisca { 50% { opacity: .2; } }
 #ag .tag { font-size: 11px; font-weight: 700; color: #fff; background: var(--pausa); border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
+#ag .tag-linha { font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; letter-spacing: .03em; text-transform: uppercase; vertical-align: middle; margin-left: 6px; border: 1px solid var(--line); line-height: 1.2; display: inline-block; }
+#ag .tag-npx { background: color-mix(in srgb, var(--pausa) 12%, var(--card)); color: var(--pausa); border-color: color-mix(in srgb, var(--pausa) 25%, var(--line)); }
+#ag .tag-pbx { background: color-mix(in srgb, var(--pbx-livre) 14%, var(--card)); color: var(--tx); border-color: color-mix(in srgb, var(--pbx-livre) 30%, var(--line)); }
 #ag .nome { font-weight: 600; }
 #ag button.nome { background: none; border: 0; padding: 0; color: inherit; text-decoration: underline dotted; text-underline-offset: 3px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 #ag button.nome:hover { color: var(--pausa); }

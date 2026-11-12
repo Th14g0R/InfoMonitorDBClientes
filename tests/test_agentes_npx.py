@@ -16,6 +16,7 @@ from flask import Blueprint, Flask
 
 import agentes_npx
 import seguranca
+from pbx_monitor import ColetorPbx, FILA_PBX_SEM_FILA, NOME_PBX_SEM_FILA
 from agentes_npx import (
     ClienteNpx,
     ClientePainelNpx,
@@ -1079,6 +1080,626 @@ class IntegracaoBancosTest(unittest.TestCase):
         self.assertIn("'perm_agentes':", fonte)
         self.assertIn('configurar_agentes(bancos_bp, get_db_connection, tem_permissao)', fonte)
         self.assertIn('href="/agentes"', (RAIZ / 'templates' / 'menu_navegacao.html').read_text(encoding='utf-8'))
+
+
+class RotasPbxIntegracaoTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.db = str(Path(self.temp.name) / 'teste.db')
+        self.env = patch.dict(os.environ, {'SECRET_KEY': 'test-only-' + 'b' * 64})
+        self.env.start()
+        self.permitido = False
+
+        with seguranca._rate_limit_lock:
+            seguranca._rate_limit_store.clear()
+
+        self.app = Flask(__name__, template_folder=str(RAIZ / 'templates'), static_folder=str(RAIZ / 'static'))
+        seguranca.aplicar_config_flask(self.app)
+        self.app.config['TESTING'] = True
+        self.bp = Blueprint('bancos_pbx', __name__)
+        self.cliente_npx = ClienteFalso()
+        self.cliente_painel = ClientePainelFalso(configurado=True)
+
+        # Mock de ColetorPbx
+        self.coletor_pbx = MagicMock()
+        self.coletor_pbx.garantir_rodando = MagicMock()
+        self.coletor_pbx.mapa_analistas = {
+            'Thiago': {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'},
+            'Carol': {'ramal': '2022', 'departamento': 'InfoBrasil_SPED_Fiscal'},
+        }
+
+        # Snapshot padrão do PBX
+        def enriquecer_mock(agentes):
+            for a in agentes:
+                if a.get('name') == 'Thiago' or a.get('code') == '4422008':
+                    a['pbxExtension'] = '2008'
+                    a['pbxStatus'] = 'Busy'
+                    a['pbxNumber'] = '85999998888'
+                    a['pbxDirection'] = 'inbound'
+                    a['pbxSeconds'] = 45
+                else:
+                    a['pbxExtension'] = None
+                    a['pbxStatus'] = 'Offline'
+                    a['pbxNumber'] = None
+                    a['pbxDirection'] = None
+                    a['pbxSeconds'] = None
+                
+                # Precedência estrita
+                if a.get('paused') or (a.get('status') is not None and a.get('status') != 0):
+                    a['line'] = 'npx'
+                elif a.get('pbxStatus') in ('Free', 'Busy', 'Ringing'):
+                    a['line'] = 'pbx'
+                else:
+                    a['line'] = 'off'
+            return set()
+
+        self.coletor_pbx.enriquecer_agentes = MagicMock(side_effect=enriquecer_mock)
+        self.coletor_pbx.obter_status_conexao = MagicMock(return_value={
+            'configured': True, 'available': True, 'error': None
+        })
+        self.coletor_pbx.obter_agentes_pbx_only = MagicMock(return_value=[
+            {
+                'code': 'pbx-2022',
+                'name': 'Carol',
+                'queue': FILA_PBX_SEM_FILA,
+                'extension': '2022',
+                'status': 0,
+                'seconds': 0,
+                'penalty': None,
+                'paused': False,
+                'pauseType': None,
+                'pauseStart': None,
+                'pauseMinutes': None,
+                'pauseMaxMinutes': None,
+                'callSrc': None,
+                'callDst': None,
+                'callClient': None,
+                'erro': None,
+                'line': 'pbx',
+                'pbxExtension': '2022',
+                'pbxStatus': 'Busy',
+                'pbxNumber': '85988887777',
+                'pbxDirection': 'outbound',
+                'pbxSeconds': 20,
+            }
+        ])
+
+        configurar_agentes(
+            self.bp,
+            self.conectar,
+            lambda perm: self.permitido and perm == 'perm_agentes',
+            cliente=self.cliente_npx,
+            cliente_painel=self.cliente_painel,
+            coletor_pbx=self.coletor_pbx,
+        )
+        self.coletor_npx = self.bp.coletor_agentes
+        self.coletor_npx.garantir_rodando = lambda: None
+        self.coletor_npx.retrato = [
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 1, 'paused': False}
+        ]
+        self.coletor_npx.coletado_em = datetime.now(agentes_npx.FUSO)
+        self.app.register_blueprint(self.bp)
+        self.http = self.app.test_client()
+
+    def tearDown(self):
+        self.env.stop()
+        self.temp.cleanup()
+        with seguranca._rate_limit_lock:
+            seguranca._rate_limit_store.clear()
+
+    def conectar(self):
+        conn = sqlite3.connect(self.db)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def test_contrato_dados_com_pbx_e_privacidade_visitante(self):
+        self.permitido = False
+        resp = self.http.get('/agentes/dados')
+        self.assertEqual(resp.status_code, 200)
+        dados = resp.get_json()
+
+        # Verifica nó pbxConnection
+        self.assertIn('pbxConnection', dados)
+        self.assertEqual(dados['pbxConnection'], {'configured': True, 'available': True, 'error': None})
+
+        # Verifica agentes retornados (Thiago da NPX e Carol PBX-only)
+        agentes = dados['agentes']
+        self.assertEqual(len(agentes), 2)
+
+        thiago = next(a for a in agentes if a['name'] == 'Thiago')
+        self.assertEqual(thiago['line'], 'npx')
+        self.assertEqual(thiago['pbxExtension'], '2008')
+        self.assertEqual(thiago['pbxStatus'], 'Busy')
+        self.assertEqual(thiago['pbxSeconds'], 45)
+        self.assertEqual(thiago['pbxDirection'], 'inbound')
+        # Privacidade: pbxNumber NUNCA deve ser enviado a visitante anônimo
+        self.assertNotIn('pbxNumber', thiago)
+
+        carol = next(a for a in agentes if a['name'] == 'Carol')
+        self.assertEqual(carol['code'], 'pbx-2022')
+        self.assertEqual(carol['line'], 'pbx')
+        self.assertEqual(carol['queue'], FILA_PBX_SEM_FILA)
+        self.assertEqual(carol['pbxStatus'], 'Busy')
+        self.assertNotIn('pbxNumber', carol)
+
+    def test_contrato_dados_com_pbx_administrador_ve_pbx_number(self):
+        self.permitido = True
+        resp = self.http.get('/agentes/dados')
+        self.assertEqual(resp.status_code, 200)
+        dados = resp.get_json()
+
+        self.assertTrue(dados['podeGerenciar'])
+        thiago = next(a for a in dados['agentes'] if a['name'] == 'Thiago')
+        # Administrador tem direito de visualizar o número da chamada PBX
+        self.assertEqual(thiago['pbxNumber'], '85999998888')
+
+        carol = next(a for a in dados['agentes'] if a['name'] == 'Carol')
+        self.assertEqual(carol['pbxNumber'], '85988887777')
+
+    def test_resiliencia_e_tolerancia_a_falha_do_pbx_p3(self):
+        # P3: Central PBX com erro / desatualizada: NÃO usa snapshot velho nem adiciona PBX-only
+        self.coletor_pbx.obter_status_conexao.return_value = {
+            'configured': True, 'available': False, 'error': 'Central PBX indisponível'
+        }
+        resp = self.http.get('/agentes/dados')
+        self.assertEqual(resp.status_code, 200)
+        dados = resp.get_json()
+        self.assertFalse(dados['pbxConnection']['available'])
+        self.assertEqual(dados['pbxConnection']['error'], 'Central PBX indisponível')
+        # Apenas Thiago (da NPX) está presente, Carol (PBX-only) NÃO entra
+        self.assertEqual(len(dados['agentes']), 1)
+        thiago = dados['agentes'][0]
+        self.assertEqual(thiago['name'], 'Thiago')
+        self.assertIsNone(thiago['pbxExtension'])
+        self.assertIsNone(thiago['pbxStatus'])
+
+    def test_p4_quando_pbx_nao_configurado(self):
+        self.coletor_pbx.cliente.configurado = False
+        resp = self.http.get('/agentes/dados')
+        self.assertEqual(resp.status_code, 200)
+        dados = resp.get_json()
+        self.assertFalse(dados['pbxConnection']['configured'])
+        self.assertFalse(dados['pbxConnection']['available'])
+        self.assertEqual(len(dados['agentes']), 1)
+        self.assertIsNone(dados['agentes'][0]['pbxExtension'])
+
+    def test_validar_fila_rejeita_fila_sintetica_pbx_sem_fila(self):
+        with self.assertRaises(ValueError) as ctx:
+            agentes_npx._validar_fila('PBX_Sem_Fila', self.coletor_npx)
+        self.assertIn('Fila inválida', str(ctx.exception))
+
+    def test_recusa_de_acoes_backend_para_line_pbx(self):
+        self.permitido = True
+        with self.http.session_transaction() as sess:
+            sess['user_id'] = 1
+            sess['user_nome'] = 'Admin'
+            sess['_csrf_token'] = 'token_csrf_abc'
+
+        headers = {'X-CSRF-Token': 'token_csrf_abc'}
+
+        # 1. A5: Agente sintético (código pbx-2022) é rejeitado pela validação de código original antes
+        r_pausa = self.http.post('/admin/agentes/pbx-2022/colocar-pausa', headers=headers)
+        self.assertEqual(r_pausa.status_code, 400)
+        self.assertIn('Código de agente inválido', r_pausa.get_json()['mensagem'])
+
+        r_deslogar = self.http.post('/admin/agentes/pbx-2022/deslogar', headers=headers)
+        self.assertEqual(r_deslogar.status_code, 400)
+        self.assertIn('Código de agente inválido', r_deslogar.get_json()['mensagem'])
+
+        r_transf = self.http.post('/admin/agentes/transferir', json={'code': 'pbx-2022', 'queue': 'InfoBrasil_Suporte'}, headers=headers)
+        self.assertEqual(r_transf.status_code, 400)
+        self.assertIn('Código de agente inválido', r_transf.get_json()['mensagem'])
+
+        # 2. A5: Verificação de autorização deve vir ANTES da recusa PBX -> se não autorizado, retorna 403 (nunca 400)
+        self.permitido = False
+        r_unauth = self.http.post('/admin/agentes/4422008/colocar-pausa', headers=headers)
+        self.assertEqual(r_unauth.status_code, 403)
+        self.assertIn('Sem permissão para gerenciar agentes', r_unauth.get_json()['mensagem'])
+        self.permitido = True
+
+        # 3. Tentativa de transferir agente NPX normal para fila sintética PBX_Sem_Fila -> recusa
+        r_transf_sint = self.http.post('/admin/agentes/transferir', json={'code': '4422008', 'queue': 'PBX_Sem_Fila'}, headers=headers)
+        self.assertEqual(r_transf_sint.status_code, 400)
+
+        # 4. Agente NPX que está offline na NPX (status=0, paused=False) mas ativo no PBX (line='pbx')
+        self.coletor_npx.retrato = [
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 0, 'paused': False}
+        ]
+        r_pausa_npx_offline = self.http.post('/admin/agentes/4422008/colocar-pausa', headers=headers)
+        self.assertEqual(r_pausa_npx_offline.status_code, 400)
+        self.assertIn('indisponível para agentes operando via PBX ou offline na NPX', r_pausa_npx_offline.get_json()['mensagem'])
+
+    def test_a3_recusar_se_line_pbx_enriquece_retrato_inteiro_globalmente(self):
+        # A3: Testar que se dois agentes colidirem na NPX no mesmo ramal, a validação de recusa PBX
+        # enriquece o retrato inteiro e não apenas o agente isolado, detectando a ambiguidade global.
+        self.permitido = True
+        with self.http.session_transaction() as sess:
+            sess['user_id'] = 1
+            sess['user_nome'] = 'Admin'
+            sess['_csrf_token'] = 'token_csrf_abc'
+
+        headers = {'X-CSRF-Token': 'token_csrf_abc'}
+
+        # Usar a implementação real de ColetorPbx.enriquecer_agentes para demonstrar o comportamento
+        coletor_pbx_real = ColetorPbx(
+            cliente=MagicMock(configurado=True),
+            mapa_analistas={'Thiago': {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'}}
+        )
+        coletor_pbx_real.snapshot = {
+            '2008': {'status': 'Busy', 'number': '85999998888', 'direction': 'inbound', 'seconds': 30}
+        }
+        self.coletor_pbx.enriquecer_agentes.side_effect = coletor_pbx_real.enriquecer_agentes
+
+        # Dois agentes NPX disputam o mesmo ramal (colisão de analista)
+        self.coletor_npx.retrato = [
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 0, 'paused': False},
+            {'code': '4422009', 'name': 'Thiago Jr', 'queue': 'InfoBrasil_Suporte', 'status': 0, 'paused': False},
+        ]
+
+        # Com enriquecimento global, ambos ficam com ramal=None e line='off'
+        # Logo, recusar_se_line_pbx NÃO deve considerar line='pbx'
+        r = self.http.post('/admin/agentes/4422008/colocar-pausa', headers=headers)
+        self.assertNotEqual(r.get_json().get('mensagem'), 'Ação indisponível para agentes operando via PBX ou offline na NPX.')
+
+    def test_a7_fila_sintetica_nao_aparece_em_filas_se_sem_agentes_pbx(self):
+        # A7: PBX_Sem_Fila removida de NOMES_PADRAO. Se nenhum agente estiver nessa fila,
+        # ela NÃO deve aparecer na lista de filas retornadas.
+        self.assertNotIn('PBX_Sem_Fila', agentes_npx.NOMES_PADRAO)
+        self.coletor_pbx.obter_agentes_pbx_only = MagicMock(return_value=[])
+        self.coletor_npx.retrato = [
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 1, 'paused': False}
+        ]
+        resp = self.http.get('/agentes/dados')
+        dados = resp.get_json()
+        chaves_filas = [f['key'] for f in dados['filas']]
+        self.assertNotIn('PBX_Sem_Fila', chaves_filas)
+
+        # Se houver agente na fila PBX_Sem_Fila, deve ser serializada com nome 'Não logado'
+        self.coletor_pbx.obter_agentes_pbx_only = MagicMock(return_value=[{
+            'code': 'pbx-2022', 'name': 'Carol', 'queue': 'PBX_Sem_Fila', 'status': 0, 'paused': False, 'line': 'pbx'
+        }])
+        resp2 = self.http.get('/agentes/dados')
+        dados2 = resp2.get_json()
+        fila_sint = next((f for f in dados2['filas'] if f['key'] == 'PBX_Sem_Fila'), None)
+        self.assertIsNotNone(fila_sint)
+        self.assertEqual(fila_sint['nome'], 'Não logado')
+
+    def test_npx_sem_token_com_pbx_livre_responde_200(self):
+        # NPX sem token configurado, mas PBX configurado e disponível -> HTTP 200 com erroNpx
+        self.cliente_npx.token = ''
+        self.coletor_pbx.cliente.configurado = True
+        self.coletor_pbx.obter_status_conexao.return_value = {
+            'configured': True, 'available': True, 'error': None
+        }
+        resp = self.http.get('/agentes/dados')
+        self.assertEqual(resp.status_code, 200)
+        dados = resp.get_json()
+        self.assertEqual(dados['erroNpx'], 'NPX_API_TOKEN não configurado no .env do servidor.')
+        self.assertTrue(dados['pbxConnection']['available'])
+        # Apenas os agentes PBX registrados entram
+        self.assertEqual(len(dados['agentes']), 1)
+        self.assertEqual(dados['agentes'][0]['name'], 'Carol')
+        self.assertEqual(dados['agentes'][0]['line'], 'pbx')
+
+    def test_sem_ambas_configuradas_mantem_503_original(self):
+        self.cliente_npx.token = ''
+        self.coletor_pbx.cliente.configurado = False
+        resp = self.http.get('/agentes/dados')
+        self.assertEqual(resp.status_code, 503)
+        self.assertIn('NPX_API_TOKEN não configurado', resp.get_json()['erro'])
+
+    def test_npx_primeira_falha_com_pbx_busy_responde_200(self):
+        # NPX configurado mas sem resposta (None) e com erro; PBX disponível -> HTTP 200
+        self.cliente_npx.token = 'tok_npx_valido'
+        self.coletor_npx.retrato = None
+        self.coletor_npx.erro = 'Falha temporária de rede NPX'
+        self.coletor_pbx.cliente.configurado = True
+        self.coletor_pbx.obter_status_conexao.return_value = {
+            'configured': True, 'available': True, 'error': None
+        }
+        resp = self.http.get('/agentes/dados')
+        self.assertEqual(resp.status_code, 200)
+        dados = resp.get_json()
+        self.assertEqual(dados['erroNpx'], 'Falha temporária de rede NPX')
+        self.assertEqual(len(dados['agentes']), 1)
+        self.assertEqual(dados['agentes'][0]['name'], 'Carol')
+        self.assertEqual(dados['agentes'][0]['pbxStatus'], 'Busy')
+
+    def test_volta_npx_com_dedupe_e_sem_rede_na_composicao(self):
+        # NPX volta com Thiago logado; PBX também tem Thiago (2008) e Carol (2022)
+        self.cliente_npx.token = 'tok_npx_valido'
+        self.coletor_npx.retrato = [
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 1, 'paused': False}
+        ]
+        self.coletor_npx.erro = None
+        self.coletor_pbx.cliente.configurado = True
+        self.coletor_pbx.obter_status_conexao.return_value = {
+            'configured': True, 'available': True, 'error': None
+        }
+        resp = self.http.get('/agentes/dados')
+        self.assertEqual(resp.status_code, 200)
+        dados = resp.get_json()
+        self.assertIsNone(dados['erroNpx'])
+        # Deduplicação: Thiago aparece uma única vez (enriquecido com ramal 2008), sem duplicar
+        nomes = [a['name'] for a in dados['agentes']]
+        self.assertEqual(nomes.count('Thiago'), 1)
+        self.assertEqual(nomes.count('Carol'), 1)
+        self.assertEqual(len(dados['agentes']), 2)
+
+    def test_b1_npx_cai_apos_retrato_com_colisao_pbx_aparece_corretamente(self):
+        # B1: Se NPX teve colisão no ciclo anterior e depois cai (None com erro),
+        # obter_agentes_pbx_only não herda estado antigo e os agentes PBX registrados aparecem normalmente.
+        self.cliente_npx.token = 'tok_npx_valido'
+        self.coletor_pbx.cliente.configurado = True
+        self.coletor_pbx.obter_status_conexao.return_value = {
+            'configured': True, 'available': True, 'error': None
+        }
+
+        # Ciclo 1: NPX ativo com dois agentes colidindo no ramal 2008
+        self.coletor_npx.retrato = [
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 0, 'paused': False},
+            {'code': '4422009', 'name': 'Thiago Jr', 'queue': 'InfoBrasil_Suporte', 'status': 0, 'paused': False},
+        ]
+        coletor_pbx_real = ColetorPbx(
+            cliente=MagicMock(configurado=True),
+            mapa_analistas={
+                'Thiago': {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'},
+                'Carol': {'ramal': '2022', 'departamento': 'InfoBrasil_SPED_Fiscal'},
+            }
+        )
+        coletor_pbx_real.snapshot = {
+            '2008': {'status': 'Free', 'number': None, 'direction': None, 'seconds': 0},
+            '2022': {'status': 'Busy', 'number': '85988887777', 'direction': 'outbound', 'seconds': 20},
+        }
+        self.coletor_pbx.enriquecer_agentes.side_effect = coletor_pbx_real.enriquecer_agentes
+        self.coletor_pbx.obter_agentes_pbx_only.side_effect = coletor_pbx_real.obter_agentes_pbx_only
+
+        resp1 = self.http.get('/agentes/dados')
+        self.assertEqual(resp1.status_code, 200)
+        dados1 = resp1.get_json()
+        # No ciclo 1, Carol entra como PBX-only (2022), mas Thiago não vira PBX-only porque está em colisão na NPX
+        nomes1 = [a['name'] for a in dados1['agentes']]
+        self.assertEqual(nomes1.count('Carol'), 1)
+        self.assertNotIn('pbx-2008', [a['code'] for a in dados1['agentes']])
+
+        # Ciclo 2: NPX cai (retrato = None)
+        self.coletor_npx.retrato = None
+        self.coletor_npx.erro = 'Conexão NPX perdida'
+
+        resp2 = self.http.get('/agentes/dados')
+        self.assertEqual(resp2.status_code, 200)
+        dados2 = resp2.get_json()
+        self.assertEqual(dados2['erroNpx'], 'Conexão NPX perdida')
+        # Agora, sem sessão NPX e sem estado velho herdado, Thiago (2008) e Carol (2022) aparecem ambos como PBX-only!
+        codes2 = [a['code'] for a in dados2['agentes']]
+        self.assertIn('pbx-2008', codes2)
+        self.assertIn('pbx-2022', codes2)
+        self.assertEqual(len(dados2['agentes']), 2)
+        # Nova regra: ambos vão para FILA_PBX_SEM_FILA exibida como 'Não logado'
+        for a in dados2['agentes']:
+            self.assertEqual(a['queue'], FILA_PBX_SEM_FILA)
+        fila_sint = next(f for f in dados2['filas'] if f['key'] == FILA_PBX_SEM_FILA)
+        self.assertEqual(fila_sint['nome'], 'Não logado')
+
+    def test_offline_npx_sessao_aberta_com_pbx_offline_pode_pausar_e_preserva_metadados(self):
+        # Caso: Analista possui sessão aberta na NPX com status 0 (offline) e PBX offline/ausente
+        # Deve exibir status cinza (line='off'), manter metadados da NPX intactos (code, extension, queue, penalty)
+        # e PERMITIR ações NPX normalmente no painel (ex: colocar-pausa)
+        self.permitido = True
+        with self.http.session_transaction() as sess:
+            sess['user_id'] = 1
+            sess['user_nome'] = 'Admin'
+            sess['_csrf_token'] = 'token_csrf_abc'
+        headers = {'X-CSRF-Token': 'token_csrf_abc'}
+
+        self.coletor_npx.retrato = [
+            {
+                'code': '4422008',
+                'name': 'Thiago',
+                'queue': 'InfoBrasil_Suporte',
+                'extension': '4422008',
+                'status': 0,
+                'seconds': 120,
+                'penalty': 4,
+                'paused': False,
+                'pauseType': None,
+                'pauseStart': None,
+                'pauseMinutes': None,
+                'pauseMaxMinutes': None,
+                'callSrc': None,
+                'callDst': None,
+                'callClient': None,
+                'erro': None,
+            }
+        ]
+        # PBX disponível, mas Thiago (2008) está Offline na central telefônica
+        def enriquecer_offline(agentes):
+            for a in agentes:
+                a['pbxExtension'] = '2008'
+                a['pbxStatus'] = 'Offline'
+                a['pbxNumber'] = None
+                a['pbxDirection'] = None
+                a['pbxSeconds'] = 0
+                a['line'] = 'off'
+            return set()
+
+        self.coletor_pbx.enriquecer_agentes = MagicMock(side_effect=enriquecer_offline)
+        self.coletor_pbx.obter_agentes_pbx_only = MagicMock(return_value=[])
+
+        # 1. Valida contrato em /agentes/dados
+        resp = self.http.get('/agentes/dados')
+        self.assertEqual(resp.status_code, 200)
+        dados = resp.get_json()
+        self.assertEqual(len(dados['agentes']), 1)
+        thiago = dados['agentes'][0]
+        self.assertEqual(thiago['code'], '4422008')
+        self.assertEqual(thiago['name'], 'Thiago')
+        self.assertEqual(thiago['queue'], 'InfoBrasil_Suporte')
+        self.assertEqual(thiago['extension'], '4422008')
+        self.assertEqual(thiago['status'], 0)
+        self.assertEqual(thiago['penalty'], 4)
+        self.assertFalse(thiago['paused'])
+        self.assertEqual(thiago['line'], 'off')
+        self.assertEqual(thiago['pbxStatus'], 'Offline')
+
+        # 2. Executa POST colocar-pausa: DEVE SER PERMITIDO porque line='off' não opera via PBX
+        r_pausa = self.http.post('/admin/agentes/4422008/colocar-pausa', headers=headers)
+        self.assertEqual(r_pausa.status_code, 200)
+        self.assertTrue(r_pausa.get_json()['ok'])
+        self.assertEqual(self.cliente_painel.executados[-1], ('invert_pause_status', {'code': '4422008', 'pause': '1'}))
+
+    def test_pbx_only_livre_e_busy_sempre_vai_para_grupo_nao_logado(self):
+        # Caso: Analistas sem sessão NPX mas registrados no PBX (Free ou Busy)
+        # Devem SEMPRE ir para o grupo exibido como 'Não logado' (PBX_Sem_Fila),
+        # mesmo que o mapa possua departamento preenchido.
+        self.permitido = True
+        self.coletor_npx.retrato = []  # Sem analistas na NPX
+
+        coletor_real = ColetorPbx(
+            cliente=MagicMock(configurado=True),
+            mapa_analistas={
+                'Carol': {'ramal': '2022', 'departamento': 'InfoBrasil_SPED_Fiscal'},
+                'Davi': {'ramal': '2002', 'departamento': 'InfoBrasil_Suporte'},
+                'Alisson': {'ramal': '2011', 'departamento': 'InfoBrasil_Suporte'},
+            }
+        )
+        coletor_real.snapshot = {
+            '2022': {'status': 'Busy', 'number': '85988887777', 'direction': 'outbound', 'seconds': 35},
+            '2002': {'status': 'Free', 'number': None, 'direction': None, 'seconds': 0},
+            '2011': {'status': 'Offline', 'number': None, 'direction': None, 'seconds': 0},
+            '9999': {'status': 'Free', 'number': None, 'direction': None, 'seconds': 0},  # Fora do mapa (ignorado)
+        }
+        self.coletor_pbx.enriquecer_agentes.side_effect = coletor_real.enriquecer_agentes
+        self.coletor_pbx.obter_agentes_pbx_only.side_effect = coletor_real.obter_agentes_pbx_only
+
+        resp = self.http.get('/agentes/dados')
+        self.assertEqual(resp.status_code, 200)
+        dados = resp.get_json()
+
+        # Alisson (offline) e 9999 (fora do mapa) NÃO entram
+        self.assertEqual(len(dados['agentes']), 2)
+        agentes_por_nome = {a['name']: a for a in dados['agentes']}
+        self.assertIn('Carol', agentes_por_nome)
+        self.assertIn('Davi', agentes_por_nome)
+        self.assertNotIn('Alisson', agentes_por_nome)
+
+        # Carol e Davi vão SEMPRE para PBX_Sem_Fila (Não logado)
+        self.assertEqual(agentes_por_nome['Carol']['queue'], FILA_PBX_SEM_FILA)
+        self.assertEqual(agentes_por_nome['Davi']['queue'], FILA_PBX_SEM_FILA)
+        self.assertEqual(agentes_por_nome['Carol']['line'], 'pbx')
+        self.assertEqual(agentes_por_nome['Davi']['line'], 'pbx')
+
+        # Grupo exibido como 'Não logado'
+        fila_nao_logado = next((f for f in dados['filas'] if f['key'] == FILA_PBX_SEM_FILA), None)
+        self.assertIsNotNone(fila_nao_logado)
+        self.assertEqual(fila_nao_logado['nome'], 'Não logado')
+
+    def test_npx_logoff_move_agente_para_grupo_nao_logado_e_login_retorna_a_fila_sem_duplicar(self):
+        # Caso: Ciclo dinâmico de logoff e login
+        # 1. Com sessão NPX: analista aparece na fila NPX
+        # 2. Logoff NPX mantendo PBX registrado: analista move para 'Não logado'
+        # 3. Login NPX: analista volta para a fila NPX sem duplicar
+        self.permitido = True
+        coletor_real = ColetorPbx(
+            cliente=MagicMock(configurado=True),
+            mapa_analistas={
+                'Thiago': {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'},
+            }
+        )
+        coletor_real.snapshot = {
+            '2008': {'status': 'Free', 'number': None, 'direction': None, 'seconds': 0},
+        }
+        self.coletor_pbx.enriquecer_agentes.side_effect = coletor_real.enriquecer_agentes
+        self.coletor_pbx.obter_agentes_pbx_only.side_effect = coletor_real.obter_agentes_pbx_only
+
+        # 1. Sessão aberta na NPX (status 0 mas casado com PBX Free -> line='pbx', mas na fila NPX)
+        self.coletor_npx.retrato = [
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 0, 'paused': False}
+        ]
+        resp1 = self.http.get('/agentes/dados')
+        dados1 = resp1.get_json()
+        self.assertEqual(len(dados1['agentes']), 1)
+        self.assertEqual(dados1['agentes'][0]['name'], 'Thiago')
+        self.assertEqual(dados1['agentes'][0]['code'], '4422008')
+        self.assertEqual(dados1['agentes'][0]['queue'], 'InfoBrasil_Suporte')
+        self.assertEqual(dados1['agentes'][0]['line'], 'pbx')
+        self.assertNotIn(FILA_PBX_SEM_FILA, [f['key'] for f in dados1['filas']])
+
+        # 2. NPX Logoff: Thiago não está mais no retrato da NPX, mas continua no PBX
+        self.coletor_npx.retrato = []
+        resp2 = self.http.get('/agentes/dados')
+        dados2 = resp2.get_json()
+        self.assertEqual(len(dados2['agentes']), 1)
+        self.assertEqual(dados2['agentes'][0]['name'], 'Thiago')
+        self.assertEqual(dados2['agentes'][0]['code'], 'pbx-2008')
+        self.assertEqual(dados2['agentes'][0]['queue'], FILA_PBX_SEM_FILA)
+        self.assertEqual(dados2['agentes'][0]['line'], 'pbx')
+        fila_sint = next((f for f in dados2['filas'] if f['key'] == FILA_PBX_SEM_FILA), None)
+        self.assertIsNotNone(fila_sint)
+        self.assertEqual(fila_sint['nome'], 'Não logado')
+
+        # 3. NPX Login: Thiago volta a ter sessão aberta na NPX com status 1 (ativo)
+        self.coletor_npx.retrato = [
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 1, 'paused': False}
+        ]
+        resp3 = self.http.get('/agentes/dados')
+        dados3 = resp3.get_json()
+        self.assertEqual(len(dados3['agentes']), 1)
+        self.assertEqual(dados3['agentes'][0]['name'], 'Thiago')
+        self.assertEqual(dados3['agentes'][0]['code'], '4422008')
+        self.assertEqual(dados3['agentes'][0]['queue'], 'InfoBrasil_Suporte')
+        self.assertEqual(dados3['agentes'][0]['line'], 'npx')
+        # Sem duplicidade no grupo 'Não logado', e o grupo desaparece quando vazio
+        self.assertNotIn('pbx-2008', [a['code'] for a in dados3['agentes']])
+        self.assertNotIn(FILA_PBX_SEM_FILA, [f['key'] for f in dados3['filas']])
+
+    def test_pausas_e_acoes_bloqueadas_para_line_pbx_e_destino_bloqueado(self):
+        # Caso: Ações em agentes operando em line='pbx' continuam expressamente recusadas
+        self.permitido = True
+        with self.http.session_transaction() as sess:
+            sess['user_id'] = 1
+            sess['user_nome'] = 'Admin'
+            sess['_csrf_token'] = 'token_csrf_abc'
+        headers = {'X-CSRF-Token': 'token_csrf_abc'}
+
+        # 1. Agente NPX offline casado com PBX (line='pbx') -> recusa 400
+        self.coletor_npx.retrato = [
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 0, 'paused': False}
+        ]
+        def enriquecer_pbx(agentes):
+            for a in agentes:
+                a['pbxExtension'] = '2008'
+                a['pbxStatus'] = 'Free'
+                a['line'] = 'pbx'
+            return set()
+        self.coletor_pbx.enriquecer_agentes = MagicMock(side_effect=enriquecer_pbx)
+
+        r_pausa = self.http.post('/admin/agentes/4422008/colocar-pausa', headers=headers)
+        self.assertEqual(r_pausa.status_code, 400)
+        self.assertIn('Ação indisponível para agentes operando via PBX', r_pausa.get_json()['mensagem'])
+
+        # 2. Agente PBX-only (código sintético pbx-2022) -> recusa 400 por código inválido na API original
+        r_sint = self.http.post('/admin/agentes/pbx-2022/colocar-pausa', headers=headers)
+        self.assertEqual(r_sint.status_code, 400)
+        self.assertIn('Código de agente inválido', r_sint.get_json()['mensagem'])
+
+        # 3. Transferência com destino para PBX_Sem_Fila de agente ativo na NPX (line='npx') -> recusa 400 (Fila inválida)
+        self.coletor_npx.retrato = [
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 1, 'paused': False}
+        ]
+        def enriquecer_npx_ativo(agentes):
+            for a in agentes:
+                a['line'] = 'npx'
+            return set()
+        self.coletor_pbx.enriquecer_agentes = MagicMock(side_effect=enriquecer_npx_ativo)
+
+        r_transf = self.http.post(
+            '/admin/agentes/transferir',
+            json={'code': '4422008', 'queue': FILA_PBX_SEM_FILA},
+            headers=headers
+        )
+        self.assertEqual(r_transf.status_code, 400)
+        self.assertIn('Fila inválida', r_transf.get_json()['mensagem'])
 
 
 if __name__ == '__main__':

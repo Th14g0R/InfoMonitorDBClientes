@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 
 from flask import jsonify, render_template, request, session
 
+from pbx_monitor import ColetorPbx, FILA_PBX_SEM_FILA, NOME_PBX_SEM_FILA
 from seguranca import registrar_acao_admin
 
 LOGGER = logging.getLogger(__name__)
@@ -81,11 +82,12 @@ def nomes_filas():
 
 def _validar_fila(fila, coletor=None):
     f = str(fila or '').strip()
-    if not f or not RE_FILA.match(f):
+    if not f or not RE_FILA.match(f) or f == FILA_PBX_SEM_FILA:
         raise ValueError('Fila inválida.')
     validas = set(nomes_filas().keys())
+    validas.discard(FILA_PBX_SEM_FILA)
     if coletor and coletor.retrato:
-        validas.update(a.get('queue') for a in coletor.retrato if a.get('queue'))
+        validas.update(a.get('queue') for a in coletor.retrato if a.get('queue') and a.get('queue') != FILA_PBX_SEM_FILA)
     if f not in validas:
         raise ValueError(f'Fila "{f}" não reconhecida.')
     return f
@@ -761,12 +763,14 @@ def alterar_prioridade(cliente_painel, dados, coletor=None):
     return cliente_painel.executar('update_penalty', {'code': codigo, 'queue': fila, 'penalty': raw_pen})
 
 
-def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel=None):
+def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel=None, coletor_pbx=None):
     cliente = cliente or ClienteNpx()
     cliente_painel = cliente_painel or ClientePainelNpx()
     coletor = ColetorAgentes(cliente)
+    coletor_pbx = coletor_pbx or ColetorPbx()
     layout = LayoutAgentes(conectar)
     bp.coletor_agentes = coletor
+    bp.coletor_pbx = coletor_pbx
     bp.cliente_npx = cliente
     bp.cliente_painel_npx = cliente_painel
 
@@ -795,6 +799,59 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
             status_http = 200
         return jsonify(ok=ok, mensagem=resultado.get('mensagem')), status_http
 
+    def recusar_se_line_pbx(codigo):
+        if not codigo:
+            return None
+        cod_str = str(codigo)
+        if cod_str.startswith('pbx-'):
+            return jsonify(ok=False, mensagem='Ação indisponível para agentes operando exclusivamente via PBX.'), 400
+        if coletor and coletor.retrato:
+            # A3: Enriquece o retrato INTEIRO com unicidade global para não divergir da tela em colisão
+            retrato_enriquecido = [dict(a) for a in coletor.retrato]
+            pbx_disp = False
+            if coletor_pbx and coletor_pbx.cliente.configurado:
+                st_pbx = coletor_pbx.obter_status_conexao()
+                if st_pbx.get('available'):
+                    coletor_pbx.enriquecer_agentes(retrato_enriquecido)
+                    pbx_disp = True
+            if not pbx_disp:
+                for a in retrato_enriquecido:
+                    em_pausa = bool(a.get('paused'))
+                    st = a.get('status')
+                    a['line'] = 'npx' if (em_pausa or (st is not None and st != 0)) else 'off'
+            agentes_com_cod = [a for a in retrato_enriquecido if str(a.get('code')) == cod_str]
+            if any(a.get('line') == 'pbx' for a in agentes_com_cod):
+                return jsonify(ok=False, mensagem='Ação indisponível para agentes operando via PBX ou offline na NPX.'), 400
+        return None
+
+    def _responder_dados(todos_agentes, em, erro_npx, status_pbx):
+        nomes = nomes_filas()
+        chaves = list(dict.fromkeys(list(nomes) + [a['queue'] for a in todos_agentes if a.get('queue')]))
+        pode_gerenciar = pode()
+        if pode_gerenciar:
+            agentes_retorno = todos_agentes
+        else:
+            campos_privados = {'callSrc', 'callDst', 'callClient', 'pbxNumber'}
+            agentes_retorno = [{k: v for k, v in a.items() if k not in campos_privados} for a in todos_agentes]
+
+        # A7: Nome da fila PBX_Sem_Fila só na serialização se presente nos agentes
+        def _formatar_nome_fila(k):
+            if k == FILA_PBX_SEM_FILA:
+                return NOME_PBX_SEM_FILA
+            return nomes.get(k, k.replace('_', ' '))
+
+        resposta = jsonify(
+            atualizado=em.isoformat() if em else datetime.now(FUSO).isoformat(),
+            erroNpx=erro_npx,
+            layout=layout.obter(),
+            podeGerenciar=pode_gerenciar,
+            painelConfigurado=bool(cliente_painel and cliente_painel.configurado),
+            pbxConnection=status_pbx,
+            filas=[{'key': k, 'nome': _formatar_nome_fila(k)} for k in chaves],
+            agentes=agentes_retorno)
+        resposta.headers['Cache-Control'] = 'no-store'
+        return resposta
+
     @bp.route('/agentes', endpoint='agentes')
     def pagina_agentes():
         return render_template('agentes.html', pode_gerenciar=pode(), configurado=cliente.configurado,
@@ -802,26 +859,65 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
 
     @bp.route('/agentes/dados', endpoint='agentes_dados')
     def dados_agentes():
-        if not cliente.configurado:
+        npx_configurado = bool(cliente and cliente.configurado)
+        pbx_configurado = bool(coletor_pbx and coletor_pbx.cliente.configurado)
+
+        # Sem ambas configuradas: mantém o 503 original
+        if not npx_configurado and not pbx_configurado:
             return jsonify(erro='NPX_API_TOKEN não configurado no .env do servidor.'), 503
-        lista, em, erro = coletor.dados()
+
+        # Inicia PBX antes e de forma independente de coletor.dados()
+        status_pbx = {'configured': False, 'available': False, 'error': None}
+        if pbx_configurado:
+            coletor_pbx.garantir_rodando()
+            status_pbx = coletor_pbx.obter_status_conexao()
+
+        pbx_disponivel = bool(status_pbx.get('available'))
+
+        # Se NPX não configurado mas PBX configurado: responde 200 com dados PBX
+        if not npx_configurado:
+            em = datetime.now(FUSO)
+            erro_npx = 'NPX_API_TOKEN não configurado no .env do servidor.'
+            todos_agentes = coletor_pbx.obter_agentes_pbx_only(set()) if pbx_disponivel else []
+            return _responder_dados(todos_agentes, em, erro_npx, status_pbx)
+
+        # NPX configurado: obtém dados da NPX
+        # Se PBX tem cache disponível, não bloqueia 12s se NPX ainda não tiver retrato
+        espera_npx = 0 if pbx_disponivel else 12
+        lista, em, erro = coletor.dados(espera=espera_npx)
+
+        # Se NPX indisponível (lista is None):
         if lista is None:
-            return jsonify(erro='Sem resposta da NPX.'), 502
-        nomes = nomes_filas()
-        chaves = list(dict.fromkeys(list(nomes) + [a['queue'] for a in lista if a['queue']]))
-        pode_gerenciar = pode()
-        if pode_gerenciar:
-            agentes_retorno = lista
+            # NPX indisponível sem PBX disponível: mantém 502 original
+            if not pbx_disponivel:
+                return jsonify(erro=erro or 'Sem resposta da NPX.'), 502
+            # PBX disponível: responde 200 com PBX-only registrados e erroNpx
+            em = datetime.now(FUSO)
+            erro_npx = erro or 'Sem resposta da NPX.'
+            todos_agentes = coletor_pbx.obter_agentes_pbx_only(set())
+            return _responder_dados(todos_agentes, em, erro_npx, status_pbx)
+
+        # NPX disponível e com dados:
+        agentes_enriquecidos = [dict(a) for a in lista]
+        if pbx_disponivel:
+            ramais_ambiguos = coletor_pbx.enriquecer_agentes(agentes_enriquecidos)
+            ramais_casados = {a['pbxExtension'] for a in agentes_enriquecidos if a.get('pbxExtension')}
+            codigos_existentes = {a['code'] for a in agentes_enriquecidos}
+            pbx_only = coletor_pbx.obter_agentes_pbx_only(codigos_existentes, ramais_casados, ramais_ambiguos=ramais_ambiguos)
+            todos_agentes = agentes_enriquecidos + pbx_only
         else:
-            campos_privados = {'callSrc', 'callDst', 'callClient'}
-            agentes_retorno = [{k: v for k, v in a.items() if k not in campos_privados} for a in lista]
-        resposta = jsonify(
-            atualizado=em.isoformat(), erroNpx=erro, layout=layout.obter(), podeGerenciar=pode_gerenciar,
-            painelConfigurado=bool(cliente_painel and cliente_painel.configurado),
-            filas=[{'key': k, 'nome': nomes.get(k, k.replace('_', ' '))} for k in chaves],
-            agentes=agentes_retorno)
-        resposta.headers['Cache-Control'] = 'no-store'
-        return resposta
+            for a in agentes_enriquecidos:
+                em_pausa = bool(a.get('paused'))
+                st = a.get('status')
+                a['line'] = 'npx' if (em_pausa or (st is not None and st != 0)) else 'off'
+                a['pbxExtension'] = None
+                a['pbxStatus'] = None
+                a['pbxNumber'] = None
+                a['pbxDirection'] = None
+                a['pbxSeconds'] = None
+            todos_agentes = agentes_enriquecidos
+
+        return _responder_dados(todos_agentes, em, erro, status_pbx)
 
     @bp.route('/admin/agentes/layout', methods=['POST'], endpoint='agentes_layout')
     def salvar_layout():
@@ -842,6 +938,9 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
             return jsonify(ok=False, mensagem=str(erro)), 400
         if not pode():
             return negar()
+        recusa = recusar_se_line_pbx(codigo)
+        if recusa:
+            return recusa
         if cliente_painel and cliente_painel.configurado:
             res = cliente_painel.executar('invert_pause_status', {'code': codigo, 'pause': '0'})
         else:
@@ -856,6 +955,9 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
             return jsonify(ok=False, mensagem=str(erro)), 400
         if not pode():
             return negar()
+        recusa = recusar_se_line_pbx(codigo)
+        if recusa:
+            return recusa
         if not (cliente_painel and cliente_painel.configurado):
             return jsonify(ok=False, mensagem='Painel NPX não configurado no servidor.'), 503
         res = cliente_painel.executar('invert_pause_status', {'code': codigo, 'pause': '1'})
@@ -869,6 +971,9 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
             return jsonify(ok=False, mensagem=str(erro)), 400
         if not pode():
             return negar()
+        recusa = recusar_se_line_pbx(codigo)
+        if recusa:
+            return recusa
         dados = request.get_json(silent=True) or {}
         try:
             fila = _validar_fila(dados.get('fila'), coletor)
@@ -890,6 +995,9 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
             return jsonify(ok=False, mensagem=str(erro)), 400
         if not pode():
             return negar()
+        recusa = recusar_se_line_pbx(codigo)
+        if recusa:
+            return recusa
         return responder_acao('deslogar', codigo, cliente.post(f'/callcenter/{codigo}/logoff'))
 
     @bp.route('/admin/agentes/transferir', methods=['POST'], endpoint='agentes_transferir')
@@ -901,6 +1009,9 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
             return jsonify(ok=False, mensagem=str(erro)), 400
         if not pode():
             return negar()
+        recusa = recusar_se_line_pbx(codigo)
+        if recusa:
+            return recusa
         try:
             res = transferir(cliente_painel, dados, coletor)
             return responder_acao('transferir', codigo, res)
@@ -916,6 +1027,9 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
             return jsonify(ok=False, mensagem=str(erro)), 400
         if not pode():
             return negar()
+        recusa = recusar_se_line_pbx(codigo)
+        if recusa:
+            return recusa
         try:
             res = alterar_prioridade(cliente_painel, dados, coletor)
             return responder_acao('prioridade', codigo, res)
