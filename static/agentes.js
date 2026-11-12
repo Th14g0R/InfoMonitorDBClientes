@@ -57,7 +57,14 @@
     if (d.length === 8) return `${d.slice(0, 4)}-${d.slice(4)}`;
     return n || '';
   }
-  const fila = k => filas.find(f => f.key === k) || {key: k, nome: k, temId: false};
+  const fila = k => {
+    if (k === 'PBX_Sem_Fila') {
+      const f = filas.find(x => x.key === k);
+      const nome = (f && f.nome && f.nome !== 'PBX (sem fila)') ? f.nome : 'Não logado';
+      return {key: k, nome, temId: false};
+    }
+    return filas.find(f => f.key === k) || {key: k, nome: k, temId: false};
+  };
   const maxValido = m => m != null && Number.isFinite(Number(m)) && Number(m) >= 0;
   const estourada = a => {
     if (!a.paused || !maxValido(a.pauseMaxMinutes) || a.pauseMinutes == null) return false;
@@ -143,7 +150,7 @@
   }
   // distribui as filas nas colunas: o que foi arrumado fica; filas novas vão para a coluna 2
   function arrumacao() {
-    const todas = filas.map(f => f.key);
+    const todas = filas.map(f => f.key).filter(k => k !== 'PBX_Sem_Fila' || dados.some(a => a.queue === 'PBX_Sem_Fila'));
     dados.forEach(a => { if (a.queue && !todas.includes(a.queue)) todas.push(a.queue); });
     const c1 = (layout.c1 || []).filter(k => todas.includes(k));
     const c2 = (layout.c2 || []).filter(k => todas.includes(k) && !c1.includes(k));
@@ -158,7 +165,7 @@
                       : `<span class="nome">${esc(a.name)}</span>`;
     const btn = PODE && a.paused ? `<button type="button" class="${est ? 'btn-pausa' : ''}" data-tirar="${esc(a.code)}" data-nome="${esc(a.name)}">Tirar pausa</button>` : '';
     const tagLinha = a.line === 'pbx' ? '<span class="tag-linha tag-pbx">PBX</span>'
-                   : (a.line === 'npx' || (!a.line && a.status != null) ? '<span class="tag-linha tag-npx">NPX</span>' : '');
+                   : (!String(a.code).startsWith('pbx-') ? '<span class="tag-linha tag-npx">NPX</span>' : '');
 
     const sub = a.line === 'pbx'
       ? (a.pbxExtension ? 'ramal ' + esc(a.pbxExtension) : (a.extension ? 'ramal ' + esc(a.extension) : esc(a.code)))
@@ -177,6 +184,7 @@
   }
   function card(k, cab) {
     const todos = dados.filter(a => a.queue === k);
+    if (k === 'PBX_Sem_Fila' && !todos.length) return '';
     const lista = ordenar(todos.filter(a => !soPausa() || a.paused));
     const n = f => todos.filter(f).length;
     const cont = `<div class="cont">
@@ -205,8 +213,11 @@
     const cab = COLS.map(([c, t]) => `<th ${PODE ? `data-col="${c}"` : ''} title="${c === 'penalty' ? 'Prioridade (1 = atende primeiro)' : t}" class="${o.col === c ? 'ativo' : ''}">${t}<span class="seta">${o.col === c ? (o.dir > 0 ? '▲' : '▼') : '↕'}</span></th>`).join('') + '<th></th>';
     const {c1, c2} = arrumacao();
     const dropFim = PODE ? '<div class="drop-fim" title="Solte aqui para mover para o fim da coluna"></div>' : '';
-    const coluna = (n, ks) => `<div class="col" data-coluna="${n}">${ks.map(k => card(k, cab)).join('') ||
-      (PODE ? '<div class="col-vazia">Arraste um grupo para cá</div>' : '')}${ks.length && PODE ? dropFim : ''}</div>`;
+    const coluna = (n, ks) => {
+      const cardsHtml = ks.map(k => card(k, cab)).filter(Boolean).join('');
+      return `<div class="col" data-coluna="${n}">${cardsHtml ||
+        (PODE ? '<div class="col-vazia">Arraste um grupo para cá</div>' : '')}${cardsHtml && PODE ? dropFim : ''}</div>`;
+    };
     const box = $('filas');
     AG.classList.toggle('duas-colunas', duasColunas());
     if (duasColunas()) { box.classList.add('duas'); box.innerHTML = coluna(1, c1) + coluna(2, c2); }
@@ -299,7 +310,7 @@
     const st = stDe(a), c = chamada(a);
     const ehPbx = a.line === 'pbx';
     const tagLinha = ehPbx ? ' <span class="tag-linha tag-pbx">PBX</span>'
-                           : (a.line === 'npx' || (!a.line && a.status != null) ? ' <span class="tag-linha tag-npx">NPX</span>' : '');
+                           : (!String(a.code).startsWith('pbx-') ? ' <span class="tag-linha tag-npx">NPX</span>' : '');
 
     const subRamal = ehPbx
       ? `Código ${esc(a.code)}${a.pbxExtension ? ' · ramal ' + esc(a.pbxExtension) : (a.extension && a.extension != a.code ? ' · ramal ' + esc(a.extension) : '')} · fila <b>${esc(fila(a.queue).nome)}</b>`
@@ -337,7 +348,7 @@
       $('bPausar').style.display = '';
       $('bPausar').disabled = !painelConfigurado;
       $('bPausar').title = '';
-      $('dPausa').textContent = 'Agente ativo / fora de pausa';
+      $('dPausa').textContent = a.line === 'off' ? 'Agente offline / fora de pausa' : 'Agente ativo / fora de pausa';
     }
 
     const destinos = filas.filter(f => f.key !== a.queue && f.key !== 'PBX_Sem_Fila');
