@@ -2,11 +2,11 @@
 
 > **Contexto:** Demanda pós-produção (Thiago).
 > **Problema 1:** Bruno em pausa NPX ("Trein. Remoto") com MicroSIP registrado/em ligação no PBX deve exibir linha/ramal/chamada PBX sem perder o estado de pausa da NPX e permitindo a ação "Tirar pausa" da NPX.
-> **Problema 2:** Investigação de fonte autoritativa de registro SIP/MicroSIP na NPX para analistas sem sessão de fila aparecerem no grupo "Não logado" com tag `[NPX]`.
+> **Problema 2 / Caso 3:** Investigação de fonte autoritativa de registro SIP/MicroSIP na NPX para analistas sem sessão de fila aparecerem no grupo "Não logado" com tag `[NPX]` — **DISPENSADO / FORA DO ESCOPO expressamente por Thiago em 12/11/2026** (não é mais pendência da entrega).
 
 ---
 
-## 1. Investigação da Fonte Autoritativa SIP NPX (Relatório de Lacuna Concreta)
+## 1. Investigação da Fonte Autoritativa SIP NPX (Relatório de Lacuna Concreta e Encerramento)
 
 ### 1.1. Inspeção no Infoboard (`\\192.168.243.2\c$\Tomcat 9.0\webapps\Infoboard`)
 - `npx-monitor-state.js`:
@@ -21,7 +21,7 @@
 - `/pabx/{codigo}/agent_status` responde `{status: 0, message: "Agente não está em nenhuma fila"}` quando o analista não está em fila. A instrução proíbe inferir SIP online a partir do status 0 ou histórico de login.
 - O painel web autenticado (`https://app.npx.com.br`) não possui rotas conhecidas para listar registros brutos do Asterisk/SIP softphone.
 - O usuário informou que NÃO possui links de documentação técnica ou tela NPX que exponham registros SIP de softphones desconectados de filas.
-- **Conclusão / Lacuna Concreta:** NÃO IDENTIFICAMOS fonte SIP nos endpoints e código consultados (Infoboard UNC, rotas conhecidas da API NPX e Rails panel). Não afirmamos que inexiste na API oficial toda (fato não provado), mas nos endpoints e documentos acessíveis não há fonte autoritativa disponível. Sem fonte autoritativa, NÃO criamos registro SIP fake ou por heurística nem adicionamos stubs ou métodos mortos especulativos. O terceiro caso fica **PENDENTE** de fonte autoritativa, e os 2 ajustes confirmados são concluídos com testes rigorosos.
+- **Conclusão / Lacuna Concreta e Decisão:** NÃO IDENTIFICAMOS fonte SIP nos endpoints e código consultados (Infoboard UNC, rotas conhecidas da API NPX e painel web). Não se afirma a inexistência na API oficial completa (fato não comprovado), mas não há fonte autoritativa disponível nos documentos e endpoints acessíveis. Sem fonte autoritativa, não criamos registros SIP fictícios ou por heurística nem adicionamos stubs mortos. **Decisão:** A etapa de investigação e implementação de NPX sem fila foi **DISPENSADA EXPRESSAMENTE POR THIAGO EM 12/11/2026** e declarada **FORA DO ESCOPO**, não constituindo mais pendência da entrega. Os 2 ajustes confirmados (Bruno pausa NPX + PBX e remoção da palavra "ramal", com contadores de categorias exclusivas) foram concluídos e homologados.
 
 ---
 
@@ -55,7 +55,7 @@ Além disso, `agentes_npx.py:recusar_se_line_pbx` bloqueava qualquer ação via 
 
 3. **Grupo "Não logado" (`PBX_Sem_Fila`)**:
    - Mantém analistas sem sessão NPX que estejam registrados no PBX agrupados sob `"Não logado"`.
-   - Sem adicionar stubs mortos ou heurísticas para SIP NPX sem fila até haver endpoint autoritativo.
+   - O caso de MicroSIP NPX sem fila foi expressamente dispensado do escopo por Thiago em 12/11/2026.
 
 ---
 
@@ -81,4 +81,4 @@ Além disso, `agentes_npx.py:recusar_se_line_pbx` bloqueava qualquer ação via 
 - **Etapa 3:** Escrever testes cobrindo a matriz completa e as regras de segurança/recusa de ações.
 - **Etapa 4:** Rodar suíte completa de testes (`.venv/Scripts/python.exe -m unittest discover -s tests` com `PYTHON_DOTENV_DISABLED=1`).
 - **Etapa 5:** Gravar commit local na branch `fix/agentes-presenca-telefonia`.
-- **Etapa 6:** Reportar ao Maestro1 com contrato, lacuna concreta e evidências.
+- **Etapa 6:** Reportar ao Maestro1 com contrato, encerramento do caso 3 fora do escopo e evidências.
