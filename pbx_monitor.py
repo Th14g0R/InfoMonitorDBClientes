@@ -31,7 +31,7 @@ TIMEOUT_PADRAO = 2.5
 VALIDADE_PBX = 15.0
 
 FILA_PBX_SEM_FILA = 'PBX_Sem_Fila'
-NOME_PBX_SEM_FILA = 'PBX (sem fila)'
+NOME_PBX_SEM_FILA = 'Não logado'
 
 # Mapeamento para filas oficiais conhecidas pelo sistema
 TRADUCAO_FILAS = {
@@ -648,7 +648,8 @@ class ColetorPbx:
             if pbx_status not in ('Free', 'Busy', 'Ringing'):
                 continue
 
-            dept_traduzido = traduzir_departamento(info.get('departamento'))
+            # Analista sem sessão NPX mas PBX registrado vai SEMPRE para o grupo 'Não logado' (PBX_Sem_Fila)
+            # Departamento no mapa não dirige PBX-only.
             pbx_number = pbx_info.get('number')
             pbx_direction = pbx_info.get('direction')
             pbx_seconds = pbx_info.get('seconds') or 0
@@ -656,7 +657,7 @@ class ColetorPbx:
             cards_pbx.append({
                 'code': codigo_pbx,
                 'name': nome,
-                'queue': dept_traduzido,
+                'queue': FILA_PBX_SEM_FILA,
                 'extension': ramal,
                 'status': 0,
                 'seconds': 0,

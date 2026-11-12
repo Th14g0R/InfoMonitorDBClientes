@@ -313,6 +313,8 @@ class TestColetorPbxP5EP6(unittest.TestCase):
         self.assertEqual(pbx_only[0]['name'], 'Carol')
         self.assertEqual(pbx_only[0]['code'], 'pbx-2022')
         self.assertEqual(pbx_only[0]['line'], 'pbx')
+        # Nova regra: PBX-only vai sempre para FILA_PBX_SEM_FILA ('PBX_Sem_Fila'), departamento não dirige
+        self.assertEqual(pbx_only[0]['queue'], FILA_PBX_SEM_FILA)
 
     def test_a6_ramais_ambiguos_excluidos_de_pbx_only(self):
         # A6: Ramais ambíguos na NPX ou no mapa devem ser excluídos de PBX-only para não duplicar pessoas
@@ -400,6 +402,30 @@ class TestColetorPbxP5EP6(unittest.TestCase):
         self.assertIn('2008', snap)
         self.assertNotIn('9999', snap)
         self.assertNotIn('8888', snap)
+
+    def test_nova_regra_explicita_pbx_only_sempre_vai_para_grupo_nao_logado_mesmo_com_departamento(self):
+        # Nova regra Thiago: Analista sem sessão NPX mas PBX registrado deve SEMPRE ir para FILA_PBX_SEM_FILA
+        # mesmo quando o mapa possui departamento preenchido (departamento não dirige PBX-only)
+        mapa = {
+            'Analista Suporte': {'ramal': '2030', 'departamento': 'InfoBrasil_Suporte'},
+            'Analista Comercial': {'ramal': '2031', 'departamento': 'InfoBrasil_Comercial'},
+            'Analista Offline': {'ramal': '2032', 'departamento': 'InfoBrasil_Suporte'},
+        }
+        coletor = ColetorPbx(cliente=MagicMock(), mapa_analistas=mapa)
+        coletor.snapshot = {
+            '2030': {'status': 'Free', 'number': None, 'direction': None, 'seconds': 0},
+            '2031': {'status': 'Busy', 'number': '85999991111', 'direction': 'inbound', 'seconds': 50},
+            '2032': {'status': 'Offline', 'number': None, 'direction': None, 'seconds': 0},
+        }
+        pbx_only = coletor.obter_agentes_pbx_only(codigos_npx_existentes=set())
+        # Analista Offline NÃO entra (sem agente offline sintético)
+        self.assertEqual(len(pbx_only), 2)
+        agentes_por_nome = {a['name']: a for a in pbx_only}
+        self.assertEqual(agentes_por_nome['Analista Suporte']['queue'], FILA_PBX_SEM_FILA)
+        self.assertEqual(agentes_por_nome['Analista Comercial']['queue'], FILA_PBX_SEM_FILA)
+        self.assertEqual(agentes_por_nome['Analista Suporte']['line'], 'pbx')
+        self.assertEqual(agentes_por_nome['Analista Comercial']['line'], 'pbx')
+        self.assertNotIn('Analista Offline', agentes_por_nome)
 
     def test_requisito_7_departamento_vazio_ou_desconhecido_vira_pbx_sem_fila(self):
         # Requisito 7: Analista do mapa registrado sem sessão NPX e com departamento vazio ou desconhecido

@@ -54,19 +54,21 @@ Em cada objeto da lista `agentes`:
 3. Senão:
    $\implies$ `line = 'off'`
 
-### 1.3. Agentes PBX-Only
+### 1.3. Agentes PBX-Only e Regra do Grupo "Não logado"
 - Analistas do mapa PBX cadastrados que não possuam sessão aberta na NPX.
-- Somente adiciona se estiverem REGISTRADOS no PBX (Free, Busy, Ringing), evitando inundar o painel com ramais offline desnecessários.
+- Somente adiciona se estiverem REGISTRADOS no PBX (`Free`, `Busy`, `Ringing`), evitando inundar o painel com ramais offline desnecessários. **NÃO criar agente offline sintético PBX-only**.
+- **Grupo Único "Não logado":** Todo analista sem sessão NPX mas com PBX registrado vai SEMPRE para a fila sintética `PBX_Sem_Fila`, exibida com o nome `"Não logado"` (`NOME_PBX_SEM_FILA = 'Não logado'`), mesmo que o mapa possua `departamento` configurado. O departamento do mapa não direciona agentes PBX-only.
 - Entram na lista de agentes com:
   - `code`: `f"pbx-{ramal}"`
   - `name`: Nome do analista no mapa
-  - `queue`: Departamento traduzido para `InfoBrasil_*`, ou fila sintética `PBX_Sem_Fila` (exibida como `PBX (sem fila)`) se desconhecida.
+  - `queue`: `PBX_Sem_Fila` (exibida como `"Não logado"`)
   - `extension`: ramal (ex: `"2008"`)
   - `status`: `0`
   - `paused`: `False`
   - `line`: `'pbx'`
   - `pbxExtension`, `pbxStatus`, `pbxNumber`, `pbxDirection`, `pbxSeconds` preenchidos.
-- A fila sintética `PBX_Sem_Fila` é excluída de destinos válidos de transferência e mutações na NPX.
+- A fila sintética `PBX_Sem_Fila` não é registrada permanentemente em `NOMES_PADRAO` e o grupo `"Não logado"` só existe dinamicamente quando houver agentes nessa situação, sumindo quando vazio.
+- A fila sintética `PBX_Sem_Fila` é estritamente bloqueada como destino válido de transferências e mutações na NPX (`_validar_fila`).
 
 ### 1.4. Proteção de Ações Backend (Recusa para line=pbx)
 - Qualquer mutação operacional via POST (`/admin/agentes/*`: tirar pausa, colocar pausa, remover fila, transferir, prioridade, deslogar) direcionada a um agente com `line == 'pbx'` (seja PBX-only ou NPX offline casado com PBX) é expressamente recusada com HTTP 400, impedindo mutações indevidas na NPX.
@@ -75,12 +77,19 @@ Em cada objeto da lista `agentes`:
 - Se `podeGerenciar == False`:
   - `pbxNumber` é omitido/definido como `None` na serialização final de `/agentes/dados`, alinhado à proteção de `callSrc`, `callDst` e `callClient`.
 
-### 1.6. Requisito 7 — Mapa como Única Fonte Explícita de Identidade
-- O arquivo `config/analysts_map.json` é a **única fonte explícita de identidade dos analistas**.
-- Não há qualquer inferência ou derivação de nomes a partir de `username`, nem exposição de dispositivos fora do mapa (evita exibir URAs, troncos, ramais virtuais ou genéricos).
-- Dispositivos SIP registrados na central PBX que não possuam correspondência no mapa de analistas são completamente ignorados.
-- Analistas cadastrados no mapa que estejam registrados no PBX sem sessão aberta na NPX e cujo departamento seja vazio ou desconhecido recebem a fila sintética `PBX_Sem_Fila` (com exibição `"PBX (sem fila)"`).
-- **Novos analistas:** Qualquer novo analista adicionado à operação necessita obrigatoriamente de uma entrada no arquivo `config/analysts_map.json` (`nome`, `ramal`, `departamento`) para ser reconhecido e exibido no painel. Nenhuma nova variável de ambiente ou faixa de ramais foi adicionada, preservando o escopo estrito.
+### 1.6. Nova Regra Explícita (Thiago) — Filas NPX, Grupo "Não logado" e Ações NPX Offline
+Esta regra substitui o detalhamento original do Requisito 7:
+1. **Visibilidade nas Filas NPX:** O analista aparece nas filas NPX (`InfoBrasil_*`) **APENAS** se possuir sessão NPX aberta no momento (`coletor.retrato`).
+2. **Precedência NPX Ativa/Pausa:** Mantém precedência estrita (`line = 'npx'`), preservando a fila NPX.
+3. **NPX Status 0 / Offline e PBX Registrada:** Exibe dados PBX com `line = 'pbx'`, mas **mantém a(s) fila(s) NPX** do analista, sem movê-lo de fila. Ações via painel NPX são recusadas com HTTP 400 (`recusar_se_line_pbx`).
+4. **NPX Offline e PBX Offline/Ausente:** Mantém todos os metadados da NPX intactos (`code`, `extension`, `queue`, `penalty`), status cinza com `line = 'off'`, e **permite ações NPX normalmente** (especialmente `colocar-pausa` via POST no painel fake).
+5. **Agentes PBX-Only (Sem Sessão NPX e PBX Registrado):**
+   - Vão **SEMPRE** para o grupo único exibido como `"Não logado"` (`FILA_PBX_SEM_FILA = 'PBX_Sem_Fila'`, `NOME_PBX_SEM_FILA = 'Não logado'`), mesmo quando o mapa possui `departamento` preenchido. O departamento não dirige o PBX-only.
+   - O grupo `"Não logado"` só existe dinamicamente quando há agentes nessa condição; desaparece quando vazio.
+   - Fila sintética `PBX_Sem_Fila` é rejeitada como destino em `_validar_fila`.
+   - Ações operacionais para agentes PBX-only (`line = 'pbx'`) continuam recusadas (HTTP 400).
+6. **Ausência Total:** Não criar agente offline sintético PBX-only. Agentes sem sessão NPX e ausentes/offline no PBX não aparecem no painel.
+7. **Identidade via Mapa:** O mapa continua sendo a única fonte de identidade e ramal. Dispositivos SIP fora do mapa continuam estritamente ignorados. Novos analistas necessitam de entrada no mapa.
 
 ---
 

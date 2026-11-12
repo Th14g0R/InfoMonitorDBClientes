@@ -808,11 +808,13 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
         if coletor and coletor.retrato:
             # A3: Enriquece o retrato INTEIRO com unicidade global para não divergir da tela em colisão
             retrato_enriquecido = [dict(a) for a in coletor.retrato]
+            pbx_disp = False
             if coletor_pbx and coletor_pbx.cliente.configurado:
                 st_pbx = coletor_pbx.obter_status_conexao()
                 if st_pbx.get('available'):
                     coletor_pbx.enriquecer_agentes(retrato_enriquecido)
-            else:
+                    pbx_disp = True
+            if not pbx_disp:
                 for a in retrato_enriquecido:
                     em_pausa = bool(a.get('paused'))
                     st = a.get('status')
