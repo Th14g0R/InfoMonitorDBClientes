@@ -987,6 +987,487 @@ class BackupsFtpAdminTest(unittest.TestCase):
         valor_decifrado = resp_rev.get_json()['valor']
         self.assertEqual(json.loads(valor_decifrado), {'host': 'srv01', 'porta': 8080})
 
+    # =========================================================================
+    # Testes dos Endpoints do Gerador de Listas Cobian (.lst)
+    # =========================================================================
+
+    def test_gerar_lista_rotina_sucesso_retorna_201_e_grava_versao_com_aead(self):
+        """POST gerar-lista gera .lst válido, cifra com AEAD, grava auditoria e retorna 201."""
+        from backups_ftp_admin import decifrar_dado
+
+        self._login_master()
+        resp_rot = self.client.post('/admin/backups-ftp/rotina', json={
+            'cliente_alias': 'CLIENTE-GERA-TESTE',
+            'nome_rotina': 'Rotina Gera Teste',
+            'servidor': 'ims.iprojectti.com.br',
+            'porta': '8821',
+            'usuario': 'cli-gera',
+        })
+        self.assertEqual(resp_rot.status_code, 201)
+        rotina_id = resp_rot.get_json()['rotina']['id']
+
+        resp_gera = self.client.post(f'/admin/backups-ftp/rotina/{rotina_id}/gerar-lista', json={
+            'comentario_versao': 'Comentário da versão 1 gerada',
+            'preset': 'fbk',
+            'host': 'ims.iprojectti.com.br',
+            'porta': '8821',
+            'usuario': 'cli-gera',
+            'diretorio_inicial': '/',
+        })
+        self.assertEqual(resp_gera.status_code, 201)
+        data = resp_gera.get_json()
+        self.assertTrue(data['sucesso'])
+        v = data['versao']
+        self.assertEqual(v['versao_numero'], 1)
+        self.assertEqual(v['encoding_detectado'], 'UTF-16LE')
+        self.assertIn('checksum_sha256', v)
+        self.assertGreater(v['tamanho_bytes'], 0)
+
+        # Checa cabeçalhos restritivos
+        self.assertIn('no-store', resp_gera.headers.get('Cache-Control', ''))
+        self.assertEqual(resp_gera.headers.get('Vary', ''), 'Cookie')
+
+        # Checa gravação no banco SQLite com chave AEAD
+        cursor = self.conn.cursor()
+        row = cursor.execute("""
+            SELECT * FROM backups_ftp_listas_versoes WHERE id = ?
+        """, (v['id'],)).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row['versao_numero'], 1)
+
+        nome_dec = decifrar_dado(row['nome_original_cifrado'], f"list:{rotina_id}:1:nome")
+        self.assertEqual(nome_dec, 'CLIENTE-GERA-TESTE-cobian.lst')
+
+        coment_dec = decifrar_dado(row['comentario_cifrado'], f"list:{rotina_id}:1:comentario")
+        self.assertEqual(coment_dec, 'Comentário da versão 1 gerada')
+
+        conteudo_dec = decifrar_dado(row['conteudo_cifrado'], f"list:{rotina_id}:1:conteudo")
+        self.assertIn('Name=IMS-CLIENTE-GERA-TESTE-13h', conteudo_dec)
+        self.assertIn('Name=IMS-CLIENTE-GERA-TESTE-23h', conteudo_dec)
+        self.assertIn('FTP Host=ims.iprojectti.com.br', conteudo_dec)
+        self.assertIn('FTP Port=8821', conteudo_dec)
+        self.assertIn('FTP User name=cli-gera', conteudo_dec)
+
+        # Checa auditoria
+        audit = cursor.execute("""
+            SELECT * FROM backups_ftp_auditoria
+            WHERE rotina_id = ? AND acao = 'gerar_lista'
+        """, (rotina_id,)).fetchone()
+        self.assertIsNotNone(audit)
+        self.assertTrue(audit['resultado'].startswith('sucesso;reaproveitado=0'))
+        self.assertEqual(audit['campo_ou_segredo'], 'lista_cobian')
+
+    def test_gerar_lista_rotina_reaproveitamento_hash_sucesso_e_recusas(self):
+        """Reaproveitamento exige correspondência estrita (host+porta+user) e isolamento da rotina."""
+        from backups_ftp_admin import decifrar_dado
+        from cobian_generator import gerar_arquivo_cobian_lst, obter_preset_fbk
+
+        self._login_master()
+        resp_rot1 = self.client.post('/admin/backups-ftp/rotina', json={
+            'cliente_alias': 'CLIENTE-REAPROV',
+            'nome_rotina': 'Rotina Reaprov',
+            'servidor': 'ims.iprojectti.com.br',
+            'porta': '8821',
+            'usuario': 'cli-reaprov',
+        })
+        rotina1_id = resp_rot1.get_json()['rotina']['id']
+
+        # Gera versão 1 com hash conhecido via upload manual
+        dados_v1 = {
+            'alias': 'CLIENTE-REAPROV',
+            'host': 'ims.iprojectti.com.br',
+            'porta': '8821',
+            'usuario': 'cli-reaprov',
+            'diretorio_inicial': '/',
+            'hash_senha': 'aGFzaFZhbGlkb0NvYmlhbjEyMzQ1',
+            'tarefas': obter_preset_fbk('CLIENTE-REAPROV'),
+        }
+        bytes_v1 = gerar_arquivo_cobian_lst(dados_v1)
+        resp_up = self.client.post(
+            f'/admin/backups-ftp/rotina/{rotina1_id}/upload-list',
+            data={'arquivo': (BytesIO(bytes_v1), 'lista_v1.lst')},
+            content_type='multipart/form-data'
+        )
+        self.assertEqual(resp_up.status_code, 201)
+        v1_id = resp_up.get_json()['versao']['id']
+
+        # 1. Sucesso: todos os parâmetros coincidem
+        resp_gera = self.client.post(f'/admin/backups-ftp/rotina/{rotina1_id}/gerar-lista', json={
+            'preset': 'fbk',
+            'host': 'ims.iprojectti.com.br',
+            'porta': '8821',
+            'usuario': 'cli-reaprov',
+            'reaproveitar_hash': True,
+            'reaproveitar_versao_id': v1_id,
+        })
+        self.assertEqual(resp_gera.status_code, 201)
+        v2_id = resp_gera.get_json()['versao']['id']
+
+        cursor = self.conn.cursor()
+        v2_row = cursor.execute("SELECT * FROM backups_ftp_listas_versoes WHERE id = ?", (v2_id,)).fetchone()
+        conteudo_v2 = decifrar_dado(v2_row['conteudo_cifrado'], f"list:{rotina1_id}:2:conteudo")
+        self.assertIn('FTP Password=aGFzaFZhbGlkb0NvYmlhbjEyMzQ1', conteudo_v2)
+
+        # Checa auditoria com reaproveitado=1 e ref_id
+        audit_reap = cursor.execute("""
+            SELECT * FROM backups_ftp_auditoria
+            WHERE rotina_id = ? AND acao = 'gerar_lista' AND versao_id = ?
+        """, (rotina1_id, v2_id)).fetchone()
+        self.assertIsNotNone(audit_reap)
+        self.assertEqual(audit_reap['resultado'], f'sucesso;reaproveitado=1;ref={v1_id}')
+
+        # 2. Recusa: porta divergente (8821 vs 21)
+        resp_porta_dif = self.client.post(f'/admin/backups-ftp/rotina/{rotina1_id}/gerar-lista', json={
+            'preset': 'fbk',
+            'host': 'ims.iprojectti.com.br',
+            'porta': '21',
+            'usuario': 'cli-reaprov',
+            'reaproveitar_hash': True,
+            'reaproveitar_versao_id': v1_id,
+        })
+        self.assertEqual(resp_porta_dif.status_code, 400)
+        self.assertIn('Porta divergente', resp_porta_dif.get_json().get('erro', ''))
+
+        # 3. Recusa: usuário divergente
+        resp_user_dif = self.client.post(f'/admin/backups-ftp/rotina/{rotina1_id}/gerar-lista', json={
+            'preset': 'fbk',
+            'host': 'ims.iprojectti.com.br',
+            'porta': '8821',
+            'usuario': 'outro-user',
+            'reaproveitar_hash': True,
+            'reaproveitar_versao_id': v1_id,
+        })
+        self.assertEqual(resp_user_dif.status_code, 400)
+        self.assertIn('Usuário divergente', resp_user_dif.get_json().get('erro', ''))
+
+        # 4. Recusa: host divergente
+        resp_host_dif = self.client.post(f'/admin/backups-ftp/rotina/{rotina1_id}/gerar-lista', json={
+            'preset': 'fbk',
+            'host': 'outro.servidor.com',
+            'porta': '8821',
+            'usuario': 'cli-reaprov',
+            'reaproveitar_hash': True,
+            'reaproveitar_versao_id': v1_id,
+        })
+        self.assertEqual(resp_host_dif.status_code, 400)
+        self.assertIn('Host divergente', resp_host_dif.get_json().get('erro', ''))
+
+        # 5. Recusa: versão de OUTRA rotina (isolamento WHERE id = ? AND rotina_id = ?)
+        resp_rot2 = self.client.post('/admin/backups-ftp/rotina', json={
+            'cliente_alias': 'OUTRO-CLIENTE',
+            'nome_rotina': 'Rotina 2',
+        })
+        rotina2_id = resp_rot2.get_json()['rotina']['id']
+
+        resp_cruzada = self.client.post(f'/admin/backups-ftp/rotina/{rotina2_id}/gerar-lista', json={
+            'preset': 'fbk',
+            'host': 'ims.iprojectti.com.br',
+            'porta': '8821',
+            'usuario': 'cli-reaprov',
+            'reaproveitar_hash': True,
+            'reaproveitar_versao_id': v1_id,  # v1 pertence à rotina 1
+        })
+        self.assertEqual(resp_cruzada.status_code, 400)
+        self.assertIn('não encontrada para esta rotina', resp_cruzada.get_json().get('erro', ''))
+
+    def test_download_lista_gerada_sucesso_e_auditoria_fail_closed(self):
+        """Download direto entrega binário UTF-16LE com headers adequados e auditoria fail-closed."""
+        self._login_master()
+        resp_rot = self.client.post('/admin/backups-ftp/rotina', json={
+            'cliente_alias': 'CLIENTE-DOWN',
+            'nome_rotina': 'Rotina Download',
+            'servidor': 'ims.iprojectti.com.br',
+            'porta': '8821',
+            'usuario': 'cli-down',
+        })
+        rotina_id = resp_rot.get_json()['rotina']['id']
+
+        # 1. Download bem-sucedido
+        resp_dl = self.client.post(f'/admin/backups-ftp/rotina/{rotina_id}/download-lista-gerada', json={
+            'preset': 'fbk',
+            'host': 'ims.iprojectti.com.br',
+            'porta': '8821',
+            'usuario': 'cli-down',
+            'diretorio_inicial': '/',
+        })
+        self.assertEqual(resp_dl.status_code, 200)
+        self.assertIn('text/plain', resp_dl.content_type)
+        self.assertIn('utf-16le', resp_dl.content_type)
+        self.assertIn('CLIENTE-DOWN-cobian.lst', resp_dl.headers.get('Content-Disposition', ''))
+
+        # Binário tem BOM UTF-16LE e decodifica para lista Cobian válida
+        raw_bytes = resp_dl.get_data()
+        self.assertTrue(raw_bytes.startswith(b'\xff\xfe'))
+        texto_dec = raw_bytes[2:].decode('utf-16le')
+        self.assertIn('Name=IMS-CLIENTE-DOWN-13h', texto_dec)
+        self.assertIn('Name=IMS-CLIENTE-DOWN-23h', texto_dec)
+
+        # Checa registro de auditoria com sha256
+        cursor = self.conn.cursor()
+        audit = cursor.execute("""
+            SELECT * FROM backups_ftp_auditoria
+            WHERE rotina_id = ? AND acao = 'download_lista_gerada'
+        """, (rotina_id,)).fetchone()
+        self.assertIsNotNone(audit)
+        self.assertTrue(audit['resultado'].startswith('sucesso:'))
+
+        # 2. Fail-Closed: se auditoria falha, aborta com 500 sem entregar o arquivo
+        with patch('backups_ftp_admin._gravar_auditoria_commit', side_effect=sqlite3.OperationalError('disk error')):
+            resp_fail = self.client.post(f'/admin/backups-ftp/rotina/{rotina_id}/download-lista-gerada', json={
+                'preset': 'fbk',
+                'host': 'ims.iprojectti.com.br',
+                'porta': '8821',
+                'usuario': 'cli-down',
+            })
+            self.assertEqual(resp_fail.status_code, 500)
+            self.assertIn('Falha ao registrar auditoria', resp_fail.get_json().get('erro', ''))
+
+    def test_controle_acesso_e_permissoes_novas_rotas(self):
+        """Usuário anônimo redireciona para login e operador não-master recebe 403."""
+        # 1. Usuário anônimo: redireciona para /admin/login (302)
+        resp_anon_gera = self.client.post('/admin/backups-ftp/rotina/1/gerar-lista', json={})
+        self.assertEqual(resp_anon_gera.status_code, 302)
+        self.assertIn('/admin/login', resp_anon_gera.headers.get('Location', ''))
+
+        resp_anon_down = self.client.post('/admin/backups-ftp/rotina/1/download-lista-gerada', json={})
+        self.assertEqual(resp_anon_down.status_code, 302)
+        self.assertIn('/admin/login', resp_anon_down.headers.get('Location', ''))
+
+        # 2. Usuário logado comum (sem perfil master): 403
+        self._login_comum()
+        resp_comum_gera = self.client.post('/admin/backups-ftp/rotina/1/gerar-lista', json={})
+        self.assertEqual(resp_comum_gera.status_code, 403)
+        self.assertIn('Requer perfil Master', resp_comum_gera.get_json().get('erro', ''))
+
+        resp_comum_down = self.client.post('/admin/backups-ftp/rotina/1/download-lista-gerada', json={})
+        self.assertEqual(resp_comum_down.status_code, 403)
+        self.assertIn('Requer perfil Master', resp_comum_down.get_json().get('erro', ''))
+
+    def test_gerar_lista_retencao_max_10_versoes_atomica(self):
+        """Geração sucessiva deve respeitar retenção atômica de 10 versões mais recentes."""
+        self._login_master()
+        resp_rot = self.client.post('/admin/backups-ftp/rotina', json={
+            'cliente_alias': 'CLIENTE-RETENCAO',
+            'nome_rotina': 'Rotina Retenção',
+            'servidor': 'ims.iprojectti.com.br',
+            'porta': '8821',
+            'usuario': 'cli-ret',
+        })
+        rotina_id = resp_rot.get_json()['rotina']['id']
+
+        for i in range(1, 13):
+            resp = self.client.post(f'/admin/backups-ftp/rotina/{rotina_id}/gerar-lista', json={
+                'preset': 'fbk',
+                'host': 'ims.iprojectti.com.br',
+                'porta': '8821',
+                'usuario': 'cli-ret',
+                'comentario_versao': f'Versao {i}'
+            })
+            self.assertEqual(resp.status_code, 201)
+
+        cursor = self.conn.cursor()
+        total = cursor.execute("SELECT COUNT(*) FROM backups_ftp_listas_versoes WHERE rotina_id = ?", (rotina_id,)).fetchone()[0]
+        self.assertEqual(total, 10)
+
+        versoes = [r[0] for r in cursor.execute("SELECT versao_numero FROM backups_ftp_listas_versoes WHERE rotina_id = ? ORDER BY versao_numero ASC", (rotina_id,)).fetchall()]
+        self.assertEqual(versoes, list(range(3, 13)))
+
+    def test_gerar_lista_validacoes_estritas_e_negativas(self):
+        """Validações estritas de payload, tipos, preset, tarefas e portas no endpoint gerar-lista."""
+        self._login_master()
+        resp_rot = self.client.post('/admin/backups-ftp/rotina', json={
+            'cliente_alias': 'CLIENTE-VALIDACOES',
+            'nome_rotina': 'Rotina Validacoes',
+            'servidor': 'ims.iprojectti.com.br',
+            'porta': '8821',
+            'usuario': 'cli-val',
+        })
+        rotina_id = resp_rot.get_json()['rotina']['id']
+
+        # 1. Payload não-JSON ou não-dicionário
+        resp1 = self.client.post(
+            f'/admin/backups-ftp/rotina/{rotina_id}/gerar-lista',
+            data='não json',
+            content_type='text/plain'
+        )
+        self.assertEqual(resp1.status_code, 400)
+        self.assertIn('Payload deve ser um objeto JSON', resp1.get_json().get('erro', ''))
+
+        # 2. Preset inválido
+        resp2 = self.client.post(f'/admin/backups-ftp/rotina/{rotina_id}/gerar-lista', json={
+            'preset': 'invalido',
+            'host': 'ims.iprojectti.com.br',
+            'usuario': 'cli-val'
+        })
+        self.assertEqual(resp2.status_code, 400)
+        self.assertIn('Preset inválido', resp2.get_json().get('erro', ''))
+
+        # 3. Porta inválida (fora da faixa ou não numérica)
+        resp3 = self.client.post(f'/admin/backups-ftp/rotina/{rotina_id}/gerar-lista', json={
+            'preset': 'fbk',
+            'host': 'ims.iprojectti.com.br',
+            'usuario': 'cli-val',
+            'porta': 70000
+        })
+        self.assertEqual(resp3.status_code, 400)
+        self.assertIn('Porta FTP fora da faixa válida', resp3.get_json().get('erro', ''))
+
+        # 4. reaproveitar_hash não booleano
+        resp4 = self.client.post(f'/admin/backups-ftp/rotina/{rotina_id}/gerar-lista', json={
+            'preset': 'fbk',
+            'host': 'ims.iprojectti.com.br',
+            'usuario': 'cli-val',
+            'reaproveitar_hash': 'verdadeiro'
+        })
+        self.assertEqual(resp4.status_code, 400)
+        self.assertIn('reaproveitar_hash deve ser um booleano', resp4.get_json().get('erro', ''))
+
+        # 5. Preset custom sem tarefas
+        resp5 = self.client.post(f'/admin/backups-ftp/rotina/{rotina_id}/gerar-lista', json={
+            'preset': 'custom',
+            'host': 'ims.iprojectti.com.br',
+            'usuario': 'cli-val'
+        })
+        self.assertEqual(resp5.status_code, 400)
+        self.assertIn('Tarefas não especificadas', resp5.get_json().get('erro', ''))
+
+        # 6. Tarefa tentando sobrescrever host (configuração global)
+        resp6 = self.client.post(f'/admin/backups-ftp/rotina/{rotina_id}/gerar-lista', json={
+            'preset': 'custom',
+            'host': 'ims.iprojectti.com.br',
+            'usuario': 'cli-val',
+            'tarefas': [{
+                'nome': 'Tarefa 1',
+                'ativo': True,
+                'origem': 'C:\\data',
+                'horario': '13:00',
+                'tipo_origem': 'fbk',
+                'host': 'outro.servidor.com'
+            }]
+        })
+        self.assertEqual(resp6.status_code, 400)
+        self.assertIn('não pode sobrescrever a configuração de destino (host)', resp6.get_json().get('erro', ''))
+
+        # 7. Tarefa com campo não permitido
+        resp7 = self.client.post(f'/admin/backups-ftp/rotina/{rotina_id}/gerar-lista', json={
+            'preset': 'custom',
+            'host': 'ims.iprojectti.com.br',
+            'usuario': 'cli-val',
+            'tarefas': [{
+                'nome': 'Tarefa 1',
+                'ativo': True,
+                'origem': 'C:\\data',
+                'horario': '13:00',
+                'tipo_origem': 'fbk',
+                'campo_arbitrario': 'hacker'
+            }]
+        })
+        self.assertEqual(resp7.status_code, 400)
+        self.assertIn('Campo não permitido na tarefa', resp7.get_json().get('erro', ''))
+
+    def test_regressao_put_null(self):
+        """PUT com notas=null, responsavel=null, servidor=null não vira texto 'None', persistindo NULL no banco."""
+        from backups_ftp_admin import decifrar_dado
+        self._login_master()
+        resp_post = self.client.post('/admin/backups-ftp/rotina', json={
+            'cliente_alias': 'CLI-REGRESSAO-NULL',
+            'nome_rotina': 'Rotina Inicial',
+            'servidor': 'ftp.antigo.com',
+            'porta': '21',
+            'usuario': 'usr_ini',
+            'responsavel': 'Responsavel Inicial',
+            'notas': 'Notas Iniciais',
+        })
+        self.assertEqual(resp_post.status_code, 201)
+        rotina_id = resp_post.get_json()['rotina']['id']
+
+        # Atualiza enviando null em notas, responsavel, servidor
+        resp_put = self.client.put(f'/admin/backups-ftp/rotina/{rotina_id}', json={
+            'expected_revision': 1,
+            'servidor': None,
+            'porta': '8821',
+            'responsavel': None,
+            'notas': None,
+        })
+        self.assertEqual(resp_put.status_code, 200)
+
+        # Checa no banco de dados se as colunas estão NULL ou vazias, NUNCA a string 'None'
+        cursor = self.conn.cursor()
+        row = cursor.execute("SELECT * FROM backups_ftp_rotinas WHERE id = ?", (rotina_id,)).fetchone()
+        self.assertIsNone(row['servidor_cifrado'])
+        self.assertIsNone(row['responsavel_cifrado'])
+        self.assertIsNone(row['notas_cifradas'])
+
+        porta_dec = decifrar_dado(row['porta_cifrada'], f"rotina:{rotina_id}:porta")
+        self.assertEqual(porta_dec, '8821')
+
+        # Consulta via GET retorna campos limpos, nunca a string 'None'
+        resp_get = self.client.get(f'/admin/backups-ftp/cliente/CLI-REGRESSAO-NULL/rotinas')
+        self.assertEqual(resp_get.status_code, 200)
+        rotinas = resp_get.get_json().get('rotinas', [])
+        self.assertTrue(len(rotinas) >= 1)
+        r = [x for x in rotinas if x['id'] == rotina_id][0]
+        self.assertEqual(r['servidor'], '')
+        self.assertEqual(r['responsavel'], '')
+        self.assertEqual(r['notas'], '')
+        self.assertNotEqual(r['notas'], 'None')
+        self.assertNotEqual(r['responsavel'], 'None')
+        self.assertNotEqual(r['servidor'], 'None')
+
+    def test_validacao_estrita_reaproveitar_versao_id(self):
+        """reaproveitar_versao_id exige número inteiro estrito (rejeita bool, float e string com 400)."""
+        self._login_master()
+        resp_post = self.client.post('/admin/backups-ftp/rotina', json={
+            'cliente_alias': 'CLI-STRICT-REAPROV',
+            'nome_rotina': 'Rotina Strict',
+            'servidor': 'srv.local',
+            'porta': '8821',
+            'usuario': 'usr_strict',
+        })
+        rotina_id = resp_post.get_json()['rotina']['id']
+
+        for invalido in (True, False, '1', '123', 1.5, [1], {'id': 1}):
+            resp = self.client.post(f'/admin/backups-ftp/rotina/{rotina_id}/gerar-lista', json={
+                'preset': 'fbk',
+                'host': 'ims.iprojectti.com.br',
+                'porta': 8821,
+                'usuario': 'usr_strict',
+                'reaproveitar_hash': True,
+                'reaproveitar_versao_id': invalido,
+            })
+            self.assertEqual(resp.status_code, 400, f"Falhou ao rejeitar reaproveitar_versao_id={invalido!r}")
+            self.assertIn('inteiro estrito', resp.get_json().get('erro', ''))
+
+    def test_fallback_filename_cliente_cobian_lst_nunca_aliascru(self):
+        """Quando o alias do cliente se reduz a vazio no secure_filename, o nome da lista é sempre 'cliente-cobian.lst'."""
+        from backups_ftp_admin import decifrar_dado
+        self._login_master()
+        resp_post = self.client.post('/admin/backups-ftp/rotina', json={
+            'cliente_alias': '???',
+            'nome_rotina': 'Rotina Alias Vazio',
+            'servidor': 'srv.local',
+            'porta': '8821',
+            'usuario': 'usr_vazio',
+        })
+        rotina_id = resp_post.get_json()['rotina']['id']
+
+        resp_gen = self.client.post(f'/admin/backups-ftp/rotina/{rotina_id}/gerar-lista', json={
+            'preset': 'fbk',
+            'host': 'ims.iprojectti.com.br',
+            'porta': 8821,
+            'usuario': 'usr_vazio',
+        })
+        self.assertEqual(resp_gen.status_code, 201)
+
+        cursor = self.conn.cursor()
+        row = cursor.execute("""
+            SELECT nome_original_cifrado FROM backups_ftp_listas_versoes
+            WHERE rotina_id = ?
+        """, (rotina_id,)).fetchone()
+        nome_dec = decifrar_dado(row['nome_original_cifrado'], f"list:{rotina_id}:1:nome")
+        self.assertEqual(nome_dec, 'cliente-cobian.lst')
+        self.assertNotIn('???', nome_dec)
+
 
 if __name__ == '__main__':
     unittest.main()

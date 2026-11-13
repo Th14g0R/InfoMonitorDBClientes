@@ -225,6 +225,15 @@ class BackupsFtpAdminWebIntegrationTest(unittest.TestCase):
         self.assertIn('backups_ftp_admin.css', html)
         self.assertIn('name="csrf-token"', html)
 
+        # Controles do Gerador Cobian (Marco 3)
+        self.assertIn('btn-abrir-gerador-list', html)
+        self.assertIn('modal-sub-gerar-lista-cobian', html)
+        self.assertIn('ftp-gerador-preset', html)
+        self.assertIn('ftp-check-reaproveitar-hash', html)
+        self.assertIn('ftp-gerador-comentario-versao', html)
+        self.assertIn('btn-salvar-versao-gerada', html)
+        self.assertIn('btn-baixar-lista-gerada', html)
+
     # -------------------------------------------------------------------------
     # Cenário 2: Novo Endpoint GET /admin/backups-ftp/clientes
     # -------------------------------------------------------------------------
@@ -292,6 +301,23 @@ class BackupsFtpAdminWebIntegrationTest(unittest.TestCase):
         self.assertIn('no-store', resp_post_json_com_csrf.headers.get('Cache-Control', ''))
         self.assertEqual(resp_post_json_com_csrf.headers.get('Vary', ''), 'Cookie')
 
+        # Novas rotas de geração/download Cobian também devem redirecionar anônimo
+        resp_anon_gerar = self.client.post(
+            '/admin/backups-ftp/rotina/1/gerar-lista',
+            json={'preset': 'fbk', 'host': 'ims.iprojectti.com.br', 'porta': '8821', 'usuario': 'u'},
+            headers={'X-CSRF-Token': 'token-anonimo'}
+        )
+        self.assertEqual(resp_anon_gerar.status_code, 302)
+        self.assertIn('/admin/login', resp_anon_gerar.headers.get('Location', ''))
+
+        resp_anon_down = self.client.post(
+            '/admin/backups-ftp/rotina/1/download-lista-gerada',
+            json={'preset': 'fbk', 'host': 'ims.iprojectti.com.br', 'porta': '8821', 'usuario': 'u'},
+            headers={'X-CSRF-Token': 'token-anonimo'}
+        )
+        self.assertEqual(resp_anon_down.status_code, 302)
+        self.assertIn('/admin/login', resp_anon_down.headers.get('Location', ''))
+
     def test_bloqueio_endpoints_admin_operador_nao_master(self):
         """Operador autenticado mas sem eh_master deve receber 403 Forbidden em todos os endpoints."""
         self._login_comum()
@@ -319,6 +345,20 @@ class BackupsFtpAdminWebIntegrationTest(unittest.TestCase):
             headers={'X-CSRF-Token': csrf}
         )
         self.assertEqual(resp_rev_extra.status_code, 403)
+
+        resp_comum_gerar = self.client.post(
+            '/admin/backups-ftp/rotina/1/gerar-lista',
+            json={'preset': 'fbk', 'host': 'ims.iprojectti.com.br', 'porta': '8821', 'usuario': 'u'},
+            headers={'X-CSRF-Token': csrf}
+        )
+        self.assertEqual(resp_comum_gerar.status_code, 403)
+
+        resp_comum_down = self.client.post(
+            '/admin/backups-ftp/rotina/1/download-lista-gerada',
+            json={'preset': 'fbk', 'host': 'ims.iprojectti.com.br', 'porta': '8821', 'usuario': 'u'},
+            headers={'X-CSRF-Token': csrf}
+        )
+        self.assertEqual(resp_comum_down.status_code, 403)
 
     # -------------------------------------------------------------------------
     # Cenário 4: Ciclo CRUD de Rotinas, Campo lancamento_em e Concorrência
@@ -779,6 +819,20 @@ class BackupsFtpAdminWebIntegrationTest(unittest.TestCase):
                 'POST',
                 f'/admin/backups-ftp/rotina/{rotina_id}/lista/{versao_id}/ver-conteudo',
                 lambda: {}
+            ),
+            # 10: Gerar lista Cobian (.lst)
+            (
+                '10_gerar_lista_cobian',
+                'POST',
+                f'/admin/backups-ftp/rotina/{rotina_id}/gerar-lista',
+                lambda: {'json': {'preset': 'fbk', 'host': 'ims.iprojectti.com.br', 'porta': '8821', 'usuario': 'user_base'}}
+            ),
+            # 11: Download direto de lista gerada (.lst)
+            (
+                '11_download_lista_gerada',
+                'POST',
+                f'/admin/backups-ftp/rotina/{rotina_id}/download-lista-gerada',
+                lambda: {'json': {'preset': 'fbk', 'host': 'ims.iprojectti.com.br', 'porta': '8821', 'usuario': 'user_base'}}
             )
         ]
 
@@ -979,6 +1033,73 @@ class BackupsFtpAdminWebIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(resp_rev_leg.status_code, 200)
         self.assertEqual(resp_rev_leg.get_json()['valor'], 'ValorAntigo123')
+
+    # -------------------------------------------------------------------------
+    # Cenário 11: E2E Gerador Cobian (Salvar Versão e Download)
+    # -------------------------------------------------------------------------
+
+    def test_e2e_gerador_cobian_salvar_e_download(self):
+        """Fluxo E2E: criar rotina, gerar lista via preset FBK, inspecionar conteúdo e baixar .lst."""
+        self._login_master()
+        csrf = self._obter_csrf()
+
+        # 1. Cria rotina
+        resp_cria = self.client.post(
+            '/admin/backups-ftp/rotina',
+            json={
+                'cliente_alias': 'CLIENTE-E2E-COBIAN',
+                'nome_rotina': 'Rotina E2E Cobian',
+                'servidor': 'ims.iprojectti.com.br',
+                'porta': '8821',
+                'usuario': 'cli-e2e',
+            },
+            headers={'X-CSRF-Token': csrf}
+        )
+        self.assertEqual(resp_cria.status_code, 201)
+        rotina_id = resp_cria.get_json()['rotina']['id']
+
+        # 2. Gera e salva como nova versão
+        payload_gerador = {
+            'comentario_versao': 'Versão E2E Automática',
+            'preset': 'fbk',
+            'host': 'ims.iprojectti.com.br',
+            'porta': '8821',
+            'usuario': 'cli-e2e',
+            'diretorio_inicial': '/',
+        }
+        resp_gera = self.client.post(
+            f'/admin/backups-ftp/rotina/{rotina_id}/gerar-lista',
+            json=payload_gerador,
+            headers={'X-CSRF-Token': csrf}
+        )
+        self.assertEqual(resp_gera.status_code, 201)
+        versao_obj = resp_gera.get_json()['versao']
+        self.assertEqual(versao_obj['versao_numero'], 1)
+        self.assertEqual(versao_obj['encoding_detectado'], 'UTF-16LE')
+
+        # 3. Inspeciona a versão gerada via endpoint oficial
+        resp_insp = self.client.post(
+            f'/admin/backups-ftp/rotina/{rotina_id}/lista/{versao_obj["id"]}/ver-conteudo',
+            headers={'X-CSRF-Token': csrf}
+        )
+        self.assertEqual(resp_insp.status_code, 200)
+        conteudo = resp_insp.get_json()['conteudo']
+        self.assertIn('Name=IMS-CLIENTE-E2E-COBIAN-13h', conteudo)
+        self.assertIn('Name=IMS-CLIENTE-E2E-COBIAN-23h', conteudo)
+        self.assertIn('FTP Host=ims.iprojectti.com.br', conteudo)
+
+        # 4. Download direto da lista gerada
+        resp_down = self.client.post(
+            f'/admin/backups-ftp/rotina/{rotina_id}/download-lista-gerada',
+            json=payload_gerador,
+            headers={'X-CSRF-Token': csrf}
+        )
+        self.assertEqual(resp_down.status_code, 200)
+        self.assertIn('CLIENTE-E2E-COBIAN-cobian.lst', resp_down.headers.get('Content-Disposition', ''))
+        raw_bytes = resp_down.get_data()
+        self.assertTrue(raw_bytes.startswith(b'\xff\xfe'))
+        txt_down = raw_bytes[2:].decode('utf-16le')
+        self.assertIn('Name=IMS-CLIENTE-E2E-COBIAN-13h', txt_down)
 
 
 if __name__ == '__main__':

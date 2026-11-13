@@ -3,12 +3,16 @@
   --bg: var(--cor-fundo, #f4f6f9); --card: var(--cor-superficie, #fff); --tx: var(--cor-texto, #1d2733);
   --mut: var(--cor-texto-suave, #6b7785); --line: var(--cor-borda, #e3e8ee); --shade: rgba(0,0,0,.04);
   --livre: #16a34a; --lig: #dc2626; --pausa: #2563eb; --cham: #ea580c; --off: #9aa5b1; --tint: 9%; --tint2: 18%;
-  --pbx-livre: #22c55e; --pbx-lig: #ef4444; --pbx-cham: #f97316;
+  --pbx-livre: #0d9488; --pbx-lig: #e11d48; --pbx-cham: #d97706; --pbx-pausa: #0284c7;
+  --livre-tx: #166534; --lig-tx: #b91c1c; --pausa-tx: #1d4ed8; --cham-tx: #9a3412; --off-tx: #475569;
+  --pbx-livre-tx: #115e59; --pbx-lig-tx: #be123c; --pbx-cham-tx: #92400e; --pbx-pausa-tx: #0369a1;
   color: var(--tx); font-size: 15px; line-height: 1.4;
 }
 [data-theme="dark"] #ag {
   --shade: rgba(255,255,255,.04); --livre: #22c55e; --lig: #ef4444; --pausa: #3b82f6; --cham: #f97316; --off: #6b7785;
-  --pbx-livre: #4ade80; --pbx-lig: #f87171; --pbx-cham: #fb923c;
+  --pbx-livre: #2dd4bf; --pbx-lig: #fb7185; --pbx-cham: #fbbf24; --pbx-pausa: #38bdf8;
+  --livre-tx: #22c55e; --lig-tx: #f87171; --pausa-tx: #60a5fa; --cham-tx: #f97316; --off-tx: #94a3b8;
+  --pbx-livre-tx: #2dd4bf; --pbx-lig-tx: #fb7185; --pbx-cham-tx: #fbbf24; --pbx-pausa-tx: #38bdf8;
   --tint: 14%; --tint2: 26%;
 }
 body:has(#ag) { background: var(--cor-fundo, #f4f6f9); margin: 0; }
@@ -85,7 +89,18 @@ body:has(#ag) { background: var(--cor-fundo, #f4f6f9); margin: 0; }
 #ag tr.l-pbx-livre td { background: color-mix(in srgb, var(--pbx-livre) var(--tint), transparent); }
 #ag tr.l-pbx-lig td   { background: color-mix(in srgb, var(--pbx-lig)   var(--tint), transparent); }
 #ag tr.l-pbx-cham td  { background: color-mix(in srgb, var(--pbx-cham)  var(--tint2), transparent); }
+#ag tr.l-pbx-pausa td { background: color-mix(in srgb, var(--pbx-pausa) var(--tint), transparent); }
 #ag tr.l-pbx-off td   { background: color-mix(in srgb, var(--off)       var(--tint), transparent); color: var(--mut); }
+#ag tr.l-livre, #ag .pill.l-livre { --c-tx: var(--livre-tx); }
+#ag tr.l-lig, #ag .pill.l-lig     { --c-tx: var(--lig-tx); }
+#ag tr.l-cham, #ag .pill.l-cham   { --c-tx: var(--cham-tx); }
+#ag tr.l-pausa, #ag .pill.l-pausa { --c-tx: var(--pausa-tx); }
+#ag tr.l-off, #ag .pill.l-off     { --c-tx: var(--off-tx); }
+#ag tr.l-pbx-livre, #ag .pill.l-pbx-livre { --c-tx: var(--pbx-livre-tx); }
+#ag tr.l-pbx-lig, #ag .pill.l-pbx-lig     { --c-tx: var(--pbx-lig-tx); }
+#ag tr.l-pbx-cham, #ag .pill.l-pbx-cham   { --c-tx: var(--pbx-cham-tx); }
+#ag tr.l-pbx-pausa, #ag .pill.l-pbx-pausa { --c-tx: var(--pbx-pausa-tx); }
+#ag tr.l-pbx-off, #ag .pill.l-pbx-off     { --c-tx: var(--off-tx); }
 #ag tr.presa td, #ag tr.estourada td { background: color-mix(in srgb, var(--pausa) var(--tint2), transparent); animation: ag-pulso-azul 3s ease-in-out infinite; }
 #ag tr.estourada .pill, #ag tr.presa .pill { animation: ag-pulso-azul 3s ease-in-out infinite; }
 @keyframes ag-pulso-azul { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
@@ -100,13 +115,13 @@ body:has(#ag) { background: var(--cor-fundo, #f4f6f9); margin: 0; }
 #ag .st-cell .pill-txt { display: block; white-space: normal; overflow-wrap: anywhere; line-height: 1.15; min-width: 0; }
 #ag .st-cell .tag-linha { flex: none; margin-left: 0; font-size: 8.5px; padding: 1px 3px; border-radius: 3px; letter-spacing: .02em; }
 #ag .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; font-size: 13px; font-weight: 600;
-  color: var(--c); background: color-mix(in srgb, var(--c) 15%, var(--card)); max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  color: var(--c-tx, var(--c)); background: color-mix(in srgb, var(--c) 15%, var(--card)); max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 #ag .pill::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
 #ag tr.l-cham .pill::before, #ag tr.l-pbx-cham .pill::before { animation: ag-pisca 1s infinite; }
 @keyframes ag-pisca { 50% { opacity: .2; } }
 #ag .tag { font-size: 11px; font-weight: 700; color: #fff; background: var(--pausa); border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
 #ag .tag-linha { font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; letter-spacing: .03em; text-transform: uppercase; vertical-align: middle; margin-left: 6px; border: 1px solid var(--line); line-height: 1.2; display: inline-block; }
-#ag .tag-npx { background: color-mix(in srgb, var(--pausa) 12%, var(--card)); color: var(--pausa); border-color: color-mix(in srgb, var(--pausa) 25%, var(--line)); }
+#ag .tag-npx { background: color-mix(in srgb, var(--pausa) 12%, var(--card)); color: var(--pausa-tx, var(--pausa)); border-color: color-mix(in srgb, var(--pausa) 25%, var(--line)); }
 #ag .tag-pbx { background: color-mix(in srgb, var(--pbx-livre) 14%, var(--card)); color: var(--tx); border-color: color-mix(in srgb, var(--pbx-livre) 30%, var(--line)); }
 #ag .nome { font-weight: 600; }
 #ag button.nome { background: none; border: 0; padding: 0; color: inherit; text-decoration: underline dotted; text-underline-offset: 3px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }

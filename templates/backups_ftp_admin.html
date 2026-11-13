@@ -103,7 +103,10 @@
         <div id="ftp-visao-listas-cobian" style="display: none; margin-top: 14px; border-top: 2px solid var(--cor-borda, #e2e8f0); padding-top: 14px;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
                 <h4 style="margin: 0; font-size: 0.95em;">📄 Listas de Tarefas Cobian (.list / .lst)</h4>
-                <button type="button" class="btn btn-sm" id="btn-fechar-visao-listas">Voltar para Rotinas</button>
+                <div style="display: flex; gap: 8px;">
+                    <button type="button" class="btn btn-sm btn-primario" id="btn-abrir-gerador-list">⚡ Gerar Lista Cobian .lst</button>
+                    <button type="button" class="btn btn-sm" id="btn-fechar-visao-listas">Voltar para Rotinas</button>
+                </div>
             </div>
 
             <div id="ftp-upload-list-box" style="background: var(--cor-fundo, #f8fafc); border: 1px dashed var(--cor-borda, #e2e8f0); border-radius: 6px; padding: 12px; margin-bottom: 12px;">
@@ -133,6 +136,101 @@
                 <pre id="ftp-pre-conteudo-list" class="ftp-codigo-pre"></pre>
                 <div style="text-align: right; margin-top: 10px;">
                     <button type="button" class="btn btn-sm" id="btn-fechar-submodal-conteudo-rodape">Fechar Visualização</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Sub-Modal: Gerar Lista Cobian 11 (.lst) com Presets -->
+        <div id="modal-sub-gerar-lista-cobian" class="ftp-submodal-overlay" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="submodal-gerador-titulo">
+            <div class="ftp-submodal-card" style="max-width: 680px; max-height: 85vh; display: flex; flex-direction: column;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <h4 id="submodal-gerador-titulo" style="margin: 0; font-size: 1em; display: flex; align-items: center; gap: 6px;">
+                        ⚡ Gerador de Listas Cobian 11 (.lst)
+                    </h4>
+                    <button type="button" class="ftp-admin-btn-close" id="btn-fechar-submodal-gerador" aria-label="Fechar gerador">&times;</button>
+                </div>
+
+                <div style="overflow-y: auto; padding-right: 4px; flex: 1;">
+                    <!-- Aviso de Senha Cobian (Spec 5.1) -->
+                    <div style="font-size: 0.82em; margin-bottom: 12px; background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; padding: 10px; border-radius: 6px; line-height: 1.4;">
+                        ℹ <strong>Aviso de Senha Cobian 11:</strong> A senha do FTP não é gravada em texto plano no Cobian 11. Após importar a lista no cliente, abra as propriedades da tarefa no Cobian e digite a senha da rotina para que o Cobian gere a senha codificada localmente (ou marque abaixo para reaproveitar a senha codificada de uma versão anterior compatível).
+                    </div>
+
+                    <!-- Configurações Globais da Lista e Conexão FTP -->
+                    <div style="background: var(--cor-fundo, #f8fafc); border: 1px solid var(--cor-borda, #e2e8f0); border-radius: 6px; padding: 10px; margin-bottom: 12px;">
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px;">
+                            <div>
+                                <label style="display: block; font-size: 0.8em; font-weight: 600; margin-bottom: 2px;">Perfil da Rotina (Preset):</label>
+                                <select id="ftp-gerador-preset" class="ftp-input" style="width: 100%;">
+                                    <option value="fbk">Padrão InfoBackup (FBK) — 13h e 23h (Recomendado)</option>
+                                    <option value="fdb">Banco Direto (FDB) — 23h (Parada de Serviço)</option>
+                                    <option value="custom">Personalizado (Múltiplas Tarefas)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label style="display: block; font-size: 0.8em; font-weight: 600; margin-bottom: 2px;">Host FTP:</label>
+                                <input type="text" id="ftp-gerador-host" class="ftp-input" style="width: 100%;" placeholder="ex: ims.iprojectti.com.br">
+                            </div>
+                        </div>
+
+                        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 8px;">
+                            <div>
+                                <label style="display: block; font-size: 0.8em; font-weight: 600; margin-bottom: 2px;">Porta FTP:</label>
+                                <input type="text" id="ftp-gerador-porta" class="ftp-input" style="width: 100%;" value="8821">
+                            </div>
+                            <div>
+                                <label style="display: block; font-size: 0.8em; font-weight: 600; margin-bottom: 2px;">Usuário FTP:</label>
+                                <input type="text" id="ftp-gerador-usuario" class="ftp-input" style="width: 100%;">
+                            </div>
+                            <div>
+                                <label style="display: block; font-size: 0.8em; font-weight: 600; margin-bottom: 2px;">Diretório Inicial:</label>
+                                <input type="text" id="ftp-gerador-dir" class="ftp-input" style="width: 100%;" value="/">
+                            </div>
+                        </div>
+
+                        <div>
+                            <label style="display: block; font-size: 0.8em; font-weight: 600; margin-bottom: 2px;">Comentário da Versão (Histórico do Monitor):</label>
+                            <input type="text" id="ftp-gerador-comentario-versao" class="ftp-input" style="width: 100%;" placeholder="Descrição desta versão no histórico do Monitor (opcional)">
+                        </div>
+                    </div>
+
+                    <!-- Opção de Reaproveitamento de Senha Codificada (Opt-in) -->
+                    <div style="margin-bottom: 12px; padding: 10px; background: var(--cor-fundo, #f8fafc); border: 1px solid var(--cor-borda, #e2e8f0); border-radius: 6px;">
+                        <label style="display: flex; align-items: center; gap: 8px; font-size: 0.85em; cursor: pointer; font-weight: 600;">
+                            <input type="checkbox" id="ftp-check-reaproveitar-hash">
+                            <span>Reaproveitar senha codificada de versão anterior da mesma rotina</span>
+                        </label>
+                        <div id="ftp-box-reaproveitar-versao" style="display: none; margin-top: 8px;">
+                            <label style="display: block; font-size: 0.78em; color: var(--cor-texto-suave, #64748b); margin-bottom: 2px;">Versão de referência (deve possuir mesmo host, porta e usuário):</label>
+                            <select id="ftp-select-versao-reaproveitar" class="ftp-input" style="width: 100%;"></select>
+                        </div>
+                        <div id="ftp-box-reaproveitar-vazio" style="display: none; font-size: 0.8em; color: var(--cor-texto-suave, #64748b); margin-top: 6px;">
+                            Nenhuma versão anterior disponível para reaproveitamento de senha.
+                        </div>
+                    </div>
+
+                    <!-- Aviso de Serviço Firebird (FDB) (Spec 3.2) -->
+                    <div id="ftp-aviso-fdb" style="display: none; font-size: 0.82em; margin-bottom: 12px; background: #fffbeb; border: 1px solid #fef3c7; color: #b45309; padding: 10px; border-radius: 6px; line-height: 1.4;">
+                        ⚠ <strong>Aviso Firebird (FDB):</strong> Este preset declara comandos para parar o serviço <code>FirebirdServerDefaultInstance</code> antes da cópia e reiniciá-lo após o backup. O Monitor não altera serviços locais no servidor; essas ações serão executadas pelo Cobian Backup na máquina do cliente.
+                    </div>
+
+                    <!-- Tarefas da Lista -->
+                    <div style="margin-top: 8px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <strong style="font-size: 0.88em;">Tarefas Agendadas no Cobian:</strong>
+                            <button type="button" class="btn btn-sm" id="btn-adicionar-tarefa" style="display: none;">+ Adicionar Tarefa</button>
+                        </div>
+                        <div id="ftp-gerador-tarefas-container" style="display: flex; flex-direction: column; gap: 8px;">
+                            <!-- Tarefas dinâmicas inseridas via JS -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Ações do Rodapé -->
+                <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; border-top: 1px solid var(--cor-borda, #e2e8f0); padding-top: 10px;">
+                    <button type="button" class="btn btn-sm" id="btn-cancelar-gerador">Cancelar</button>
+                    <button type="button" class="btn btn-sm" id="btn-baixar-lista-gerada" title="Download direto do arquivo .lst para envio ao cliente">📥 Baixar Arquivo .lst</button>
+                    <button type="button" class="btn btn-sm btn-disparo" id="btn-salvar-versao-gerada" title="Salvar lista gerada como nova versão criptografada no Monitor">💾 Salvar como Nova Versão</button>
                 </div>
             </div>
         </div>
