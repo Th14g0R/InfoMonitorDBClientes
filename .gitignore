@@ -53,6 +53,7 @@ dataprivada/
 data_privada/
 secrets/
 *.lst
+!tests/fixtures/amostra_cobian_sanitizada.lst
 *.list
 *.bak
 *.zip

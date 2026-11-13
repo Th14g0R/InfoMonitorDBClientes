@@ -31,6 +31,9 @@
   // ---------- utilidades ----------
   const stDe = a => {
     if (a.line === 'pbx') {
+      if (a.pbxStatus === 'Busy') return ST_PBX['Busy'];
+      if (a.pbxStatus === 'Ringing') return ST_PBX['Ringing'];
+      if (a.paused) return ['Em pausa', 'var(--pbx-pausa)', 0, 'l-pbx-pausa'];
       return ST_PBX[String(a.pbxStatus || '')] || [a.pbxStatus || a.erro || 'Desconhecido', 'var(--off)', 5, 'l-pbx-off'];
     }
     if (a.line === 'off') {
@@ -91,7 +94,7 @@
         const num = a.pbxNumber ? fmtFone(a.pbxNumber) : (a.pbxStatus === 'Ringing' ? 'Chamando' : 'Em ligação');
         res = `${num}${dur}`;
       } else if (a.pbxStatus === 'Free') {
-        res = 'Livre';
+        res = a.paused ? '' : 'Livre';
       } else {
         res = a.pbxStatus || '';
       }
@@ -128,7 +131,7 @@
           chamadaHtml = `<span class="mut">${a.pbxStatus === 'Ringing' ? 'Chamando' : 'Em ligação'}</span>${dur}`;
         }
       } else if (a.pbxStatus === 'Free') {
-        chamadaHtml = '<span class="mut">Livre</span>';
+        chamadaHtml = a.paused ? '' : '<span class="mut">Livre</span>';
       } else {
         chamadaHtml = '<span class="mut">—</span>';
       }
@@ -207,7 +210,7 @@
 
     return `<tr class="${st[3]}${est ? ' estourada presa' : ''}" style="--c:${st[1]}">
       <td>${nome}<br><span class="mut" title="${esc(a.code)}">${sub}</span></td>
-      <td><div class="st-cell"><span class="pill" style="--c:${st[1]}"><span class="pill-txt">${esc(st[0])}</span></span>${tagLinha}</div></td>
+      <td><div class="st-cell"><span class="pill ${st[3]}" style="--c:${st[1]}"><span class="pill-txt">${esc(st[0])}</span></span>${tagLinha}</div></td>
       <td class="tempo">${tempoTxt}</td>
       <td>${esc(a.penalty ?? '–')}</td>
       <td>${situacaoHtml(a)}</td><td>${btn}</td></tr>`;
@@ -360,7 +363,7 @@
 
     $('dNome').innerHTML = `${esc(a.name)}${tagLinha}`;
     $('dInfo').innerHTML = `${subRamal}<br>
-      <span class="pill" style="--c:${st[1]}">${esc(st[0])}</span>${callTxt}`;
+      <span class="pill ${st[3]}" style="--c:${st[1]}">${esc(st[0])}</span>${callTxt}`;
     $('aPausa').style.display = '';
 
     const durPausa = a.pauseMinutes != null ? a.pauseMinutes * 60 : (a.seconds || 0);

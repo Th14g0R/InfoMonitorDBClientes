@@ -29,6 +29,15 @@ from flask import Blueprint, request, jsonify, session, redirect, Response
 from werkzeug.utils import secure_filename
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from cobian_generator import (
+    gerar_arquivo_cobian_lst,
+    obter_preset_fbk,
+    obter_preset_fdb,
+    extrair_hash_senha_compativel,
+    validar_porta_cobian,
+    validar_host_cobian,
+)
+
 
 LIMITE_LISTA_BYTES = 2 * 1024 * 1024  # 2 MiB (File bytes)
 MAX_VERSOES_RETENCAO = 10
@@ -1459,5 +1468,354 @@ def configurar_backups_ftp_admin(bp: Blueprint, conectar, obter_status):
                 'versao_numero': versao['versao_numero'],
                 'conteudo': conteudo
             }, 200)
+        finally:
+            conn.close()
+
+    # -----------------------------------------------------------------------
+    # Helper Privado: Validação e Preparação dos Dados da Lista Cobian
+    # -----------------------------------------------------------------------
+    ALLOWED_TASK_KEYS = {
+        'nome', 'ativo', 'origem', 'horario', 'tipo_origem',
+        'pre_evento_tipo', 'pre_evento_caminho', 'pre_evento_pausa',
+        'pos_evento_tipo', 'pos_evento_caminho', 'comentario'
+    }
+    FORBIDDEN_TASK_KEYS = {'host', 'porta', 'usuario', 'diretorio_inicial', 'hash_senha'}
+
+    def _preparar_dados_gerador_cobian(rotina: sqlite3.Row, payload: dict, cursor: sqlite3.Cursor):
+        rotina_id = rotina['id']
+        cliente_alias = rotina['cliente_alias']
+
+        # 1. Preset
+        preset_raw = payload.get('preset')
+        if preset_raw is None:
+            preset = 'fbk'
+        elif isinstance(preset_raw, str):
+            preset = preset_raw.strip().lower()
+        else:
+            return None, _resposta_com_headers({'erro': 'Preset deve ser texto.'}, 400)
+
+        if preset not in ('fbk', 'fdb', 'custom'):
+            return None, _resposta_com_headers({'erro': 'Preset inválido. Escolha fbk, fdb ou custom.'}, 400)
+
+        # 2. Host
+        host_raw = payload.get('host')
+        if not isinstance(host_raw, str):
+            return None, _resposta_com_headers({'erro': 'Host FTP é obrigatório e deve ser texto.'}, 400)
+        host = host_raw.strip()
+        if not host:
+            return None, _resposta_com_headers({'erro': 'Host FTP é obrigatório.'}, 400)
+        try:
+            validar_host_cobian(host)
+        except (ValueError, TypeError) as e:
+            return None, _resposta_com_headers({'erro': str(e)}, 400)
+
+        # 3. Porta
+        porta_raw = payload.get('porta', 8821)
+        try:
+            porta = validar_porta_cobian(porta_raw)
+        except (ValueError, TypeError) as e:
+            return None, _resposta_com_headers({'erro': str(e)}, 400)
+
+        # 4. Usuário
+        usuario_raw = payload.get('usuario')
+        if not isinstance(usuario_raw, str):
+            return None, _resposta_com_headers({'erro': 'Usuário FTP é obrigatório e deve ser texto.'}, 400)
+        usuario = usuario_raw.strip()
+        if not usuario:
+            return None, _resposta_com_headers({'erro': 'Usuário FTP é obrigatório.'}, 400)
+
+        # 5. Diretório inicial
+        diretorio_raw = payload.get('diretorio_inicial', '/')
+        if not isinstance(diretorio_raw, str):
+            return None, _resposta_com_headers({'erro': 'Diretório inicial deve ser texto.'}, 400)
+        diretorio_inicial = diretorio_raw.strip() or '/'
+
+        # 6. Reaproveitar hash
+        reaproveitar_raw = payload.get('reaproveitar_hash', False)
+        if not isinstance(reaproveitar_raw, bool):
+            return None, _resposta_com_headers({'erro': 'reaproveitar_hash deve ser um booleano (true/false).'}, 400)
+        reaproveitar_hash = reaproveitar_raw
+
+        hash_senha = ""
+        reaproveitado = False
+        ref_id = None
+
+        if reaproveitar_hash:
+            reaproveitar_versao_id = payload.get('reaproveitar_versao_id')
+            if reaproveitar_versao_id is None:
+                return None, _resposta_com_headers({'erro': 'ID da versão anterior é obrigatório para reaproveitar hash de senha.'}, 400)
+            if type(reaproveitar_versao_id) is not int:
+                return None, _resposta_com_headers({'erro': 'reaproveitar_versao_id deve ser um número inteiro estrito.'}, 400)
+            ref_id = reaproveitar_versao_id
+
+            versao_ref = cursor.execute("""
+                SELECT id, versao_numero, conteudo_cifrado FROM backups_ftp_listas_versoes
+                WHERE id = ? AND rotina_id = ?
+            """, (ref_id, rotina_id)).fetchone()
+            if not versao_ref:
+                return None, _resposta_com_headers({'erro': 'Versão de referência não encontrada para esta rotina.'}, 400)
+
+            try:
+                conteudo_ref = decifrar_dado(versao_ref['conteudo_cifrado'], f"list:{rotina_id}:{versao_ref['versao_numero']}:conteudo")
+            except Exception:
+                return None, _resposta_com_headers({'erro': 'Falha ao descriptografar conteúdo da versão de referência.'}, 503)
+
+            try:
+                hash_senha = extrair_hash_senha_compativel(conteudo_ref, host, porta, usuario)
+                reaproveitado = True
+            except ValueError as e:
+                return None, _resposta_com_headers({'erro': str(e)}, 400)
+
+        # 7. Tarefas
+        tarefas_in = payload.get('tarefas')
+        if tarefas_in is not None:
+            if not isinstance(tarefas_in, list):
+                return None, _resposta_com_headers({'erro': 'tarefas deve ser uma lista de tarefas.'}, 400)
+            if len(tarefas_in) == 0 or len(tarefas_in) > 10:
+                return None, _resposta_com_headers({'erro': 'A lista de tarefas deve conter entre 1 e 10 itens.'}, 400)
+
+            for i, t in enumerate(tarefas_in, 1):
+                if not isinstance(t, dict):
+                    return None, _resposta_com_headers({'erro': f'Tarefa #{i} deve ser um objeto dicionário.'}, 400)
+                chaves = set(t.keys())
+                for forb in FORBIDDEN_TASK_KEYS:
+                    if forb in chaves:
+                        return None, _resposta_com_headers({
+                            'erro': f'Tarefa #{i} não pode sobrescrever a configuração de destino ({forb}). O destino é global.'
+                        }, 400)
+                for k in chaves:
+                    if k not in ALLOWED_TASK_KEYS:
+                        return None, _resposta_com_headers({'erro': f'Campo não permitido na tarefa #{i}: "{k}".'}, 400)
+            tarefas = tarefas_in
+        elif preset == 'fbk':
+            tarefas = obter_preset_fbk(cliente_alias)
+        elif preset == 'fdb':
+            tarefas = obter_preset_fdb(cliente_alias)
+        else:
+            return None, _resposta_com_headers({'erro': 'Tarefas não especificadas para preset personalizado.'}, 400)
+
+        # 8. Montar dados da lista
+        dados_lista = {
+            'alias': cliente_alias,
+            'host': host,
+            'porta': porta,
+            'usuario': usuario,
+            'diretorio_inicial': diretorio_inicial,
+            'hash_senha': hash_senha,
+            'tarefas': tarefas,
+        }
+
+        try:
+            file_bytes = gerar_arquivo_cobian_lst(dados_lista)
+        except (ValueError, TypeError) as e:
+            return None, _resposta_com_headers({'erro': str(e)}, 400)
+
+        alias_sanitizado = secure_filename(cliente_alias or '')
+        if alias_sanitizado:
+            nome_seguro = f"{alias_sanitizado}-cobian.lst"
+        else:
+            nome_seguro = "cliente-cobian.lst"
+
+        try:
+            texto_decodificado, encoding, checksum_sha256 = _validar_e_processar_lista(file_bytes, nome_seguro)
+        except PayloadTooLargeError as e:
+            return None, _resposta_com_headers({'erro': str(e)}, 413)
+        except FormatoInvalidoError as e:
+            return None, _resposta_com_headers({'erro': str(e)}, 400)
+
+        # 9. Comentário da versão
+        comentario_raw = payload.get('comentario_versao', '')
+        if not isinstance(comentario_raw, str):
+            return None, _resposta_com_headers({'erro': 'comentario_versao deve ser texto.'}, 400)
+        comentario_versao = comentario_raw.strip()
+
+        return (
+            dados_lista,
+            file_bytes,
+            texto_decodificado,
+            encoding,
+            checksum_sha256,
+            nome_seguro,
+            comentario_versao,
+            reaproveitado,
+            ref_id
+        ), None
+
+    # -----------------------------------------------------------------------
+    # POST: Gerar e versionar lista Cobian (.lst) via presets
+    # -----------------------------------------------------------------------
+    @bp.route('/admin/backups-ftp/rotina/<int:id>/gerar-lista', methods=['POST'])
+    @_requer_master
+    def gerar_lista_rotina(id):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return _resposta_com_headers({'erro': 'Payload deve ser um objeto JSON.'}, 400)
+
+        try:
+            obter_chave_aead()
+        except CryptoKeyError:
+            return _resposta_com_headers({'erro': 'Serviço de criptografia temporariamente indisponível.'}, 503)
+
+        conn = conectar()
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.cursor()
+            rotina = cursor.execute("SELECT * FROM backups_ftp_rotinas WHERE id = ?", (id,)).fetchone()
+            if not rotina:
+                return _resposta_com_headers({'erro': 'Rotina não encontrada.'}, 404)
+
+            dados_prep, erro_resp = _preparar_dados_gerador_cobian(rotina, payload, cursor)
+            if erro_resp:
+                return erro_resp
+
+            (
+                dados_lista,
+                file_bytes,
+                texto_decodificado,
+                encoding,
+                checksum_sha256,
+                nome_arquivo,
+                comentario_versao,
+                reaproveitado,
+                ref_id
+            ) = dados_prep
+
+            cursor.execute("BEGIN IMMEDIATE")
+            rotina = cursor.execute("SELECT * FROM backups_ftp_rotinas WHERE id = ?", (id,)).fetchone()
+            if not rotina:
+                conn.rollback()
+                return _resposta_com_headers({'erro': 'Rotina não encontrada.'}, 404)
+
+            max_v = cursor.execute("""
+                SELECT MAX(versao_numero) FROM backups_ftp_listas_versoes WHERE rotina_id = ?
+            """, (id,)).fetchone()[0]
+            proxima_versao = (max_v or 0) + 1
+
+            nome_cifrado = cifrar_dado(nome_arquivo, f"list:{id}:{proxima_versao}:nome")
+            comentario_cifrado = cifrar_dado(comentario_versao, f"list:{id}:{proxima_versao}:comentario")
+            conteudo_cifrado = cifrar_dado(texto_decodificado, f"list:{id}:{proxima_versao}:conteudo")
+
+            agora_iso = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+            operador = _obter_identificador_usuario()
+            ip_origem = _obter_ip_cliente()
+
+            cursor.execute("""
+                INSERT INTO backups_ftp_listas_versoes (
+                    rotina_id, versao_numero, tamanho_bytes, encoding_detectado, checksum_sha256,
+                    nome_original_cifrado, comentario_cifrado, conteudo_cifrado,
+                    enviado_por, enviado_em
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (id, proxima_versao, len(file_bytes), encoding, checksum_sha256,
+                  nome_cifrado, comentario_cifrado, conteudo_cifrado, str(operador), agora_iso))
+            nova_versao_id = cursor.lastrowid
+
+            # Retenção atômica
+            versoes_existentes = cursor.execute("""
+                SELECT id FROM backups_ftp_listas_versoes
+                WHERE rotina_id = ?
+                ORDER BY versao_numero DESC
+            """, (id,)).fetchall()
+
+            if len(versoes_existentes) > MAX_VERSOES_RETENCAO:
+                ids_para_excluir = [v['id'] for v in versoes_existentes[MAX_VERSOES_RETENCAO:]]
+                placeholders = ','.join('?' for _ in ids_para_excluir)
+                cursor.execute(f"DELETE FROM backups_ftp_listas_versoes WHERE id IN ({placeholders})", ids_para_excluir)
+
+            resultado_audit = f"sucesso;reaproveitado={1 if reaproveitado else 0};ref={ref_id or ''}"
+            _gravar_auditoria_na_transacao(
+                cursor,
+                usuario_id=str(operador),
+                cliente_alias=rotina['cliente_alias'],
+                rotina_id=id,
+                versao_id=nova_versao_id,
+                campo_ou_segredo='lista_cobian',
+                acao='gerar_lista',
+                ip_origem=ip_origem,
+                resultado=resultado_audit
+            )
+            conn.commit()
+
+            return _resposta_com_headers({
+                'sucesso': True,
+                'mensagem': 'Lista Cobian gerada e versionada com sucesso.',
+                'versao': {
+                    'id': nova_versao_id,
+                    'versao_numero': proxima_versao,
+                    'tamanho_bytes': len(file_bytes),
+                    'encoding_detectado': encoding,
+                    'checksum_sha256': checksum_sha256,
+                    'enviado_em': agora_iso,
+                    'enviado_por': operador
+                }
+            }, 201)
+        except Exception:
+            conn.rollback()
+            return _resposta_com_headers({'erro': 'Falha interna ao processar operação.'}, 500)
+        finally:
+            conn.close()
+
+    # -----------------------------------------------------------------------
+    # POST: Download direto de lista gerada (.lst) com auditoria fail-closed
+    # -----------------------------------------------------------------------
+    @bp.route('/admin/backups-ftp/rotina/<int:id>/download-lista-gerada', methods=['POST'])
+    @_requer_master
+    def download_lista_gerada(id):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return _resposta_com_headers({'erro': 'Payload deve ser um objeto JSON.'}, 400)
+
+        try:
+            obter_chave_aead()
+        except CryptoKeyError:
+            return _resposta_com_headers({'erro': 'Serviço de criptografia temporariamente indisponível.'}, 503)
+
+        conn = conectar()
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.cursor()
+            rotina = cursor.execute("SELECT * FROM backups_ftp_rotinas WHERE id = ?", (id,)).fetchone()
+            if not rotina:
+                return _resposta_com_headers({'erro': 'Rotina não encontrada.'}, 404)
+
+            dados_prep, erro_resp = _preparar_dados_gerador_cobian(rotina, payload, cursor)
+            if erro_resp:
+                return erro_resp
+
+            (
+                dados_lista,
+                file_bytes,
+                texto_decodificado,
+                encoding,
+                checksum_sha256,
+                nome_arquivo,
+                comentario_versao,
+                reaproveitado,
+                ref_id
+            ) = dados_prep
+
+            # Auditoria fail-closed antes da entrega do arquivo binário
+            usuario_id = _obter_identificador_usuario()
+            ip_origem = _obter_ip_cliente()
+            resultado_audit = f"sucesso:{checksum_sha256};reaproveitado={1 if reaproveitado else 0};ref={ref_id or ''}"
+            try:
+                _gravar_auditoria_commit(
+                    conn,
+                    usuario_id=str(usuario_id),
+                    cliente_alias=rotina['cliente_alias'],
+                    rotina_id=id,
+                    versao_id=None,
+                    campo_ou_segredo='download_lista_gerada',
+                    acao='download_lista_gerada',
+                    ip_origem=ip_origem,
+                    resultado=resultado_audit
+                )
+            except Exception:
+                return _resposta_com_headers({'erro': 'Falha ao registrar auditoria de segurança.'}, 500)
+
+            resp = Response(file_bytes, mimetype='text/plain; charset=utf-16le')
+            resp.headers['Content-Disposition'] = f'attachment; filename="{nome_arquivo}"'
+            resp.headers['Cache-Control'] = 'no-store, private'
+            resp.headers['Vary'] = 'Cookie'
+            return resp
         finally:
             conn.close()

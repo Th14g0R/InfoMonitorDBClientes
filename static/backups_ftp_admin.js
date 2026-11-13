@@ -68,6 +68,7 @@
     // Visão 3: Listas Cobian
     const visaoListas = document.getElementById('ftp-visao-listas-cobian');
     const btnFecharVisaoListas = document.getElementById('btn-fechar-visao-listas');
+    const btnAbrirGeradorList = document.getElementById('btn-abrir-gerador-list');
     const inputArquivoList = document.getElementById('ftp-input-arquivo-list');
     const inputComentarioList = document.getElementById('ftp-input-comentario-list');
     const btnEnviarArquivoList = document.getElementById('btn-enviar-arquivo-list');
@@ -79,6 +80,27 @@
     const preConteudoList = document.getElementById('ftp-pre-conteudo-list');
     const btnFecharSubmodal = document.getElementById('btn-fechar-submodal-conteudo');
     const btnFecharSubmodalRodape = document.getElementById('btn-fechar-submodal-conteudo-rodape');
+
+    // Sub-modal: Gerador de Listas Cobian
+    const modalGerador = document.getElementById('modal-sub-gerar-lista-cobian');
+    const btnFecharGerador = document.getElementById('btn-fechar-submodal-gerador');
+    const btnCancelarGerador = document.getElementById('btn-cancelar-gerador');
+    const selectPreset = document.getElementById('ftp-gerador-preset');
+    const inputGeradorHost = document.getElementById('ftp-gerador-host');
+    const inputGeradorPorta = document.getElementById('ftp-gerador-porta');
+    const inputGeradorUsuario = document.getElementById('ftp-gerador-usuario');
+    const inputGeradorDir = document.getElementById('ftp-gerador-dir');
+    const inputGeradorComentarioVersao = document.getElementById('ftp-gerador-comentario-versao');
+    const checkReaproveitar = document.getElementById('ftp-check-reaproveitar-hash');
+    const boxReaproveitar = document.getElementById('ftp-box-reaproveitar-versao');
+    const boxReaproveitarVazio = document.getElementById('ftp-box-reaproveitar-vazio');
+    const selectVersaoReaproveitar = document.getElementById('ftp-select-versao-reaproveitar');
+    const avisoFdb = document.getElementById('ftp-aviso-fdb');
+    const btnAdicionarTarefa = document.getElementById('btn-adicionar-tarefa');
+    const tarefasContainer = document.getElementById('ftp-gerador-tarefas-container');
+    const btnBaixarListaGerada = document.getElementById('btn-baixar-lista-gerada');
+    const btnSalvarVersaoGerada = document.getElementById('btn-salvar-versao-gerada');
+    let elementoDisparadorGerador = null;
 
     if (!modal) {
         return; // Não é usuário Master ou template não injetado
@@ -1138,6 +1160,529 @@
     }
 
     // -------------------------------------------------------------------------
+    // Sub-modal: Gerador de Listas Cobian 11 (.lst) com Presets
+    // -------------------------------------------------------------------------
+
+    let tarefasGerador = [];
+
+    function abrirModalGeradorCobian() {
+        if (!rotinaAtual) return;
+        limparAlerta();
+        elementoDisparadorGerador = document.activeElement;
+
+        const alias = rotinaAtual.cliente_alias || aliasAtual || '';
+        inputGeradorHost.value = rotinaAtual.servidor || '';
+        inputGeradorPorta.value = rotinaAtual.porta ? String(rotinaAtual.porta) : '8821';
+        inputGeradorUsuario.value = rotinaAtual.usuario || '';
+        inputGeradorDir.value = '/';
+        inputGeradorComentarioVersao.value = '';
+
+        checkReaproveitar.checked = false;
+        checkReaproveitar.disabled = true;
+        boxReaproveitar.style.display = 'none';
+        if (boxReaproveitarVazio) boxReaproveitarVazio.style.display = 'none';
+        carregarVersoesParaReaproveitamento(rotinaAtual.id);
+
+        selectPreset.value = 'fbk';
+        avisoFdb.style.display = 'none';
+        btnAdicionarTarefa.style.display = 'none';
+
+        carregarPresetFBK(alias);
+        modalGerador.style.display = 'flex';
+        if (selectPreset) selectPreset.focus();
+    }
+
+    function fecharModalGeradorCobian() {
+        if (modalGerador) modalGerador.style.display = 'none';
+        if (elementoDisparadorGerador && typeof elementoDisparadorGerador.focus === 'function') {
+            elementoDisparadorGerador.focus();
+        }
+    }
+
+    async function carregarVersoesParaReaproveitamento(rotinaId) {
+        selectVersaoReaproveitar.textContent = '';
+        checkReaproveitar.disabled = true;
+        checkReaproveitar.checked = false;
+        boxReaproveitar.style.display = 'none';
+        if (boxReaproveitarVazio) boxReaproveitarVazio.style.display = 'none';
+
+        const res = await apiFetch(`/admin/backups-ftp/rotina/${rotinaId}/listas`);
+        if (!rotinaAtual || rotinaAtual.id !== rotinaId) return; // Guard contra race condition
+
+        if (!res.ok) return;
+
+        const versoes = (res.data && res.data.versoes) ? res.data.versoes : [];
+        if (versoes.length === 0) {
+            checkReaproveitar.disabled = true;
+            checkReaproveitar.checked = false;
+            boxReaproveitar.style.display = 'none';
+            if (boxReaproveitarVazio) boxReaproveitarVazio.style.display = 'block';
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = 'Nenhuma versão anterior gravada';
+            selectVersaoReaproveitar.appendChild(opt);
+            return;
+        }
+
+        checkReaproveitar.disabled = false;
+        if (boxReaproveitarVazio) boxReaproveitarVazio.style.display = 'none';
+        const versoesOrdenadas = [...versoes].sort((a, b) => b.versao_numero - a.versao_numero);
+        versoesOrdenadas.forEach(v => {
+            const opt = document.createElement('option');
+            opt.value = v.id;
+            const dataStr = v.enviado_em ? v.enviado_em.replace('T', ' ').substring(0, 19) : '';
+            opt.textContent = `v${v.versao_numero} (${dataStr || 'sem data'} - ${v.tamanho_bytes} B)`;
+            selectVersaoReaproveitar.appendChild(opt);
+        });
+    }
+
+    function carregarPresetFBK(alias) {
+        tarefasGerador = [
+            {
+                nome: `IMS-${alias}-13h`,
+                ativo: true,
+                origem: `C:\\Infobrasil\\infoBackup\\backup\\${alias}\\backup.fbk`,
+                horario: '13:00',
+                tipo_origem: 'fbk',
+                pre_evento_tipo: 'execute',
+                pre_evento_caminho: 'C:\\Infobrasil\\infoBackup\\infoBackup.exe',
+                pre_evento_pausa: 1800,
+                pos_evento_tipo: 'nenhum',
+                pos_evento_caminho: '',
+                comentario: alias,
+            },
+            {
+                nome: `IMS-${alias}-23h`,
+                ativo: true,
+                origem: `C:\\Infobrasil\\infoBackup\\backup\\${alias}\\backup.fbk`,
+                horario: '23:00',
+                tipo_origem: 'fbk',
+                pre_evento_tipo: 'execute',
+                pre_evento_caminho: 'C:\\Infobrasil\\infoBackup\\infoBackup.exe',
+                pre_evento_pausa: 1800,
+                pos_evento_tipo: 'nenhum',
+                pos_evento_caminho: '',
+                comentario: alias,
+            }
+        ];
+        renderizarTarefas();
+    }
+
+    function carregarPresetFDB(alias) {
+        tarefasGerador = [
+            {
+                nome: `FDB-${alias}-23h`,
+                ativo: true,
+                origem: 'C:\\Infobrasil\\Dados\\DADOS.FDB',
+                horario: '23:00',
+                tipo_origem: 'fdb',
+                pre_evento_tipo: 'stop_service',
+                pre_evento_caminho: 'FirebirdServerDefaultInstance',
+                pre_evento_pausa: 60,
+                pos_evento_tipo: 'start_service',
+                pos_evento_caminho: 'FirebirdServerDefaultInstance',
+                comentario: alias,
+            }
+        ];
+        renderizarTarefas();
+    }
+
+    function renderizarTarefas() {
+        tarefasContainer.textContent = '';
+        if (tarefasGerador.length === 0) {
+            const p = document.createElement('p');
+            p.style.fontSize = '0.85em';
+            p.style.color = '#64748b';
+            p.textContent = 'Nenhuma tarefa configurada.';
+            tarefasContainer.appendChild(p);
+            return;
+        }
+
+        const isCustom = selectPreset.value === 'custom';
+
+        tarefasGerador.forEach((t, idx) => {
+            const card = document.createElement('div');
+            card.className = 'ftp-tarefa-card';
+            card.style.background = '#ffffff';
+            card.style.border = '1px solid var(--cor-borda, #cbd5e1)';
+            card.style.borderRadius = '6px';
+            card.style.padding = '8px 10px';
+            card.style.position = 'relative';
+
+            // Linha 1: Nome, Horário, Ativo, Botão Remover
+            const row1 = document.createElement('div');
+            row1.style.display = 'grid';
+            row1.style.gridTemplateColumns = isCustom ? '2fr 1fr auto auto' : '2fr 1fr auto';
+            row1.style.gap = '8px';
+            row1.style.alignItems = 'center';
+            row1.style.marginBottom = '6px';
+
+            // Nome
+            const colNome = document.createElement('div');
+            const lblNome = document.createElement('label');
+            lblNome.style.display = 'block';
+            lblNome.style.fontSize = '0.75em';
+            lblNome.style.fontWeight = '600';
+            lblNome.textContent = `Tarefa ${idx + 1} — Nome:`;
+            const inpNome = document.createElement('input');
+            inpNome.type = 'text';
+            inpNome.className = 'ftp-input';
+            inpNome.style.width = '100%';
+            inpNome.value = t.nome;
+            inpNome.addEventListener('input', (e) => { t.nome = e.target.value; });
+            colNome.appendChild(lblNome);
+            colNome.appendChild(inpNome);
+            row1.appendChild(colNome);
+
+            // Horário
+            const colHora = document.createElement('div');
+            const lblHora = document.createElement('label');
+            lblHora.style.display = 'block';
+            lblHora.style.fontSize = '0.75em';
+            lblHora.style.fontWeight = '600';
+            lblHora.textContent = 'Horário (HH:MM):';
+            const inpHora = document.createElement('input');
+            inpHora.type = 'time';
+            inpHora.className = 'ftp-input';
+            inpHora.style.width = '100%';
+            inpHora.value = t.horario;
+            inpHora.addEventListener('input', (e) => { t.horario = e.target.value; });
+            colHora.appendChild(lblHora);
+            colHora.appendChild(inpHora);
+            row1.appendChild(colHora);
+
+            // Ativo
+            const colAtivo = document.createElement('div');
+            colAtivo.style.display = 'flex';
+            colAtivo.style.alignItems = 'center';
+            colAtivo.style.marginTop = '14px';
+            const lblAtivo = document.createElement('label');
+            lblAtivo.style.display = 'flex';
+            lblAtivo.style.alignItems = 'center';
+            lblAtivo.style.gap = '4px';
+            lblAtivo.style.fontSize = '0.8em';
+            lblAtivo.style.cursor = 'pointer';
+            const chkAtivo = document.createElement('input');
+            chkAtivo.type = 'checkbox';
+            chkAtivo.checked = t.ativo;
+            chkAtivo.addEventListener('change', (e) => { t.ativo = e.target.checked; });
+            lblAtivo.appendChild(chkAtivo);
+            lblAtivo.appendChild(document.createTextNode('Ativo'));
+            colAtivo.appendChild(lblAtivo);
+            row1.appendChild(colAtivo);
+
+            // Botão remover se custom
+            if (isCustom && tarefasGerador.length > 1) {
+                const btnRem = document.createElement('button');
+                btnRem.type = 'button';
+                btnRem.className = 'btn btn-xs btn-perigo';
+                btnRem.style.marginTop = '14px';
+                btnRem.textContent = '🗑 Excluir';
+                btnRem.addEventListener('click', () => {
+                    tarefasGerador.splice(idx, 1);
+                    renderizarTarefas();
+                });
+                row1.appendChild(btnRem);
+            }
+            card.appendChild(row1);
+
+            // Linha 2: Origem
+            const row2 = document.createElement('div');
+            row2.style.marginBottom = '6px';
+            const lblOrigem = document.createElement('label');
+            lblOrigem.style.display = 'block';
+            lblOrigem.style.fontSize = '0.75em';
+            lblOrigem.style.fontWeight = '600';
+            lblOrigem.textContent = 'Caminho de Origem:';
+            const inpOrigem = document.createElement('input');
+            inpOrigem.type = 'text';
+            inpOrigem.className = 'ftp-input';
+            inpOrigem.style.width = '100%';
+            inpOrigem.value = t.origem;
+            inpOrigem.addEventListener('input', (e) => { t.origem = e.target.value; });
+            row2.appendChild(lblOrigem);
+            row2.appendChild(inpOrigem);
+            card.appendChild(row2);
+
+            // Linha 3: Pré e Pós Eventos
+            const row3 = document.createElement('div');
+            row3.style.display = 'grid';
+            row3.style.gridTemplateColumns = '1fr 2fr 1fr';
+            row3.style.gap = '8px';
+            row3.style.fontSize = '0.75em';
+
+            // Pré-evento tipo
+            const colPreTipo = document.createElement('div');
+            const lblPreTipo = document.createElement('label');
+            lblPreTipo.style.display = 'block';
+            lblPreTipo.style.fontWeight = '600';
+            lblPreTipo.textContent = 'Pré-evento:';
+            const selPreTipo = document.createElement('select');
+            selPreTipo.className = 'ftp-input';
+            selPreTipo.style.width = '100%';
+            [
+                { v: 'execute', l: 'Executar Programa' },
+                { v: 'stop_service', l: 'Parar Serviço Windows' },
+                { v: 'nenhum', l: 'Nenhum' }
+            ].forEach(opt => {
+                const o = document.createElement('option');
+                o.value = opt.v;
+                o.textContent = opt.l;
+                if (t.pre_evento_tipo === opt.v) o.selected = true;
+                selPreTipo.appendChild(o);
+            });
+            selPreTipo.addEventListener('change', (e) => { t.pre_evento_tipo = e.target.value; });
+            colPreTipo.appendChild(lblPreTipo);
+            colPreTipo.appendChild(selPreTipo);
+            row3.appendChild(colPreTipo);
+
+            // Pré-evento caminho
+            const colPreCam = document.createElement('div');
+            const lblPreCam = document.createElement('label');
+            lblPreCam.style.display = 'block';
+            lblPreCam.style.fontWeight = '600';
+            lblPreCam.textContent = 'Caminho / Nome do Serviço:';
+            const inpPreCam = document.createElement('input');
+            inpPreCam.type = 'text';
+            inpPreCam.className = 'ftp-input';
+            inpPreCam.style.width = '100%';
+            inpPreCam.value = t.pre_evento_caminho || '';
+            inpPreCam.addEventListener('input', (e) => { t.pre_evento_caminho = e.target.value; });
+            colPreCam.appendChild(lblPreCam);
+            colPreCam.appendChild(inpPreCam);
+            row3.appendChild(colPreCam);
+
+            // Pré-evento pausa
+            const colPrePausa = document.createElement('div');
+            const lblPrePausa = document.createElement('label');
+            lblPrePausa.style.display = 'block';
+            lblPrePausa.style.fontWeight = '600';
+            lblPrePausa.textContent = 'Pausa (segundos):';
+            const inpPrePausa = document.createElement('input');
+            inpPrePausa.type = 'number';
+            inpPrePausa.className = 'ftp-input';
+            inpPrePausa.style.width = '100%';
+            inpPrePausa.value = t.pre_evento_pausa || 0;
+            inpPrePausa.addEventListener('input', (e) => { t.pre_evento_pausa = parseInt(e.target.value, 10) || 0; });
+            colPrePausa.appendChild(lblPrePausa);
+            colPrePausa.appendChild(inpPrePausa);
+            row3.appendChild(colPrePausa);
+
+            card.appendChild(row3);
+
+            // Linha 4: Pós-evento
+            const row4 = document.createElement('div');
+            row4.style.display = 'grid';
+            row4.style.gridTemplateColumns = '1fr 2fr';
+            row4.style.gap = '8px';
+            row4.style.fontSize = '0.75em';
+            row4.style.marginTop = '6px';
+
+            const colPosTipo = document.createElement('div');
+            const lblPosTipo = document.createElement('label');
+            lblPosTipo.style.display = 'block';
+            lblPosTipo.style.fontWeight = '600';
+            lblPosTipo.textContent = 'Pós-evento:';
+            const selPosTipo = document.createElement('select');
+            selPosTipo.className = 'ftp-input';
+            selPosTipo.style.width = '100%';
+            [
+                { v: 'nenhum', l: 'Nenhum' },
+                { v: 'start_service', l: 'Iniciar Serviço Windows' },
+                { v: 'execute', l: 'Executar Programa' }
+            ].forEach(opt => {
+                const o = document.createElement('option');
+                o.value = opt.v;
+                o.textContent = opt.l;
+                if (t.pos_evento_tipo === opt.v) o.selected = true;
+                selPosTipo.appendChild(o);
+            });
+            selPosTipo.addEventListener('change', (e) => { t.pos_evento_tipo = e.target.value; });
+            colPosTipo.appendChild(lblPosTipo);
+            colPosTipo.appendChild(selPosTipo);
+            row4.appendChild(colPosTipo);
+
+            const colPosCam = document.createElement('div');
+            const lblPosCam = document.createElement('label');
+            lblPosCam.style.display = 'block';
+            lblPosCam.style.fontWeight = '600';
+            lblPosCam.textContent = 'Caminho / Nome do Serviço (Pós-evento):';
+            const inpPosCam = document.createElement('input');
+            inpPosCam.type = 'text';
+            inpPosCam.className = 'ftp-input';
+            inpPosCam.style.width = '100%';
+            inpPosCam.value = t.pos_evento_caminho || '';
+            inpPosCam.addEventListener('input', (e) => { t.pos_evento_caminho = e.target.value; });
+            colPosCam.appendChild(lblPosCam);
+            colPosCam.appendChild(inpPosCam);
+            row4.appendChild(colPosCam);
+
+            card.appendChild(row4);
+
+            // Linha 5: Comentário / Observações da Tarefa
+            const row5 = document.createElement('div');
+            row5.style.marginTop = '6px';
+            const lblComent = document.createElement('label');
+            lblComent.style.display = 'block';
+            lblComent.style.fontSize = '0.75em';
+            lblComent.style.fontWeight = '600';
+            lblComent.textContent = 'Comentário / Observações da Tarefa no Cobian:';
+            const inpComent = document.createElement('input');
+            inpComent.type = 'text';
+            inpComent.className = 'ftp-input';
+            inpComent.style.width = '100%';
+            inpComent.value = t.comentario || '';
+            inpComent.addEventListener('input', (e) => { t.comentario = e.target.value; });
+            row5.appendChild(lblComent);
+            row5.appendChild(inpComent);
+            card.appendChild(row5);
+
+            tarefasContainer.appendChild(card);
+        });
+    }
+
+    function coletarDadosGerador() {
+        const host = inputGeradorHost.value.trim();
+        const porta = inputGeradorPorta.value.trim();
+        const usuario = inputGeradorUsuario.value.trim();
+        const dir = inputGeradorDir.value.trim() || '/';
+        const preset = selectPreset.value;
+        const comentarioVersao = inputGeradorComentarioVersao.value.trim();
+
+        if (!host || !usuario) {
+            mostrarAlerta('Host e Usuário FTP são obrigatórios para a lista Cobian.', 'erro');
+            return null;
+        }
+
+        if (tarefasGerador.length === 0) {
+            mostrarAlerta('A lista deve conter ao menos uma tarefa.', 'erro');
+            return null;
+        }
+
+        for (let i = 0; i < tarefasGerador.length; i++) {
+            const t = tarefasGerador[i];
+            if (!t.horario || !/^([01]\d|2[0-3]):[0-5]\d$/.test(t.horario)) {
+                mostrarAlerta(`Horário inválido na Tarefa ${i + 1} (${t.nome || ''}). Use o formato HH:MM.`, 'erro');
+                return null;
+            }
+            if (!t.nome || !t.nome.trim()) {
+                mostrarAlerta(`Nome obrigatório na Tarefa ${i + 1}.`, 'erro');
+                return null;
+            }
+        }
+
+        const reaproveitar = checkReaproveitar.checked;
+        const refId = reaproveitar ? parseInt(selectVersaoReaproveitar.value, 10) : null;
+        if (reaproveitar && !refId) {
+            mostrarAlerta('Selecione uma versão anterior de referência para reaproveitar a senha.', 'erro');
+            return null;
+        }
+
+        const tarefasMapeadas = tarefasGerador.map(t => ({
+            nome: (t.nome || '').trim(),
+            ativo: Boolean(t.ativo),
+            origem: (t.origem || '').trim(),
+            horario: (t.horario || '').trim(),
+            tipo_origem: (t.tipo_origem || 'fbk').trim(),
+            pre_evento_tipo: t.pre_evento_tipo || 'nenhum',
+            pre_evento_caminho: (t.pre_evento_caminho || '').trim(),
+            pre_evento_pausa: parseInt(t.pre_evento_pausa, 10) || 0,
+            pos_evento_tipo: t.pos_evento_tipo || 'nenhum',
+            pos_evento_caminho: (t.pos_evento_caminho || '').trim(),
+            comentario: (t.comentario || '').trim()
+        }));
+
+        return {
+            comentario_versao: comentarioVersao,
+            preset: preset,
+            host: host,
+            porta: porta,
+            usuario: usuario,
+            diretorio_inicial: dir,
+            reaproveitar_hash: reaproveitar,
+            reaproveitar_versao_id: refId,
+            tarefas: tarefasMapeadas
+        };
+    }
+
+    async function salvarVersaoGerada() {
+        limparAlerta();
+        const payload = coletarDadosGerador();
+        if (!payload || !rotinaAtual) return;
+
+        btnSalvarVersaoGerada.disabled = true;
+        btnSalvarVersaoGerada.textContent = 'Gerando...';
+
+        try {
+            const res = await apiFetch(`/admin/backups-ftp/rotina/${rotinaAtual.id}/gerar-lista`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            if (res.ok) {
+                fecharModalGeradorCobian();
+                mostrarAlerta('Lista Cobian gerada e versionada com sucesso!', 'sucesso');
+                carregarVersoesListas(rotinaAtual.id);
+            } else {
+                mostrarAlerta(res.erro || 'Falha ao gerar lista Cobian.', 'erro');
+            }
+        } finally {
+            btnSalvarVersaoGerada.disabled = false;
+            btnSalvarVersaoGerada.textContent = '💾 Salvar como Nova Versão';
+        }
+    }
+
+    async function baixarListaGerada() {
+        limparAlerta();
+        const payload = coletarDadosGerador();
+        if (!payload || !rotinaAtual) return;
+
+        btnBaixarListaGerada.disabled = true;
+        btnBaixarListaGerada.textContent = 'Baixando...';
+
+        try {
+            const resp = await fetch(`/admin/backups-ftp/rotina/${rotinaAtual.id}/download-lista-gerada`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': obterCsrf()
+                },
+                credentials: 'same-origin',
+                body: JSON.stringify(payload)
+            });
+
+            if (resp.redirected || (resp.url && resp.url.includes('/admin/login'))) {
+                mostrarAlerta('Sessão expirada. Redirecionando para login...', 'alerta');
+                setTimeout(() => { window.location.href = '/admin/login'; }, 1500);
+                return;
+            }
+
+            const contentType = resp.headers.get('Content-Type') || '';
+            if (resp.ok && (contentType.includes('text/plain') || contentType.includes('application/octet-stream') || contentType.includes('utf-16le'))) {
+                const blob = await resp.blob();
+                const blobUrl = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = blobUrl;
+                a.download = `${rotinaAtual.cliente_alias || 'cliente'}-cobian.lst`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(blobUrl);
+                mostrarAlerta('Download da lista Cobian concluído com sucesso!', 'sucesso');
+            } else {
+                const erroData = await resp.json().catch(() => null);
+                mostrarAlerta((erroData && erroData.erro) || `Erro ao baixar lista (${resp.status})`, 'erro');
+            }
+        } catch (err) {
+            mostrarAlerta('Falha de conexão ao baixar lista Cobian.', 'erro');
+        } finally {
+            btnBaixarListaGerada.disabled = false;
+            btnBaixarListaGerada.textContent = '📥 Baixar Arquivo .lst';
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Eventos e Inicialização
     // -------------------------------------------------------------------------
 
@@ -1182,7 +1727,9 @@
     // Fechar com ESC
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
-            if (submodalConteudo && submodalConteudo.style.display === 'flex') {
+            if (modalGerador && modalGerador.style.display === 'flex') {
+                fecharModalGeradorCobian();
+            } else if (submodalConteudo && submodalConteudo.style.display === 'flex') {
                 fecharSubmodalList();
             } else if (modal && modal.style.display === 'flex') {
                 fecharModalAdmin();
@@ -1263,5 +1810,79 @@
         });
     }
     if (btnEnviarArquivoList) btnEnviarArquivoList.addEventListener('click', enviarArquivoLista);
+
+    // Ações do Gerador Cobian
+    if (btnAbrirGeradorList) btnAbrirGeradorList.addEventListener('click', abrirModalGeradorCobian);
+    if (btnFecharGerador) btnFecharGerador.addEventListener('click', fecharModalGeradorCobian);
+    if (btnCancelarGerador) btnCancelarGerador.addEventListener('click', fecharModalGeradorCobian);
+
+    if (selectPreset) {
+        selectPreset.addEventListener('change', (e) => {
+            const p = e.target.value;
+            const alias = rotinaAtual ? (rotinaAtual.cliente_alias || aliasAtual) : '';
+            if (p === 'fdb') {
+                avisoFdb.style.display = 'block';
+                btnAdicionarTarefa.style.display = 'none';
+                carregarPresetFDB(alias);
+            } else if (p === 'fbk') {
+                avisoFdb.style.display = 'none';
+                btnAdicionarTarefa.style.display = 'none';
+                carregarPresetFBK(alias);
+            } else {
+                avisoFdb.style.display = 'none';
+                btnAdicionarTarefa.style.display = 'inline-block';
+                if (tarefasGerador.length === 0) {
+                    tarefasGerador.push({
+                        nome: `CUSTOM-${alias}-01`,
+                        ativo: true,
+                        origem: 'C:\\Infobrasil\\backup\\dados.fbk',
+                        horario: '12:00',
+                        tipo_origem: 'custom',
+                        pre_evento_tipo: 'nenhum',
+                        pre_evento_caminho: '',
+                        pre_evento_pausa: 0,
+                        pos_evento_tipo: 'nenhum',
+                        pos_evento_caminho: '',
+                        comentario: alias,
+                    });
+                }
+                renderizarTarefas();
+            }
+        });
+    }
+
+    if (checkReaproveitar) {
+        checkReaproveitar.addEventListener('change', (e) => {
+            boxReaproveitar.style.display = e.target.checked ? 'block' : 'none';
+        });
+    }
+
+    if (btnAdicionarTarefa) {
+        btnAdicionarTarefa.addEventListener('click', () => {
+            if (tarefasGerador.length >= 10) {
+                mostrarAlerta('Limite máximo de 10 tarefas por lista atingido.', 'erro');
+                return;
+            }
+            const alias = rotinaAtual ? (rotinaAtual.cliente_alias || aliasAtual) : '';
+            const num = tarefasGerador.length + 1;
+            tarefasGerador.push({
+                nome: `CUSTOM-${alias}-${num < 10 ? '0' + num : num}`,
+                ativo: true,
+                origem: 'C:\\Infobrasil\\backup\\dados.fbk',
+                horario: '12:00',
+                tipo_origem: 'custom',
+                pre_evento_tipo: 'nenhum',
+                pre_evento_caminho: '',
+                pre_evento_pausa: 0,
+                pos_evento_tipo: 'nenhum',
+                pos_evento_caminho: '',
+                comentario: alias,
+            });
+            renderizarTarefas();
+        });
+    }
+
+    if (btnSalvarVersaoGerada) btnSalvarVersaoGerada.addEventListener('click', salvarVersaoGerada);
+    if (btnBaixarListaGerada) btnBaixarListaGerada.addEventListener('click', baixarListaGerada);
 
 })();
