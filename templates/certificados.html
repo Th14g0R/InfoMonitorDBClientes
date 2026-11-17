@@ -43,7 +43,7 @@
         <form method="post" action="/admin/certificados/adicionar" class="d-flex gap-2 align-center flex-wrap" style="flex: 1; min-width: 0;">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <label for="dominio" class="form-label" style="font-weight: 600;">Novo subdomínio:</label>
-          <input id="dominio" name="dominio" maxlength="253" placeholder="app.infobrasilsistemas.com.br" required class="form-control" style="min-width: 0; flex: 1 1 180px; width: auto;">
+          <input id="dominio" name="dominio" maxlength="253" placeholder="app.infobrasilsistemas.com.br ou api.iprojectti.com.br" required class="form-control" style="min-width: 0; flex: 1 1 180px; width: auto;">
           <button class="btn btn-primary" type="submit">➕ Adicionar</button>
         </form>
         <form method="post" action="/admin/certificados/verificar" class="form-inline">

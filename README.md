@@ -250,4 +250,4 @@ Um envio aceito pelo SMTP fica registrado; a mesma validade não gera alertas du
 O registro confirma aceitação pelo SMTP, sem garantir leitura ou entrega na caixa de entrada.
 As configurações são as mesmas do CNAME: `SMTP_SERVER`, `SMTP_PORT`, `SMTP_USER` e `SMTP_PASS`.
 O serviço precisa permanecer ativo para executar a rotina; reinicie-o após aplicar esta atualização.
-Novos subdomínios devem pertencer a `infobrasilsistemas.com.br` e resolver para IPs públicos.
+Novos subdomínios devem pertencer a `infobrasilsistemas.com.br` ou `iprojectti.com.br` e resolver para IPs públicos.

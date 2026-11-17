@@ -46,6 +46,43 @@ class CertificadosTest(unittest.TestCase):
                 consultar_certificado('api.infobrasilsistemas.com.br')
             sock.assert_not_called()
 
+    def test_validacao_subdominios_iprojectti_e_manutencao_antigo(self):
+        """Valida que subdomínios de iprojectti.com.br e infobrasilsistemas.com.br são aceitos e falsos sufixos rejeitados."""
+        # 1. Subdomínios válidos de iprojectti.com.br (com normalização: minúsculas, espaços e ponto final)
+        self.assertEqual(validar_dominio('api.iprojectti.com.br'), 'api.iprojectti.com.br')
+        self.assertEqual(validar_dominio('  IMS.iprojectti.COM.BR. '), 'ims.iprojectti.com.br')
+        self.assertEqual(validar_dominio('sub.api.iprojectti.com.br'), 'sub.api.iprojectti.com.br')
+        self.assertEqual(validar_dominio('painel-agentes.iprojectti.com.br'), 'painel-agentes.iprojectti.com.br')
+
+        # 2. Manutenção da aceitação de infobrasilsistemas.com.br
+        self.assertEqual(validar_dominio('info-api.infobrasilsistemas.com.br'), 'info-api.infobrasilsistemas.com.br')
+        self.assertEqual(validar_dominio('  APP.infobrasilsistemas.com.br. '), 'app.infobrasilsistemas.com.br')
+        self.assertEqual(validar_dominio('sub.info-api.infobrasilsistemas.com.br'), 'sub.info-api.infobrasilsistemas.com.br')
+
+        # 3. Recusa de domínios apex (nem infobrasilsistemas.com.br nem iprojectti.com.br são subdomínios)
+        for apex in ('iprojectti.com.br', 'infobrasilsistemas.com.br', '.iprojectti.com.br', '.infobrasilsistemas.com.br'):
+            with self.assertRaises(ValueError, msg=f"Apex não deveria ser aceito: {apex}"):
+                validar_dominio(apex)
+
+        # 4. Recusa de falsos sufixos (sem o ponto antes do domínio)
+        for falso in ('falsoiprojectti.com.br', 'meuiprojectti.com.br', 'falsoinfobrasilsistemas.com.br', 'xinfobrasilsistemas.com.br'):
+            with self.assertRaises(ValueError, msg=f"Falso sufixo não deveria ser aceito: {falso}"):
+                validar_dominio(falso)
+
+        # 5. Recusa de sufixos maliciosos / suffix spoofing (terminando em outro domínio)
+        for evil in ('cliente.iprojectti.com.br.evil.com', 'api.infobrasilsistemas.com.br.attacker.org',
+                     'iprojectti.com.br.evil.com', 'infobrasilsistemas.com.br.evil.com'):
+            with self.assertRaises(ValueError, msg=f"Evil domain não deveria ser aceito: {evil}"):
+                validar_dominio(evil)
+
+        # 6. Recusa de outros domínios e valores inválidos
+        for invalido in ('localhost', '127.0.0.1', 'example.com', 'google.com.br',
+                         'https://api.iprojectti.com.br', 'api.iprojectti.com.br:443', 'api.iprojectti.com.br/caminho',
+                         '-api.iprojectti.com.br', 'api-.iprojectti.com.br', 'api..iprojectti.com.br',
+                         '', None, '   '):
+            with self.assertRaises(ValueError, msg=f"Valor inválido deveria ser recusado: {invalido}"):
+                validar_dominio(invalido)
+
     def test_email_agrupado_deduplicado_e_renovacao(self):
         vencimento = (agora() + timedelta(days=4)).isoformat()
         with patch('certificados.consultar_certificado', return_value=(vencimento, 'Vencendo')), patch('certificados.enviar_email') as email:
@@ -421,6 +458,54 @@ class CertificadosTest(unittest.TestCase):
              patch('certificados.enviar_email') as mock_email:
             res_dedup = self.monitor.verificar(manual=True)
             mock_email.assert_not_called()
+
+    def test_adicionar_e_remover_subdominio_iprojectti_endpoints(self):
+        """Testa adição e remoção de subdomínio de iprojectti.com.br via endpoints HTTP."""
+        from flask import Blueprint
+        app = Flask(__name__, template_folder=str(Path.cwd() / 'templates'))
+        app.secret_key = 'teste'
+        app.jinja_env.globals['csrf_token'] = lambda: 'token-valido'
+        app.jinja_env.globals['tem_permissao'] = lambda p: True
+        bp = Blueprint('bancos', __name__)
+        configurar_certificados(bp, self.conectar, lambda p: True, MagicMock())
+        app.register_blueprint(bp)
+        client = app.test_client()
+
+        # 1. Adicionar subdomínio iprojectti válido
+        resp_add = client.post('/admin/certificados/adicionar', data={
+            'dominio': 'api.iprojectti.com.br',
+            'csrf_token': 'token-valido'
+        }, follow_redirects=True)
+        self.assertEqual(resp_add.status_code, 200)
+        self.assertIn('Subdomínio adicionado', resp_add.text)
+
+        with closing(self.conectar()) as conn:
+            row = conn.execute("SELECT 1 FROM certificados WHERE dominio = 'api.iprojectti.com.br'").fetchone()
+            self.assertIsNotNone(row)
+
+        # 2. Tentar adicionar apex iprojectti (deve ser rejeitado)
+        resp_apex = client.post('/admin/certificados/adicionar', data={
+            'dominio': 'iprojectti.com.br',
+            'csrf_token': 'token-valido'
+        }, follow_redirects=True)
+        self.assertEqual(resp_apex.status_code, 200)
+        self.assertIn('Informe um subdomínio', resp_apex.text)
+
+        # 3. Remover subdomínio iprojectti com usuário logado e CSRF válido
+        with client.session_transaction() as sess:
+            sess['logged_in'] = True
+            sess['_csrf_token'] = 'token-valido'
+
+        resp_rem = client.post('/certificados/remover', data={
+            'subdominio': 'api.iprojectti.com.br',
+            'csrf_token': 'token-valido'
+        }, follow_redirects=True)
+        self.assertEqual(resp_rem.status_code, 200)
+        self.assertIn('removido com sucesso', resp_rem.text)
+
+        with closing(self.conectar()) as conn:
+            row = conn.execute("SELECT 1 FROM certificados WHERE dominio = 'api.iprojectti.com.br'").fetchone()
+            self.assertIsNone(row)
 
 
 if __name__ == '__main__':
