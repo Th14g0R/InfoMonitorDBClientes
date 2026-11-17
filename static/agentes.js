@@ -338,7 +338,30 @@
   function abrir(code, f) { sel = {code, fila: f}; $('dlgMsg').textContent = ''; atualizarDialogo(true); $('dlg').showModal(); }
   function atualizarDialogo(inicial) {
     const a = dados.find(x => x.code === sel.code && x.queue === sel.fila) || dados.find(x => x.code === sel.code);
-    if (!a) { $('dInfo').textContent = 'Agente não está mais logado.'; return; }
+    if (!a) {
+      sel.agente = null;
+      if (!$('dNome').textContent) $('dNome').textContent = String(sel.code);
+      $('dInfo').textContent = 'Agente não está mais logado.';
+      $('dPausa').textContent = 'Agente sem sessão ativa';
+      $('bTransf').disabled = true;
+      $('bTransf').title = 'Agente não está mais logado.';
+      $('bPen').disabled = true;
+      $('bPen').title = 'Agente não está mais logado.';
+      $('bRemoverFila').disabled = true;
+      $('bRemoverFila').title = 'Agente não está mais logado.';
+      $('bDeslogar').disabled = true;
+      $('bDeslogar').title = 'Agente não está mais logado.';
+      $('bPausar').disabled = true;
+      $('bPausar').title = 'Agente não está mais logado.';
+      $('bTirar').disabled = true;
+      $('bTirar').title = 'Agente não está mais logado.';
+      const msgAtual = $('dlgMsg').textContent || '';
+      if (inicial || !msgAtual || msgAtual.startsWith('ℹ')) {
+        $('dlgMsg').textContent = 'ℹ Agente não está mais logado.';
+        $('dlgMsg').style.color = 'var(--mut)';
+      }
+      return;
+    }
     sel.agente = a;
     const st = stDe(a), c = chamada(a);
     const ehPbx = a.line === 'pbx';
@@ -367,31 +390,38 @@
     $('aPausa').style.display = '';
 
     const durPausa = a.pauseMinutes != null ? a.pauseMinutes * 60 : (a.seconds || 0);
-    if (ehPbx) {
-      if (a.paused) {
-        $('bTirar').style.display = '';
-        $('bTirar').disabled = false;
-        $('bTirar').title = '';
-        $('bPausar').style.display = 'none';
-        $('dPausa').textContent = `${a.pauseType || 'Pausa'} há ${fmtSeg(durPausa)} (NPX)`;
-      } else {
-        $('bTirar').style.display = 'none';
-        $('bPausar').style.display = '';
-        $('bPausar').disabled = true;
-        $('bPausar').title = 'Ações de pausa são exclusivas da integração NPX.';
-        $('dPausa').textContent = 'Agente em linha PBX (pausa não disponível)';
-      }
-    } else if (a.paused) {
+    const temSessaoNpx = a.npxLoggedIn === true;
+
+    if (a.paused) {
       $('bTirar').style.display = '';
       $('bPausar').style.display = 'none';
-      $('bTirar').title = '';
-      $('dPausa').textContent = `${a.pauseType || 'Pausa'} há ${fmtSeg(durPausa)}`;
+      if (!temSessaoNpx) {
+        $('bTirar').disabled = true;
+        $('bTirar').title = 'Ações de pausa requerem sessão ativa na fila NPX.';
+        $('dPausa').textContent = `${a.pauseType || 'Pausa'} há ${fmtSeg(durPausa)} (sem sessão ativa na NPX)`;
+      } else {
+        $('bTirar').disabled = false;
+        $('bTirar').title = '';
+        $('dPausa').textContent = ehPbx
+          ? `${a.pauseType || 'Pausa'} há ${fmtSeg(durPausa)} (NPX)`
+          : `${a.pauseType || 'Pausa'} há ${fmtSeg(durPausa)}`;
+      }
     } else {
       $('bTirar').style.display = 'none';
       $('bPausar').style.display = '';
-      $('bPausar').disabled = !painelConfigurado;
-      $('bPausar').title = '';
-      $('dPausa').textContent = a.line === 'off' ? 'Agente offline / fora de pausa' : 'Agente ativo / fora de pausa';
+      if (!temSessaoNpx) {
+        $('bPausar').disabled = true;
+        $('bPausar').title = 'Ações de pausa requerem sessão ativa na fila NPX.';
+        $('dPausa').textContent = ehPbx
+          ? 'Agente em linha PBX (sem sessão ativa na NPX)'
+          : (a.line === 'off' ? 'Agente offline (sem sessão ativa na NPX)' : 'Agente sem sessão ativa na NPX');
+      } else {
+        $('bPausar').disabled = !painelConfigurado;
+        $('bPausar').title = !painelConfigurado ? 'Painel NPX não configurado no servidor.' : '';
+        $('dPausa').textContent = ehPbx
+          ? 'Agente em linha PBX (sessão NPX ativa / fora de pausa)'
+          : (a.line === 'off' ? 'Agente offline / fora de pausa' : 'Agente ativo / fora de pausa');
+      }
     }
 
     const destinos = filas.filter(f => f.key !== a.queue && f.key !== 'PBX_Sem_Fila');
@@ -401,6 +431,16 @@
         : '<option value="" disabled>Nenhuma outra fila disponível</option>';
       const penAtual = Number(a.penalty);
       $('dPen').value = Number.isInteger(penAtual) && penAtual >= 1 && penAtual <= 10 ? penAtual : 1;
+    }
+
+    // Helper para mensagens informativas/status do diálogo:
+    // Preserva mensagens de feedback (ex: ✔ sucesso, ✖ recusa/erro) em atualizações não-iniciais (refetch 1.2s ou 5s).
+    function definirMsgInfo(texto) {
+      const msgAtual = $('dlgMsg').textContent || '';
+      if (inicial || !msgAtual || msgAtual.startsWith('ℹ') || msgAtual.startsWith('Ações do painel')) {
+        $('dlgMsg').textContent = texto;
+        $('dlgMsg').style.color = 'var(--mut)';
+      }
     }
 
     // Recalcula elegibilidade das ações a cada atualização
@@ -418,36 +458,38 @@
       $('bTirar').disabled = true;
       $('bTirar').title = 'Agente sem sessão de fila ativa.';
       $('dPausa').textContent = 'Agente sem sessão ativa em fila';
-      $('dlgMsg').textContent = 'ℹ Agente sem sessão ativa em fila (apenas registrado no SIP/PBX).';
-      $('dlgMsg').style.color = 'var(--mut)';
-    } else if (ehPbx) {
+      definirMsgInfo('ℹ Agente sem sessão ativa em fila (apenas registrado no SIP/PBX).');
+    } else if (!temSessaoNpx) {
+      // Sem sessão confirmada na fila (seja line=pbx, npx ou off): bloqueia TODAS as 6 ações administrativas
       $('bTransf').disabled = true;
-      $('bTransf').title = 'Transferência de fila é exclusiva para agentes NPX.';
+      $('bTransf').title = 'Transferência de fila requer sessão ativa na NPX.';
       $('bPen').disabled = true;
-      $('bPen').title = 'Prioridade de fila é exclusiva para agentes NPX.';
+      $('bPen').title = 'Prioridade de fila requer sessão ativa na NPX.';
       $('bRemoverFila').disabled = true;
-      $('bRemoverFila').title = 'Remoção de fila é exclusiva para agentes NPX.';
+      $('bRemoverFila').title = 'Remoção de fila requer sessão ativa na NPX.';
       $('bDeslogar').disabled = true;
-      $('bDeslogar').title = 'Deslogar agente é exclusivo para agentes NPX.';
-      if (a.paused) {
-        $('dlgMsg').textContent = 'ℹ Agente conectado via PBX em pausa na NPX. Apenas retirar pausa está disponível.';
-      } else {
-        $('dlgMsg').textContent = 'ℹ Agente conectado via PBX. Ações de fila e pausa são gerenciadas pelo NPX.';
-      }
-      $('dlgMsg').style.color = 'var(--mut)';
+      $('bDeslogar').title = 'Deslogar agente requer sessão ativa na NPX.';
+      $('bTirar').disabled = true;
+      $('bTirar').title = 'Ações de pausa requerem sessão ativa na fila NPX.';
+      $('bPausar').disabled = true;
+      $('bPausar').title = 'Ações de pausa requerem sessão ativa na fila NPX.';
+      definirMsgInfo(ehPbx
+        ? 'ℹ Agente conectado via PBX sem sessão ativa confirmada na fila NPX.'
+        : 'ℹ Agente sem sessão ativa confirmada na fila NPX.');
     } else {
       $('bTransf').disabled = !painelConfigurado || !destinos.length;
-      $('bTransf').title = '';
+      $('bTransf').title = !painelConfigurado ? 'Painel NPX não configurado no servidor.' : (!destinos.length ? 'Nenhuma outra fila disponível' : '');
       $('bPen').disabled = !painelConfigurado;
-      $('bPen').title = '';
+      $('bPen').title = !painelConfigurado ? 'Painel NPX não configurado no servidor.' : '';
       $('bRemoverFila').disabled = !painelConfigurado;
-      $('bRemoverFila').title = '';
+      $('bRemoverFila').title = !painelConfigurado ? 'Painel NPX não configurado no servidor.' : '';
       $('bDeslogar').disabled = false;
       $('bDeslogar').title = '';
       if (!painelConfigurado) {
-        $('dlgMsg').textContent = 'Ações do painel aguardando configuração de credenciais no servidor.';
-        $('dlgMsg').style.color = 'var(--mut)';
-      } else if ($('dlgMsg').textContent.startsWith('ℹ Agente conectado via PBX') || $('dlgMsg').textContent.startsWith('ℹ Agente sem sessão')) {
+        definirMsgInfo('Ações do painel aguardando configuração de credenciais no servidor.');
+      } else if (ehPbx) {
+        definirMsgInfo('ℹ Telefonia ativa via PBX com sessão confirmada na NPX. Ações administrativas são direcionadas à fila NPX.');
+      } else if ($('dlgMsg').textContent.startsWith('ℹ Agente conectado via PBX') || $('dlgMsg').textContent.startsWith('ℹ Agente sem sessão') || $('dlgMsg').textContent.startsWith('ℹ Telefonia ativa via PBX') || $('dlgMsg').textContent.startsWith('Ações do painel')) {
         $('dlgMsg').textContent = '';
       }
     }
@@ -610,7 +652,7 @@
   checaTelaCheia();
   aplicarControles();
   if (typeof window !== 'undefined') {
-    window._testAgentes = { carregar, atualizarDialogo, getDados: () => dados };
+    window._testAgentes = { carregar, atualizarDialogo, abrir, getDados: () => dados };
   }
 
   carregar();

@@ -680,6 +680,7 @@ class ColetorPbx:
                 'pbxNumber': pbx_number,
                 'pbxDirection': pbx_direction,
                 'pbxSeconds': pbx_seconds,
+                'npxLoggedIn': False,
             })
 
         return cards_pbx

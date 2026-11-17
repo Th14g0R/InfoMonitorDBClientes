@@ -134,6 +134,49 @@ class ColetorTest(unittest.TestCase):
         self.assertTrue(por_codigo['4422001']['paused'])
         self.assertEqual(por_codigo['4422001']['pauseType'], 'Almoço')
         self.assertIsNotNone(por_codigo['4422001']['pauseMinutes'])
+        self.assertTrue(por_codigo['4422000']['npxLoggedIn'])
+        self.assertTrue(por_codigo['4422001']['npxLoggedIn'])
+
+    def test_coletar_materializa_npx_logged_in_conforme_sessoes_abertas(self):
+        # 1. Agente 4422001: logon aberto, status 0 -> npxLoggedIn True
+        # 2. Agente 4422002: logon aberto, em pausa -> npxLoggedIn True
+        # 3. Agente 4422003: logon encerrado (com logoff_date) -> não aparece em abertas
+        # 4. Agente 4422004: apenas pausa aberta (sem registro de logon) -> npxLoggedIn False
+        hoje = [
+            {'code': '4422001', 'agent_name': 'Darkison', 'queue': 'InfoBrasil_Suporte', 'logon_date': '2026-11-06T07:00:00-03:00', 'logoff_date': None},
+            {'code': '4422002', 'agent_name': 'Beatriz', 'queue': 'InfoBrasil_Suporte', 'logon_date': '2026-11-06T07:15:00-03:00', 'logoff_date': None},
+            {'code': '4422003', 'agent_name': 'Carlos', 'queue': 'InfoBrasil_Suporte', 'logon_date': '2026-11-06T07:00:00-03:00', 'logoff_date': '2026-11-06T08:00:00-03:00'},
+        ]
+        pausas = [
+            {'code': '4422002', 'agent_name': 'Beatriz', 'queue': 'InfoBrasil_Suporte', 'pause': 'Almoço',
+             'pause_start': '2026-11-06T08:00:00-03:00', 'pause_finish': None},
+            {'code': '4422004', 'agent_name': 'Daniel', 'queue': 'InfoBrasil_Suporte', 'pause': 'Descanso',
+             'pause_start': '2026-11-06T08:30:00-03:00', 'pause_finish': None},
+        ]
+        cliente = ClienteFalso({
+            REG + '?date_started_at': {'report_data': []},
+            REG + '?per_page': {'report_data': hoje},
+            '/call_center_reports/report_pause_details': {'report_data': pausas},
+            '/pabx/4422001/agent_status': status('Darkison', st=0, paused=0),
+            '/pabx/4422002/agent_status': status('Beatriz', st=-1, paused=1),
+            '/pabx/4422004/agent_status': status('Daniel', st=0, paused=1),
+        })
+        lista = ColetorAgentes(cliente).coletar()
+        por_codigo = {a['code']: a for a in lista}
+
+        self.assertIn('4422001', por_codigo)
+        self.assertEqual(por_codigo['4422001']['status'], 0)
+        self.assertTrue(por_codigo['4422001']['npxLoggedIn'])
+
+        self.assertIn('4422002', por_codigo)
+        self.assertTrue(por_codigo['4422002']['paused'])
+        self.assertTrue(por_codigo['4422002']['npxLoggedIn'])
+
+        self.assertNotIn('4422003', por_codigo)
+
+        self.assertIn('4422004', por_codigo)
+        self.assertTrue(por_codigo['4422004']['paused'])
+        self.assertFalse(por_codigo['4422004']['npxLoggedIn'])
 
     def test_status_indisponivel_nao_derruba_a_coleta(self):
         cliente = ClienteFalso({
@@ -830,7 +873,7 @@ class RotasTest(unittest.TestCase):
                     'modo_inativos': False, 'modo_orfaos': False, 'modo_historico': False, 'filtro_status': None,
                     'busca_termo': '', 'ordem_atual': '', 'atualizar_url': ''}
         self.coletor.garantir_rodando = lambda: None
-        self.coletor.retrato = [{'code': '4422001', 'name': 'Darkison', 'queue': 'InfoBrasil_Suporte', 'status': -1, 'paused': True}]
+        self.coletor.retrato = [{'code': '4422001', 'name': 'Darkison', 'queue': 'InfoBrasil_Suporte', 'status': -1, 'paused': True, 'npxLoggedIn': True}]
         self.coletor.coletado_em = datetime.now(agentes_npx.FUSO)
         self.http = self.app.test_client()
         self.http.get('/agentes')
@@ -1050,7 +1093,7 @@ class RotasTest(unittest.TestCase):
         configurar_agentes(bp, conectar, lambda perm: True, cliente=cliente, cliente_painel=painel_real)
         coletor = bp.coletor_agentes
         coletor.garantir_rodando = lambda: None
-        coletor.retrato = [{'code': '4422001', 'queue': 'FilaEspecial_Temporaria'}]
+        coletor.retrato = [{'code': '4422001', 'queue': 'FilaEspecial_Temporaria', 'npxLoggedIn': True}]
         app.register_blueprint(bp)
 
         with app.test_client() as client:
@@ -1161,6 +1204,7 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
                 'pbxNumber': '85988887777',
                 'pbxDirection': 'outbound',
                 'pbxSeconds': 20,
+                'npxLoggedIn': False,
             }
         ])
 
@@ -1175,7 +1219,7 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
         self.coletor_npx = self.bp.coletor_agentes
         self.coletor_npx.garantir_rodando = lambda: None
         self.coletor_npx.retrato = [
-            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 1, 'paused': False}
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 1, 'paused': False, 'npxLoggedIn': True}
         ]
         self.coletor_npx.coletado_em = datetime.now(agentes_npx.FUSO)
         self.app.register_blueprint(self.bp)
@@ -1310,8 +1354,8 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
         self.assertIn('indisponível para agentes operando via PBX ou offline na NPX', r_pausa_npx_offline.get_json()['mensagem'])
 
     def test_a3_recusar_se_line_pbx_enriquece_retrato_inteiro_globalmente(self):
-        # A3: Testar que se dois agentes colidirem na NPX no mesmo ramal, a validação de recusa PBX
-        # enriquece o retrato inteiro e não apenas o agente isolado, detectando a ambiguidade global.
+        # A3 / m3: O guard avalia diretamente o retrato do servidor e a flag canônica npxLoggedIn is True,
+        # sem depender de chamada a enriquecer_agentes ou cálculo de line.
         self.permitido = True
         with self.http.session_transaction() as sess:
             sess['user_id'] = 1
@@ -1320,26 +1364,16 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
 
         headers = {'X-CSRF-Token': 'token_csrf_abc'}
 
-        # Usar a implementação real de ColetorPbx.enriquecer_agentes para demonstrar o comportamento
-        coletor_pbx_real = ColetorPbx(
-            cliente=MagicMock(configurado=True),
-            mapa_analistas={'Thiago': {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'}}
-        )
-        coletor_pbx_real.snapshot = {
-            '2008': {'status': 'Busy', 'number': '85999998888', 'direction': 'inbound', 'seconds': 30}
-        }
-        self.coletor_pbx.enriquecer_agentes.side_effect = coletor_pbx_real.enriquecer_agentes
+        self.coletor_pbx.enriquecer_agentes = MagicMock()
 
-        # Dois agentes NPX disputam o mesmo ramal (colisão de analista)
         self.coletor_npx.retrato = [
-            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 0, 'paused': False},
-            {'code': '4422009', 'name': 'Thiago Jr', 'queue': 'InfoBrasil_Suporte', 'status': 0, 'paused': False},
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 0, 'paused': False, 'npxLoggedIn': True},
         ]
 
-        # Com enriquecimento global, ambos ficam com ramal=None e line='off'
-        # Logo, recusar_se_line_pbx NÃO deve considerar line='pbx'
         r = self.http.post('/admin/agentes/4422008/colocar-pausa', headers=headers)
-        self.assertNotEqual(r.get_json().get('mensagem'), 'Ação indisponível para agentes operando via PBX ou offline na NPX.')
+        self.assertEqual(r.status_code, 200)
+        # O guard não deve chamar enriquecer_agentes
+        self.coletor_pbx.enriquecer_agentes.assert_not_called()
 
     def test_a7_fila_sintetica_nao_aparece_em_filas_se_sem_agentes_pbx(self):
         # A7: PBX_Sem_Fila removida de NOMES_PADRAO. Se nenhum agente estiver nessa fila,
@@ -1347,7 +1381,7 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
         self.assertNotIn('PBX_Sem_Fila', agentes_npx.NOMES_PADRAO)
         self.coletor_pbx.obter_agentes_pbx_only = MagicMock(return_value=[])
         self.coletor_npx.retrato = [
-            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 1, 'paused': False}
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 1, 'paused': False, 'npxLoggedIn': True}
         ]
         resp = self.http.get('/agentes/dados')
         dados = resp.get_json()
@@ -1409,7 +1443,7 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
         # NPX volta com Thiago logado; PBX também tem Thiago (2008) e Carol (2022)
         self.cliente_npx.token = 'tok_npx_valido'
         self.coletor_npx.retrato = [
-            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 1, 'paused': False}
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 1, 'paused': False, 'npxLoggedIn': True}
         ]
         self.coletor_npx.erro = None
         self.coletor_pbx.cliente.configurado = True
@@ -1510,6 +1544,7 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
                 'callDst': None,
                 'callClient': None,
                 'erro': None,
+                'npxLoggedIn': True,
             }
         ]
         # PBX disponível, mas Thiago (2008) está Offline na central telefônica
@@ -1640,7 +1675,7 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
 
         # 3. NPX Login: Thiago volta a ter sessão aberta na NPX com status 1 (ativo)
         self.coletor_npx.retrato = [
-            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 1, 'paused': False}
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 1, 'paused': False, 'npxLoggedIn': True}
         ]
         resp3 = self.http.get('/agentes/dados')
         dados3 = resp3.get_json()
@@ -1685,7 +1720,7 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
 
         # 3. Transferência com destino para PBX_Sem_Fila de agente ativo na NPX (line='npx') -> recusa 400 (Fila inválida)
         self.coletor_npx.retrato = [
-            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 1, 'paused': False}
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 1, 'paused': False, 'npxLoggedIn': True}
         ]
         def enriquecer_npx_ativo(agentes):
             for a in agentes:
@@ -1702,8 +1737,8 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
         self.assertIn('Fila inválida', r_transf.get_json()['mensagem'])
 
     def test_tirar_pausa_permitido_para_analista_em_pausa_com_line_pbx(self):
-        # Caso Bruno: Analista em pausa na NPX mas operando no PBX (line='pbx')
-        # Tirar pausa DEVE ser permitido para despausar na NPX, enquanto outras ações PBX continuam recusadas (400)
+        # Caso Bruno: Analista com sessão ativa na NPX (npxLoggedIn=True) operando no PBX (line='pbx')
+        # Todas as 6 ações administrativas NPX devem ser permitidas com código NPX
         self.permitido = True
         with self.http.session_transaction() as sess:
             sess['user_id'] = 1
@@ -1724,6 +1759,7 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
                 'pauseMinutes': 30,
                 'pauseMaxMinutes': 60,
                 'seconds': 1800,
+                'npxLoggedIn': True,
             }
         ]
 
@@ -1743,55 +1779,277 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
             'configured': True, 'available': True, 'error': None
         }
 
-        # 1. Tirar pausa: PERMITIDO (200) quando paused=True no próprio retrato do servidor
+        # 1. Tirar pausa: PERMITIDO (200) com sessão confirmada na NPX
         r_tirar = self.http.post('/admin/agentes/4422005/tirar-pausa', headers=headers)
         self.assertEqual(r_tirar.status_code, 200)
         self.assertTrue(r_tirar.get_json()['ok'])
         self.assertEqual(self.cliente_painel.executados[-1], ('invert_pause_status', {'code': '4422005', 'pause': '0'}))
 
-        # 2. Ignora paused do cliente: se no servidor paused=False, tirar-pausa DEVE RECUSAR (400) mesmo que cliente envie paused=True
-        self.coletor_npx.retrato[0]['paused'] = False
-        r_tirar_sem_pausa = self.http.post('/admin/agentes/4422005/tirar-pausa', json={'paused': True}, headers=headers)
-        self.assertEqual(r_tirar_sem_pausa.status_code, 400)
-        self.assertIn('Ação indisponível para agentes operando via PBX', r_tirar_sem_pausa.get_json()['mensagem'])
-        self.coletor_npx.retrato[0]['paused'] = True  # restaura para testes seguintes
+        # 2. Todas as outras 5 ações também PERMITIDAS (200) para analista com sessão confirmada operando em line='pbx'
+        r_colocar = self.http.post('/admin/agentes/4422005/colocar-pausa', headers=headers)
+        self.assertEqual(r_colocar.status_code, 200)
+        self.assertTrue(r_colocar.get_json()['ok'])
+        self.assertEqual(self.cliente_painel.executados[-1], ('invert_pause_status', {'code': '4422005', 'pause': '1'}))
 
-        # 3. Código sintético pbx-2005 deve retornar 400 (rejeitado em _codigo)
+        r_remover = self.http.post('/admin/agentes/4422005/remover-fila', json={'fila': 'InfoBrasil_Suporte'}, headers=headers)
+        self.assertEqual(r_remover.status_code, 200)
+        self.assertTrue(r_remover.get_json()['ok'])
+        self.assertEqual(self.cliente_painel.executados[-1], ('remove_agent', {'code': '4422005', 'queue': 'InfoBrasil_Suporte'}))
+
+        r_deslogar = self.http.post('/admin/agentes/4422005/deslogar', headers=headers)
+        self.assertEqual(r_deslogar.status_code, 200)
+        self.assertTrue(r_deslogar.get_json()['ok'])
+
+        r_transf = self.http.post('/admin/agentes/transferir', json={'code': '4422005', 'para': 'InfoBrasil_Comercial'}, headers=headers)
+        self.assertEqual(r_transf.status_code, 200)
+        self.assertTrue(r_transf.get_json()['ok'])
+        self.assertEqual(self.cliente_painel.executados[-1], ('move_agent', {'code': '4422005', 'queue': 'InfoBrasil_Comercial'}))
+
+        r_prio = self.http.post('/admin/agentes/prioridade', json={'code': '4422005', 'fila': 'InfoBrasil_Suporte', 'penalty': 2}, headers=headers)
+        self.assertEqual(r_prio.status_code, 200)
+        self.assertTrue(r_prio.get_json()['ok'])
+        self.assertEqual(self.cliente_painel.executados[-1], ('update_penalty', {'code': '4422005', 'queue': 'InfoBrasil_Suporte', 'penalty': 2}))
+
+        # 3. Ignora flag ou dados forjados do cliente: se no servidor npxLoggedIn=False, DEVE RECUSAR (400) mesmo que cliente envie npxLoggedIn=True
+        self.coletor_npx.retrato[0]['npxLoggedIn'] = False
+        r_tirar_sem_sessao = self.http.post('/admin/agentes/4422005/tirar-pausa', json={'npxLoggedIn': True}, headers=headers)
+        self.assertEqual(r_tirar_sem_sessao.status_code, 400)
+        self.assertIn('Ação indisponível para agentes operando via PBX ou offline na NPX.', r_tirar_sem_sessao.get_json()['mensagem'])
+
+        r_colocar_sem_sessao = self.http.post('/admin/agentes/4422005/colocar-pausa', json={'npxLoggedIn': True}, headers=headers)
+        self.assertEqual(r_colocar_sem_sessao.status_code, 400)
+        self.assertIn('Ação indisponível para agentes operando via PBX ou offline na NPX.', r_colocar_sem_sessao.get_json()['mensagem'])
+
+        self.coletor_npx.retrato[0]['npxLoggedIn'] = True  # restaura para testes seguintes
+
+        # 4. Código sintético pbx-2005 deve retornar 400 (rejeitado em _codigo)
         r_sint = self.http.post('/admin/agentes/pbx-2005/tirar-pausa', headers=headers)
         self.assertEqual(r_sint.status_code, 400)
         self.assertIn('Código de agente inválido', r_sint.get_json()['mensagem'])
 
-        # 4. Autorização: se usuário não tiver permissão, retorna 403 antes da recusa PBX
+        # 5. Autorização: se usuário não tiver permissão, retorna 403 antes da recusa PBX
         self.permitido = False
         r_unauth = self.http.post('/admin/agentes/4422005/tirar-pausa', headers=headers)
         self.assertEqual(r_unauth.status_code, 403)
         self.assertIn('Sem permissão para gerenciar agentes', r_unauth.get_json()['mensagem'])
         self.permitido = True
 
-        # 5. CSRF: se token CSRF estiver ausente, deve falhar antes de executar ação
+        # 6. CSRF: se token CSRF estiver ausente, deve falhar antes de executar ação
         r_csrf = self.http.post('/admin/agentes/4422005/tirar-pausa')
         self.assertEqual(r_csrf.status_code, 400)
 
-        # 6. Outras ações continuam recusadas (400) para o agente em line='pbx'
-        r_colocar = self.http.post('/admin/agentes/4422005/colocar-pausa', headers=headers)
-        self.assertEqual(r_colocar.status_code, 400)
-        self.assertIn('Ação indisponível para agentes operando via PBX', r_colocar.get_json()['mensagem'])
+    def test_matriz_seis_acoes_x_status_pbx_com_npx_logged_in_e_recusas(self):
+        # Matriz completa de 6 ações administrativas NPX x status PBX (Free, Busy, Ringing)
+        # com analista logado na NPX (npxLoggedIn=True), mesmo com status de voz 0 ou pausa ativa.
+        self.permitido = True
+        with self.http.session_transaction() as sess:
+            sess['user_id'] = 1
+            sess['user_nome'] = 'Admin'
+            sess['_csrf_token'] = 'token_csrf_abc'
+        headers = {'X-CSRF-Token': 'token_csrf_abc'}
 
-        r_remover = self.http.post('/admin/agentes/4422005/remover-fila', json={'fila': 'InfoBrasil_Suporte'}, headers=headers)
-        self.assertEqual(r_remover.status_code, 400)
-        self.assertIn('Ação indisponível para agentes operando via PBX', r_remover.get_json()['mensagem'])
+        self.coletor_pbx.cliente.configurado = True
+        self.coletor_pbx.obter_status_conexao.return_value = {
+            'configured': True, 'available': True, 'error': None
+        }
 
-        r_deslogar = self.http.post('/admin/agentes/4422005/deslogar', headers=headers)
-        self.assertEqual(r_deslogar.status_code, 400)
-        self.assertIn('Ação indisponível para agentes operando via PBX', r_deslogar.get_json()['mensagem'])
+        # 1. Matriz de sucesso: PBX Free, Busy, Ringing x voz 0, None, 1 x paused True, False
+        for pbx_st in ('Free', 'Busy', 'Ringing'):
+            for voz_st, paused in ((0, False), (0, True), (None, False), (1, False)):
+                self.coletor_npx.retrato = [
+                    {
+                        'code': '4422005',
+                        'name': 'Bruno',
+                        'queue': 'InfoBrasil_Suporte',
+                        'extension': '4422005',
+                        'status': voz_st,
+                        'paused': paused,
+                        'npxLoggedIn': True,
+                    }
+                ]
 
-        r_transf = self.http.post('/admin/agentes/transferir', json={'code': '4422005', 'para': 'InfoBrasil_Comercial'}, headers=headers)
-        self.assertEqual(r_transf.status_code, 400)
-        self.assertIn('Ação indisponível para agentes operando via PBX', r_transf.get_json()['mensagem'])
+                def mock_enriquecer(agentes, st=pbx_st):
+                    for a in agentes:
+                        a['pbxExtension'] = '2005'
+                        a['pbxStatus'] = st
+                        a['line'] = 'pbx'
+                    return set()
 
-        r_prio = self.http.post('/admin/agentes/prioridade', json={'code': '4422005', 'priority': 2}, headers=headers)
-        self.assertEqual(r_prio.status_code, 400)
-        self.assertIn('Ação indisponível para agentes operando via PBX', r_prio.get_json()['mensagem'])
+                self.coletor_pbx.enriquecer_agentes = MagicMock(side_effect=mock_enriquecer)
+
+                with seguranca._rate_limit_lock:
+                    seguranca._rate_limit_store.clear()
+
+                # Ação 1: tirar-pausa
+                r1 = self.http.post('/admin/agentes/4422005/tirar-pausa', headers=headers)
+                self.assertEqual(r1.status_code, 200)
+                self.assertEqual(self.cliente_painel.executados[-1][1]['code'], '4422005')
+
+                # Ação 2: colocar-pausa
+                r2 = self.http.post('/admin/agentes/4422005/colocar-pausa', headers=headers)
+                self.assertEqual(r2.status_code, 200)
+                self.assertEqual(self.cliente_painel.executados[-1][1]['code'], '4422005')
+
+                # Ação 3: remover-fila
+                r3 = self.http.post('/admin/agentes/4422005/remover-fila', json={'fila': 'InfoBrasil_Suporte'}, headers=headers)
+                self.assertEqual(r3.status_code, 200)
+                self.assertEqual(self.cliente_painel.executados[-1][1]['code'], '4422005')
+
+                # Ação 4: deslogar
+                r4 = self.http.post('/admin/agentes/4422005/deslogar', headers=headers)
+                self.assertEqual(r4.status_code, 200)
+
+                # Ação 5: transferir
+                r5 = self.http.post('/admin/agentes/transferir', json={'code': '4422005', 'para': 'InfoBrasil_Comercial'}, headers=headers)
+                self.assertEqual(r5.status_code, 200)
+                self.assertEqual(self.cliente_painel.executados[-1][1]['code'], '4422005')
+
+                # Ação 6: prioridade
+                r6 = self.http.post('/admin/agentes/prioridade', json={'code': '4422005', 'fila': 'InfoBrasil_Suporte', 'penalty': 3}, headers=headers)
+                self.assertEqual(r6.status_code, 200)
+                self.assertEqual(self.cliente_painel.executados[-1][1]['code'], '4422005')
+
+        # 2. Recusas: npxLoggedIn False / ausente / código não localizado / pbx-* / erro de coleta global
+        with seguranca._rate_limit_lock:
+            seguranca._rate_limit_store.clear()
+        self.coletor_npx.retrato = [
+            {'code': '4422005', 'name': 'Bruno', 'queue': 'InfoBrasil_Suporte', 'line': 'pbx', 'npxLoggedIn': False}
+        ]
+        r_recusa_false = self.http.post('/admin/agentes/4422005/colocar-pausa', headers=headers)
+        self.assertEqual(r_recusa_false.status_code, 400)
+        self.assertIn('Ação indisponível para agentes operando via PBX ou offline na NPX.', r_recusa_false.get_json()['mensagem'])
+
+        # Flag ausente (None/del)
+        del self.coletor_npx.retrato[0]['npxLoggedIn']
+        r_recusa_ausente = self.http.post('/admin/agentes/4422005/tirar-pausa', headers=headers)
+        self.assertEqual(r_recusa_ausente.status_code, 400)
+
+        # Agente não localizado no retrato
+        r_recusa_nao_localizado = self.http.post('/admin/agentes/4422999/colocar-pausa', headers=headers)
+        self.assertEqual(r_recusa_nao_localizado.status_code, 400)
+
+        # Código sintético PBX
+        r_recusa_pbx = self.http.post('/admin/agentes/pbx-2005/colocar-pausa', headers=headers)
+        self.assertEqual(r_recusa_pbx.status_code, 400)
+
+        # Falha global da coleta: coletor.erro presente -> 503
+        self.coletor_npx.retrato = [{'code': '4422005', 'name': 'Bruno', 'queue': 'InfoBrasil_Suporte', 'npxLoggedIn': True}]
+        self.coletor_npx.erro = 'Timeout na API NPX'
+        r_falha_erro = self.http.post('/admin/agentes/4422005/colocar-pausa', headers=headers)
+        self.assertEqual(r_falha_erro.status_code, 503)
+        self.assertIn('Dados da NPX indisponíveis no momento.', r_falha_erro.get_json()['mensagem'])
+
+        # Falha global da coleta: coletor.retrato é None -> 503
+        self.coletor_npx.erro = None
+        self.coletor_npx.retrato = None
+        r_falha_sem_retrato = self.http.post('/admin/agentes/4422005/colocar-pausa', headers=headers)
+        self.assertEqual(r_falha_sem_retrato.status_code, 503)
+        self.assertIn('Dados da NPX indisponíveis no momento.', r_falha_sem_retrato.get_json()['mensagem'])
+
+        # m4/m5: Checagem estrita a.get('npxLoggedIn') is True (rejeita string 'True', int 1 e payload forjado)
+        self.coletor_npx.retrato = [{'code': '4422005', 'name': 'Bruno', 'queue': 'InfoBrasil_Suporte', 'npxLoggedIn': 'True'}]
+        r_str = self.http.post('/admin/agentes/4422005/colocar-pausa', headers=headers)
+        self.assertEqual(r_str.status_code, 400)
+
+        self.coletor_npx.retrato = [{'code': '4422005', 'name': 'Bruno', 'queue': 'InfoBrasil_Suporte', 'npxLoggedIn': 1}]
+        r_int = self.http.post('/admin/agentes/4422005/colocar-pausa', headers=headers)
+        self.assertEqual(r_int.status_code, 400)
+
+        self.coletor_npx.retrato = [{'code': '4422005', 'name': 'Bruno', 'queue': 'InfoBrasil_Suporte', 'npxLoggedIn': False}]
+        r_forjado_str = self.http.post('/admin/agentes/4422005/colocar-pausa', json={'npxLoggedIn': 'True'}, headers=headers)
+        self.assertEqual(r_forjado_str.status_code, 400)
+
+        r_forjado_int = self.http.post('/admin/agentes/4422005/colocar-pausa', json={'npxLoggedIn': 1}, headers=headers)
+        self.assertEqual(r_forjado_int.status_code, 400)
+
+    def test_remover_fila_e_prioridade_exigem_sessao_na_fila_especifica(self):
+        # G1: remover-fila e prioridade devem validar sessão na fila exata (A=True, B=False).
+        # B é recusada com 400 sem chamar transporte remoto, enquanto A é permitida (200).
+        # transferir continua sendo ação por agente e aceita se houver sessão em qualquer fila.
+        self.permitido = True
+        with self.http.session_transaction() as sess:
+            sess['user_id'] = 1
+            sess['user_nome'] = 'Admin'
+            sess['_csrf_token'] = 'token_csrf_abc'
+
+        headers = {'X-CSRF-Token': 'token_csrf_abc'}
+
+        self.coletor_npx.retrato = [
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 0, 'npxLoggedIn': True},
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Comercial', 'status': 0, 'npxLoggedIn': False},
+        ]
+
+        with seguranca._rate_limit_lock:
+            seguranca._rate_limit_store.clear()
+
+        # 1. remover-fila na fila B (InfoBrasil_Comercial) -> 400 sem chamar painel
+        exec_antes = len(self.cliente_painel.executados)
+        r_rem_b = self.http.post('/admin/agentes/4422008/remover-fila', json={'fila': 'InfoBrasil_Comercial'}, headers=headers)
+        self.assertEqual(r_rem_b.status_code, 400)
+        self.assertIn('Ação indisponível para agentes operando via PBX ou offline na NPX.', r_rem_b.get_json()['mensagem'])
+        self.assertEqual(len(self.cliente_painel.executados), exec_antes)
+
+        # 2. prioridade na fila B (InfoBrasil_Comercial) -> 400 sem chamar painel
+        r_prio_b = self.http.post('/admin/agentes/prioridade', json={'code': '4422008', 'fila': 'InfoBrasil_Comercial', 'penalty': 3}, headers=headers)
+        self.assertEqual(r_prio_b.status_code, 400)
+        self.assertIn('Ação indisponível para agentes operando via PBX ou offline na NPX.', r_prio_b.get_json()['mensagem'])
+        self.assertEqual(len(self.cliente_painel.executados), exec_antes)
+
+        # 3. remover-fila na fila A (InfoBrasil_Suporte) -> 200 e chama painel
+        r_rem_a = self.http.post('/admin/agentes/4422008/remover-fila', json={'fila': 'InfoBrasil_Suporte'}, headers=headers)
+        self.assertEqual(r_rem_a.status_code, 200)
+        self.assertEqual(self.cliente_painel.executados[-1], ('remove_agent', {'code': '4422008', 'queue': 'InfoBrasil_Suporte'}))
+
+        # 4. prioridade na fila A (InfoBrasil_Suporte) -> 200 e chama painel
+        r_prio_a = self.http.post('/admin/agentes/prioridade', json={'code': '4422008', 'fila': 'InfoBrasil_Suporte', 'penalty': 4}, headers=headers)
+        self.assertEqual(r_prio_a.status_code, 200)
+        self.assertEqual(self.cliente_painel.executados[-1], ('update_penalty', {'code': '4422008', 'queue': 'InfoBrasil_Suporte', 'penalty': 4}))
+
+        # 5. transferir continua por agente: como Thiago tem sessão em A, transferir é permitido
+        r_transf = self.http.post('/admin/agentes/transferir', json={'code': '4422008', 'para': 'InfoBrasil_Comercial'}, headers=headers)
+        self.assertEqual(r_transf.status_code, 200)
+        self.assertEqual(self.cliente_painel.executados[-1], ('move_agent', {'code': '4422008', 'queue': 'InfoBrasil_Comercial'}))
+
+    def test_get_dados_com_erro_npx_retorna_rows_com_npx_logged_in_false_e_post_503(self):
+        # m1: Quando coletor tem erro presente (ex: falha de atualização recente),
+        # GET /agentes/dados deve retornar cópia das rows com npxLoggedIn=False para a UI desabilitar botões,
+        # sem mutar o retrato original no coletor.
+        # Ao mesmo tempo, qualquer POST de ação administrativa deve retornar 503.
+        self.permitido = True
+        with self.http.session_transaction() as sess:
+            sess['user_id'] = 1
+            sess['user_nome'] = 'Admin'
+            sess['_csrf_token'] = 'token_csrf_abc'
+
+        headers = {'X-CSRF-Token': 'token_csrf_abc'}
+
+        with seguranca._rate_limit_lock:
+            seguranca._rate_limit_store.clear()
+
+        # Retrato original possui npxLoggedIn=True
+        self.coletor_npx.retrato = [
+            {'code': '4422008', 'name': 'Thiago', 'queue': 'InfoBrasil_Suporte', 'status': 1, 'npxLoggedIn': True}
+        ]
+        self.coletor_npx.erro = 'Falha ao atualizar dados da NPX'
+
+        # 1. GET /agentes/dados
+        resp = self.http.get('/agentes/dados')
+        self.assertEqual(resp.status_code, 200)
+        dados = resp.get_json()
+        self.assertEqual(dados['erroNpx'], 'Falha ao atualizar dados da NPX')
+        agentes = dados['agentes']
+        thiago = next(a for a in agentes if a['code'] == '4422008')
+        self.assertFalse(thiago['npxLoggedIn'])
+        for a in agentes:
+            self.assertFalse(a['npxLoggedIn'])
+
+        # Valida que o retrato original no servidor NÃO foi mutado
+        self.assertTrue(self.coletor_npx.retrato[0]['npxLoggedIn'])
+
+        # 2. POST de ação administrativa retorna 503 (fail closed)
+        r_post = self.http.post('/admin/agentes/4422008/colocar-pausa', headers=headers)
+        self.assertEqual(r_post.status_code, 503)
+        self.assertIn('Dados da NPX indisponíveis no momento.', r_post.get_json()['mensagem'])
 
 
 if __name__ == '__main__':
