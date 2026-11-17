@@ -26,6 +26,7 @@ DOMINIOS = (
     'infoapiretaguarda', 'infocob', 'api-scanntech', 'guia',
 )
 SUFIXO = '.infobrasilsistemas.com.br'
+SUFIXOS_PERMITIDOS = (SUFIXO, '.iprojectti.com.br')
 
 
 def agora():
@@ -34,8 +35,8 @@ def agora():
 
 def validar_dominio(valor):
     dominio = str(valor or '').strip().lower().rstrip('.')
-    if len(dominio) > 253 or not dominio.endswith(SUFIXO):
-        raise ValueError('Informe um subdomínio de infobrasilsistemas.com.br, sem protocolo, porta ou caminho.')
+    if len(dominio) > 253 or not dominio.endswith(SUFIXOS_PERMITIDOS):
+        raise ValueError('Informe um subdomínio de infobrasilsistemas.com.br ou iprojectti.com.br, sem protocolo, porta ou caminho.')
     if not all(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', parte) for parte in dominio.split('.')):
         raise ValueError('Subdomínio inválido.')
     return dominio
