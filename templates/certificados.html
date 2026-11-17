@@ -48,7 +48,7 @@
         </form>
         <form method="post" action="/admin/certificados/verificar" class="form-inline">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          <button class="btn btn-secondary" type="submit">🔄 Verificar agora</button>
+          <button class="btn btn-secondary" type="submit">🔄 Verificar todos</button>
         </form>
       </div>
       {% endif %}
@@ -111,9 +111,20 @@
               </td>
               {% if session.get('logged_in') %}
               <td style="text-align: right; white-space: nowrap;">
-                <button type="button" class="btn btn-danger btn-sm" onclick="openModal('modalRemover{{ loop.index }}')" aria-label="Remover {{ item.dominio }}">
-                  🗑️ Remover
-                </button>
+                <div class="d-inline-flex gap-1 align-center">
+                  {% if pode_editar %}
+                  <form method="post" action="/admin/certificados/verificar-um" style="display: inline-block; margin: 0;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="dominio" value="{{ item.dominio }}">
+                    <button type="submit" class="btn btn-secondary btn-sm" aria-label="Verificar {{ item.dominio }}">
+                      🔄 Verificar
+                    </button>
+                  </form>
+                  {% endif %}
+                  <button type="button" class="btn btn-danger btn-sm" onclick="openModal('modalRemover{{ loop.index }}')" aria-label="Remover {{ item.dominio }}">
+                    🗑️ Remover
+                  </button>
+                </div>
               </td>
               {% endif %}
             </tr>

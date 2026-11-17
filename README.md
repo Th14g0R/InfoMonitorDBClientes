@@ -240,7 +240,8 @@ instale `requirements.lock` dentro da `.venv` e reinicie. Não copie um
 
 A página pública `/certificados` também está disponível nos menus de Servidores e Horários.
 Os oito subdomínios iniciais são cadastrados automaticamente na inicialização, sem substituir registros existentes.
-O Master pode adicionar subdomínios e verificar manualmente; outros usuários precisam da permissão **Certificados**, concedida em Gestão de Bancos.
+O Master pode adicionar subdomínios e verificar manualmente (todos ou individualmente por linha); outros usuários precisam da permissão **Certificados**, concedida em Gestão de Bancos.
+A consulta individual atualiza a validade e a situação TLS do subdomínio selecionado, sem disparar e-mails (alertas por e-mail para vencimentos identificados ocorrem na próxima verificação em lote ou agendada).
 
 O agendador verifica todas as segundas e quintas às 00h no horário de Fortaleza.
 Falhas de consulta ou SMTP permitem nova tentativa na próxima verificação automática ou manual.
