@@ -589,8 +589,12 @@ class ColetorAgentes:
 
     def coletar(self):
         agora = datetime.now(FUSO)
+        sessoes_ativas = self._sessoes_abertas(agora)
+        sessoes_logon = {(str(l.get('code')), l.get('queue')) for l in sessoes_ativas if RE_CODIGO.match(str(l.get('code')))}
+        codigos_logon = {str(l.get('code')) for l in sessoes_ativas if RE_CODIGO.match(str(l.get('code')))}
+
         agentes = {}
-        for linha in self._sessoes_abertas(agora):
+        for linha in sessoes_ativas:
             codigo = str(linha.get('code'))
             if not RE_CODIGO.match(codigo):
                 continue
@@ -642,6 +646,7 @@ class ColetorAgentes:
 
             chamada = (st or {}).get('current_call') or {}
             for fila in info['filas'] or ['']:
+                logado = (codigo, fila) in sessoes_logon or (codigo in codigos_logon and not fila)
                 lista.append({
                     'code': codigo,
                     'name': (st or {}).get('name') or info['name'],
@@ -659,6 +664,7 @@ class ColetorAgentes:
                     'callDst': (st or {}).get('dst') or None,
                     'callClient': chamada.get('client_name') or None,
                     'erro': None if st else 'status indisponível',
+                    'npxLoggedIn': bool(logado),
                 })
         self.retrato, self.coletado_em, self.erro = lista, agora, None
         return lista
@@ -799,32 +805,26 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
             status_http = 200
         return jsonify(ok=ok, mensagem=resultado.get('mensagem')), status_http
 
-    def recusar_se_line_pbx(codigo, acao=None):
+    def recusar_se_line_pbx(codigo, fila=None):
         if not codigo:
             return None
         cod_str = str(codigo)
         if cod_str.startswith('pbx-'):
             return jsonify(ok=False, mensagem='Ação indisponível para agentes operando exclusivamente via PBX.'), 400
-        if coletor and coletor.retrato:
-            # A3: Enriquece o retrato INTEIRO com unicidade global para não divergir da tela em colisão
-            retrato_enriquecido = [dict(a) for a in coletor.retrato]
-            pbx_disp = False
-            if coletor_pbx and coletor_pbx.cliente.configurado:
-                st_pbx = coletor_pbx.obter_status_conexao()
-                if st_pbx.get('available'):
-                    coletor_pbx.enriquecer_agentes(retrato_enriquecido)
-                    pbx_disp = True
-            if not pbx_disp:
-                for a in retrato_enriquecido:
-                    em_pausa = bool(a.get('paused'))
-                    st = a.get('status')
-                    a['line'] = 'npx' if (em_pausa or (st is not None and st != 0)) else 'off'
-            agentes_com_cod = [a for a in retrato_enriquecido if str(a.get('code')) == cod_str]
-            if any(a.get('line') == 'pbx' for a in agentes_com_cod):
-                # Exceção: Tirar pausa NPX é permitido se o agente estiver pausado na NPX mesmo com line pbx
-                if acao == 'tirar_pausa' and any(a.get('paused') for a in agentes_com_cod):
-                    return None
+        if coletor:
+            if coletor.erro or coletor.retrato is None:
+                return jsonify(ok=False, mensagem='Dados da NPX indisponíveis no momento.'), 503
+            agentes_com_cod = [a for a in coletor.retrato if str(a.get('code')) == cod_str]
+            if not agentes_com_cod:
                 return jsonify(ok=False, mensagem='Ação indisponível para agentes operando via PBX ou offline na NPX.'), 400
+            if fila is not None:
+                fila_str = str(fila)
+                agentes_fila = [a for a in agentes_com_cod if str(a.get('queue')) == fila_str]
+                if not any(a.get('npxLoggedIn') is True for a in agentes_fila):
+                    return jsonify(ok=False, mensagem='Ação indisponível para agentes operando via PBX ou offline na NPX.'), 400
+            else:
+                if not any(a.get('npxLoggedIn') is True for a in agentes_com_cod):
+                    return jsonify(ok=False, mensagem='Ação indisponível para agentes operando via PBX ou offline na NPX.'), 400
         return None
 
     def _responder_dados(todos_agentes, em, erro_npx, status_pbx):
@@ -901,7 +901,10 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
             return _responder_dados(todos_agentes, em, erro_npx, status_pbx)
 
         # NPX disponível e com dados:
-        agentes_enriquecidos = [dict(a) for a in lista]
+        if erro:
+            agentes_enriquecidos = [{**a, 'npxLoggedIn': False} for a in lista]
+        else:
+            agentes_enriquecidos = [dict(a) for a in lista]
         if pbx_disponivel:
             ramais_ambiguos = coletor_pbx.enriquecer_agentes(agentes_enriquecidos)
             ramais_casados = {a['pbxExtension'] for a in agentes_enriquecidos if a.get('pbxExtension')}
@@ -919,6 +922,10 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
                 a['pbxDirection'] = None
                 a['pbxSeconds'] = None
             todos_agentes = agentes_enriquecidos
+
+        if erro:
+            for a in todos_agentes:
+                a['npxLoggedIn'] = False
 
         return _responder_dados(todos_agentes, em, erro, status_pbx)
 
@@ -941,7 +948,7 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
             return jsonify(ok=False, mensagem=str(erro)), 400
         if not pode():
             return negar()
-        recusa = recusar_se_line_pbx(codigo, acao='tirar_pausa')
+        recusa = recusar_se_line_pbx(codigo)
         if recusa:
             return recusa
         if cliente_painel and cliente_painel.configurado:
@@ -974,14 +981,14 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
             return jsonify(ok=False, mensagem=str(erro)), 400
         if not pode():
             return negar()
-        recusa = recusar_se_line_pbx(codigo)
-        if recusa:
-            return recusa
         dados = request.get_json(silent=True) or {}
         try:
             fila = _validar_fila(dados.get('fila'), coletor)
         except (ValueError, TypeError) as erro:
             return jsonify(ok=False, mensagem=str(erro)), 400
+        recusa = recusar_se_line_pbx(codigo, fila=fila)
+        if recusa:
+            return recusa
         if not (cliente_painel and cliente_painel.configurado):
             return jsonify(ok=False, mensagem='Painel NPX não configurado no servidor.'), 503
         try:
@@ -1030,7 +1037,11 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
             return jsonify(ok=False, mensagem=str(erro)), 400
         if not pode():
             return negar()
-        recusa = recusar_se_line_pbx(codigo)
+        try:
+            fila = _validar_fila(dados.get('fila'), coletor)
+        except (ValueError, TypeError) as erro:
+            return jsonify(ok=False, mensagem=str(erro)), 400
+        recusa = recusar_se_line_pbx(codigo, fila=fila)
         if recusa:
             return recusa
         try:

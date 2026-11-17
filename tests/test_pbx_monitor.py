@@ -573,6 +573,32 @@ class TestColetorPbxP5EP6(unittest.TestCase):
         coletor.enriquecer_agentes(agentes7)
         self.assertEqual(agentes7[0]['line'], 'off')
 
+    def test_pbx_monitor_preserva_e_materializa_npx_logged_in(self):
+        # PBX-only deve sempre vir com npxLoggedIn=False
+        coletor = ColetorPbx(cliente=MagicMock(), mapa_analistas={
+            'Carol': {'ramal': '2022', 'departamento': 'InfoBrasil_SPED_Fiscal'},
+        })
+        coletor.snapshot = {
+            '2022': {'status': 'Free', 'number': None, 'direction': None, 'seconds': 0}
+        }
+        pbx_only = coletor.obter_agentes_pbx_only(codigos_npx_existentes=set())
+        self.assertEqual(len(pbx_only), 1)
+        self.assertFalse(pbx_only[0]['npxLoggedIn'])
+
+        # Enriquecimento deve preservar npxLoggedIn intacto (True e False)
+        agentes = [
+            {'code': '4422008', 'name': 'Thiago', 'status': 0, 'paused': False, 'npxLoggedIn': True},
+            {'code': '4422009', 'name': 'Outro', 'status': 0, 'paused': True, 'npxLoggedIn': False},
+        ]
+        coletor.snapshot = {
+            '2008': {'status': 'Busy', 'number': '85999998888', 'direction': 'inbound', 'seconds': 10}
+        }
+        coletor.mapa_analistas['Thiago'] = {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'}
+        coletor.enriquecer_agentes(agentes)
+        self.assertTrue(agentes[0]['npxLoggedIn'])
+        self.assertEqual(agentes[0]['line'], 'pbx')
+        self.assertFalse(agentes[1]['npxLoggedIn'])
+
 
 if __name__ == '__main__':
     unittest.main()
