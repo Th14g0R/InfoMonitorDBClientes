@@ -245,7 +245,7 @@ class CertificadosTest(unittest.TestCase):
         app.register_blueprint(bp)
         client = app.test_client()
         self.assertEqual(client.get('/certificados').status_code, 200)
-        self.assertNotIn('Verificar agora', client.get('/certificados').text)
+        self.assertNotIn('Verificar todos', client.get('/certificados').text)
         self.assertEqual(client.post('/admin/certificados/adicionar', data={'dominio': 'teste.infobrasilsistemas.com.br'}).status_code, 403)
         self.assertEqual(client.post('/admin/certificados/verificar').status_code, 403)
 
@@ -506,6 +506,185 @@ class CertificadosTest(unittest.TestCase):
         with closing(self.conectar()) as conn:
             row = conn.execute("SELECT 1 FROM certificados WHERE dominio = 'api.iprojectti.com.br'").fetchone()
             self.assertIsNone(row)
+
+    def test_verificar_um_isolamento_tres_certificados_rotina_e_email(self):
+        """Valida que verificar_um altera somente o domínio alvo, sem tocar nos outros dois, na rotina ou chamar email."""
+        dom_a = 'a-alfa.infobrasilsistemas.com.br'
+        dom_b = 'b-beta.infobrasilsistemas.com.br'
+        dom_c = 'c-gama.infobrasilsistemas.com.br'
+
+        with closing(self.conectar()) as conn, conn:
+            conn.execute('DELETE FROM certificados')
+            conn.execute('DELETE FROM certificados_emails')
+            conn.execute('UPDATE certificados_rotina SET semana=?, bloqueio_ate=NULL WHERE id=1', ('2026-10-12',))
+            for dom in (dom_a, dom_b, dom_c):
+                conn.execute("INSERT INTO certificados(dominio, expira_em, status, verificado_em, email_status) VALUES (?, NULL, 'Aguardando', NULL, NULL)", (dom,))
+
+        with patch('certificados.consultar_certificado', return_value=('2028-06-15T12:00:00+00:00', 'Válido')) as mock_consultar, \
+             patch('certificados.enviar_email') as mock_email:
+            msg = self.monitor.verificar_um(dom_b)
+
+        self.assertIn('concluída', msg.lower())
+        mock_consultar.assert_called_once_with(dom_b)
+        mock_email.assert_not_called()
+
+        with closing(self.conectar()) as conn:
+            # Domínio alvo (B): atualizado
+            b_row = conn.execute('SELECT * FROM certificados WHERE dominio = ?', (dom_b,)).fetchone()
+            self.assertEqual(b_row['status'], 'Válido')
+            self.assertEqual(b_row['expira_em'], '2028-06-15T12:00:00+00:00')
+            self.assertIsNotNone(b_row['verificado_em'])
+            self.assertIsNone(b_row['email_status'])
+            self.assertIsNone(b_row['email_em'])
+            self.assertIsNone(b_row['email_expiracao'])
+
+            # Demais domínios (A e C): totalmente intocados
+            for dom_intocado in (dom_a, dom_c):
+                row = conn.execute('SELECT * FROM certificados WHERE dominio = ?', (dom_intocado,)).fetchone()
+                self.assertEqual(row['status'], 'Aguardando')
+                self.assertIsNone(row['expira_em'])
+                self.assertIsNone(row['verificado_em'])
+                self.assertIsNone(row['email_status'])
+
+            # Rotina global: inalterada
+            rotina = conn.execute('SELECT * FROM certificados_rotina WHERE id=1').fetchone()
+            self.assertEqual(rotina['semana'], '2026-10-12')
+            self.assertIsNone(rotina['bloqueio_ate'])
+
+            # Tabela de emails: vazia
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM certificados_emails').fetchone()[0], 0)
+
+    def test_verificar_um_falha_consulta_e_preservacao_expiracao(self):
+        """Valida que falha na consulta grava 'Falha na verificação', preserva expira_em anterior via COALESCE e atualiza verificado_em."""
+        dom = 'falha.infobrasilsistemas.com.br'
+        data_antiga = '2027-01-01T00:00:00+00:00'
+        with closing(self.conectar()) as conn, conn:
+            conn.execute("INSERT OR REPLACE INTO certificados(dominio, expira_em, status, verificado_em) VALUES (?, ?, 'Válido', '2026-01-01T00:00:00+00:00')", (dom, data_antiga))
+
+        with patch('certificados.consultar_certificado', side_effect=Exception('DNS ou TLS indisponível')) as mock_consultar:
+            msg = self.monitor.verificar_um(dom)
+
+        mock_consultar.assert_called_once_with(dom)
+        self.assertIn('falha', msg.lower())
+
+        with closing(self.conectar()) as conn:
+            row = conn.execute('SELECT * FROM certificados WHERE dominio = ?', (dom,)).fetchone()
+            self.assertEqual(row['status'], 'Falha na verificação')
+            self.assertEqual(row['expira_em'], data_antiga)
+            self.assertNotEqual(row['verificado_em'], '2026-01-01T00:00:00+00:00')
+
+    def test_verificar_um_dominio_invalido_ausente_ou_nao_cadastrado_e_removido(self):
+        """Valida que domínios inválidos ou não cadastrados não consultam rede e que remoção durante rede não recria a linha."""
+        with patch('certificados.consultar_certificado') as mock_consultar:
+            # 1. Domínio inválido (ValueError)
+            for inv in ('evil.com', 'localhost', 'falsoinfobrasilsistemas.com.br', '', None):
+                with self.assertRaises(ValueError):
+                    self.monitor.verificar_um(inv)
+            mock_consultar.assert_not_called()
+
+            # 2. Domínio válido mas não cadastrado (retorna mensagem e não consulta rede)
+            msg_nao_cad = self.monitor.verificar_um('nao-cadastrado.infobrasilsistemas.com.br')
+            self.assertIn('não encontrado', msg_nao_cad.lower())
+            mock_consultar.assert_not_called()
+
+        # 3. Domínio removido durante a consulta de rede (não deve recriar linha)
+        dom_rem = 'removido-durante.infobrasilsistemas.com.br'
+        with closing(self.conectar()) as conn, conn:
+            conn.execute("INSERT INTO certificados(dominio) VALUES (?)", (dom_rem,))
+
+        def simular_remocao_concorrente(d):
+            with closing(self.conectar()) as c, c:
+                c.execute("DELETE FROM certificados WHERE dominio = ?", (d,))
+            return ('2028-01-01T00:00:00+00:00', 'Válido')
+
+        with patch('certificados.consultar_certificado', side_effect=simular_remocao_concorrente):
+            msg_rem = self.monitor.verificar_um(dom_rem)
+
+        self.assertIn('não encontrado', msg_rem.lower())
+        with closing(self.conectar()) as conn:
+            row = conn.execute("SELECT 1 FROM certificados WHERE dominio = ?", (dom_rem,)).fetchone()
+            self.assertIsNone(row)
+
+    def test_endpoint_verificar_um_http_permissoes_csrf_e_renderizacao(self):
+        """Testa o endpoint POST /admin/certificados/verificar-um (permissão, CSRF, flash, auditoria) e renderização na interface."""
+        from flask import Blueprint
+        app = Flask(__name__, template_folder=str(Path.cwd() / 'templates'))
+        app.secret_key = 'teste'
+        app.jinja_env.globals['csrf_token'] = lambda: 'token-valido'
+
+        permissao_ativa = [True]
+        app.jinja_env.globals['tem_permissao'] = lambda p: permissao_ativa[0]
+
+        bp = Blueprint('bancos', __name__)
+        configurar_certificados(bp, self.conectar, lambda p: permissao_ativa[0], MagicMock())
+        app.register_blueprint(bp)
+        client = app.test_client()
+
+        dom = 'painel.infobrasilsistemas.com.br'
+        with closing(self.conectar()) as conn, conn:
+            conn.execute("INSERT OR IGNORE INTO certificados(dominio) VALUES (?)", (dom,))
+
+        # 1. 403 quando não tem permissão
+        permissao_ativa[0] = False
+        resp_403 = client.post('/admin/certificados/verificar-um', data={'dominio': dom, 'csrf_token': 'token-valido'})
+        self.assertEqual(resp_403.status_code, 403)
+
+        # 2. 400 quando CSRF inválido (com sessão contendo token esperado)
+        permissao_ativa[0] = True
+        with client.session_transaction() as sess:
+            sess['logged_in'] = True
+            sess['_csrf_token'] = 'token-esperado'
+
+        resp_csrf_invalido = client.post('/admin/certificados/verificar-um', data={'dominio': dom, 'csrf_token': 'token-errado'})
+        self.assertEqual(resp_csrf_invalido.status_code, 400)
+
+        # 3. Sucesso (302 redirect para /certificados, flash message, sem tocar rotina)
+        with patch('certificados.consultar_certificado', return_value=('2028-10-10T00:00:00+00:00', 'Válido')) as mock_cons, \
+             patch('certificados.registrar_acao_admin') as mock_audit:
+            resp_ok = client.post('/admin/certificados/verificar-um', data={'dominio': dom, 'csrf_token': 'token-esperado'}, follow_redirects=True)
+            self.assertEqual(resp_ok.status_code, 200)
+            mock_cons.assert_called_once_with(dom)
+            mock_audit.assert_called_once()
+            self.assertIn('concluída', resp_ok.text.lower())
+
+        # 4. Domínio ausente / vazio (redireciona com flash sem consultar rede)
+        with patch('certificados.consultar_certificado') as mock_cons:
+            resp_vazio = client.post('/admin/certificados/verificar-um', data={'csrf_token': 'token-esperado'}, follow_redirects=True)
+            self.assertEqual(resp_vazio.status_code, 200)
+            self.assertIn('informe o subdomínio', resp_vazio.text.lower())
+            mock_cons.assert_not_called()
+
+        # 5. Domínio inválido (redireciona com flash sem consultar rede)
+        with patch('certificados.consultar_certificado') as mock_cons:
+            resp_inv = client.post('/admin/certificados/verificar-um', data={'dominio': 'google.com', 'csrf_token': 'token-esperado'}, follow_redirects=True)
+            self.assertEqual(resp_inv.status_code, 200)
+            self.assertIn('informe um subdomínio', resp_inv.text.lower())
+            mock_cons.assert_not_called()
+
+        # 6. Domínio não cadastrado (redireciona com flash sem consultar rede)
+        with patch('certificados.consultar_certificado') as mock_cons:
+            resp_nao_cad = client.post('/admin/certificados/verificar-um', data={'dominio': 'outro.infobrasilsistemas.com.br', 'csrf_token': 'token-esperado'}, follow_redirects=True)
+            self.assertEqual(resp_nao_cad.status_code, 200)
+            self.assertIn('não encontrado', resp_nao_cad.text.lower())
+            mock_cons.assert_not_called()
+
+        # 7. Renderização no HTML
+        # Sem permissão: não renderiza botão verificar individual nem botão verificar todos
+        permissao_ativa[0] = False
+        with client.session_transaction() as sess:
+            sess['logged_in'] = False
+        resp_html_pub = client.get('/certificados')
+        self.assertNotIn('/admin/certificados/verificar-um', resp_html_pub.text)
+        self.assertNotIn('Verificar todos', resp_html_pub.text)
+
+        # Com permissão: renderiza form e botões
+        permissao_ativa[0] = True
+        with client.session_transaction() as sess:
+            sess['logged_in'] = True
+        resp_html_admin = client.get('/certificados')
+        self.assertIn('/admin/certificados/verificar-um', resp_html_admin.text)
+        self.assertIn('Verificar todos', resp_html_admin.text)
+        self.assertIn('Remover', resp_html_admin.text)
 
 
 if __name__ == '__main__':

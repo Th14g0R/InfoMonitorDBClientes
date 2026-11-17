@@ -187,6 +187,35 @@ class MonitorCertificados:
                 conn.execute('UPDATE certificados_rotina SET semana=CASE WHEN ? THEN ? ELSE semana END, bloqueio_ate=? WHERE id=1',
                              (concluida, semana, (agora() + timedelta(minutes=1)).isoformat()))
 
+    def verificar_um(self, dominio):
+        dominio = validar_dominio(dominio)
+        with closing(self.conectar()) as conn:
+            existe = conn.execute('SELECT 1 FROM certificados WHERE dominio = ?', (dominio,)).fetchone()
+        if not existe:
+            return f'Subdomínio {dominio} não encontrado.'
+
+        expira = None
+        sucesso = True
+        try:
+            expira, status = consultar_certificado(dominio)
+        except Exception:
+            sucesso = False
+            status = 'Falha na verificação'
+            LOGGER.warning('Falha ao consultar certificado de %s', dominio)
+
+        instante = agora().isoformat()
+        with closing(self.conectar()) as conn, conn:
+            atualizado = conn.execute(
+                'UPDATE certificados SET expira_em=COALESCE(?, expira_em), status=?, verificado_em=? WHERE dominio=?',
+                (expira, status, instante, dominio)
+            ).rowcount
+            if not atualizado:
+                return f'Subdomínio {dominio} não encontrado.'
+
+        if not sucesso:
+            return f'Falha na verificação de {dominio}.'
+        return f'Verificação de {dominio} concluída: {status}.'
+
 
 def configurar_certificados(bp, conectar, tem_permissao, scheduler):
     monitor = MonitorCertificados(conectar)
@@ -237,6 +266,48 @@ def configurar_certificados(bp, conectar, tem_permissao, scheduler):
         if not tem_permissao('perm_certificados'):
             return 'Acesso negado.', 403
         flash(monitor.verificar(manual=True))
+        return redirect(url_for('bancos.certificados'))
+
+    @bp.route('/admin/certificados/verificar-um', methods=['POST'], endpoint='verificar_um')
+    def verificar_um_certificado():
+        if not tem_permissao('perm_certificados'):
+            return 'Acesso negado.', 403
+
+        esperado_csrf = session.get('_csrf_token')
+        recebido_csrf = request.headers.get('X-CSRF-Token') or request.form.get('csrf_token')
+        if esperado_csrf:
+            if not recebido_csrf or not hmac.compare_digest(esperado_csrf.encode(), recebido_csrf.encode()):
+                return jsonify(erro='Requisição inválida. Recarregue a página e tente novamente.'), 400
+
+        subdominio_bruto = request.form.get('dominio') or request.form.get('subdominio')
+        if not subdominio_bruto:
+            flash('Informe o subdomínio para verificação.')
+            return redirect(url_for('bancos.certificados'))
+
+        try:
+            dominio = validar_dominio(subdominio_bruto)
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for('bancos.certificados'))
+
+        with closing(conectar()) as conn:
+            existe = conn.execute('SELECT 1 FROM certificados WHERE dominio = ?', (dominio,)).fetchone()
+        if not existe:
+            flash(f'Subdomínio {dominio} não encontrado.')
+            return redirect(url_for('bancos.certificados'))
+
+        msg = monitor.verificar_um(dominio)
+
+        try:
+            registrar_acao_admin('verificar_certificado_individual', {
+                'subdominio': dominio,
+                'usuario_id': session.get('user_id'),
+                'usuario_nome': session.get('user_nome')
+            })
+        except Exception as e_auditoria:
+            LOGGER.warning('Falha ao registrar auditoria de verificacao individual de certificado: %s', e_auditoria)
+
+        flash(msg)
         return redirect(url_for('bancos.certificados'))
 
     @bp.route('/certificados/remover', methods=['POST'], endpoint='remover')
@@ -308,6 +379,13 @@ def configurar_certificados(bp, conectar, tem_permissao, scheduler):
                 endpoint='certificados.certificados',
                 view_func=listar,
                 methods=['GET']
+            )
+        if 'certificados.verificar_um' not in state.app.view_functions:
+            state.app.add_url_rule(
+                '/admin/certificados/verificar-um',
+                endpoint='certificados.verificar_um',
+                view_func=verificar_um_certificado,
+                methods=['POST']
             )
 
     scheduler.add_job(monitor.verificar, 'cron', day_of_week='mon,thu', hour=0, minute=0, timezone='America/Fortaleza',

@@ -161,13 +161,18 @@ class SegurancaTest(unittest.TestCase):
         visitante = self.app.test_client()
         response = visitante.get('/certificados')
         self.assertEqual(response.status_code, 200)
-        self.assertNotIn('Verificar agora', response.text)
-        self.assertIn('Verificar agora', self.client.get('/certificados').text)
+        self.assertNotIn('Verificar todos', response.text)
+        self.assertIn('Verificar todos', self.client.get('/certificados').text)
         self.assertEqual(self.client.post('/admin/certificados/verificar').status_code, 400)
+        self.assertEqual(self.client.post('/admin/certificados/verificar-um').status_code, 400)
         with patch('certificados.MonitorCertificados.verificar', return_value='Concluído') as verificar:
             response = self.client.post('/admin/certificados/verificar', data={'csrf_token': self.token})
             self.assertEqual(response.status_code, 302)
             verificar.assert_called_once_with(manual=True)
+        with patch('certificados.MonitorCertificados.verificar_um', return_value='Verificação de info-api.infobrasilsistemas.com.br concluída: Válido.') as verificar_um:
+            response_um = self.client.post('/admin/certificados/verificar-um', data={'csrf_token': self.token, 'dominio': 'info-api.infobrasilsistemas.com.br'})
+            self.assertEqual(response_um.status_code, 302)
+            verificar_um.assert_called_once_with('info-api.infobrasilsistemas.com.br')
 
     def test_cnpj_publico_e_api_validacao(self):
         visitante = self.app.test_client()
@@ -197,10 +202,15 @@ class SegurancaTest(unittest.TestCase):
             for permitido in (True, False):
                 resposta = self.client.post('/admin/usuarios/permissoes', json={'user_id': uid, 'perm_certificados': permitido}, headers={'X-CSRF-Token': self.token})
                 self.assertEqual(resposta.status_code, 200)
-                with patch('certificados.MonitorCertificados.verificar', return_value='Concluído') as verificar:
+                with patch('certificados.MonitorCertificados.verificar', return_value='Concluído') as verificar, \
+                     patch('certificados.MonitorCertificados.verificar_um', return_value='Concluído') as verificar_um:
                     resposta = usuario.post('/admin/certificados/verificar', data={'csrf_token': token})
                     self.assertEqual(resposta.status_code, 302 if permitido else 403)
                     self.assertEqual(verificar.call_count, int(permitido))
+
+                    resposta_um = usuario.post('/admin/certificados/verificar-um', data={'csrf_token': token, 'dominio': 'info-api.infobrasilsistemas.com.br'})
+                    self.assertEqual(resposta_um.status_code, 302 if permitido else 403)
+                    self.assertEqual(verificar_um.call_count, int(permitido))
         finally:
             with closing(self.bancos.get_db_connection()) as conn, conn:
                 conn.execute('DELETE FROM usuarios WHERE id=?', (uid,))
