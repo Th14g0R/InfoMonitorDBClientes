@@ -99,5 +99,115 @@ class TestAgentesFrontendCores(unittest.TestCase):
         self.assertEqual(r7['st'][1], 'var(--off)')
         self.assertEqual(r7['st'][3], 'l-off')
 
+    def test_formatacao_duracao_decorrida_situacao_pausa(self):
+        """Valida remoção de 'de Xm', exibição sem pauseMaxMinutes, fallback de início e formato >= 24h (Nd HHh MMm)."""
+        res = subprocess.run(['node', RUNNER_PATH, JS_PATH], capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(res.returncode, 0, f"Erro ao executar runner Node.js:\n{res.stderr}")
+
+        data = json.loads(res.stdout)
+        by_id = {r['id']: r for r in data}
+
+        # 1. Caso 101m: exibe '1h 41m' sem 'de 60m'
+        p101 = by_id['pause_101m']
+        self.assertEqual(p101['sitTxt'], "⏸ Pausa · 1h 41m")
+        self.assertEqual(p101['sitHtml'], "⏸ Pausa <span class=\"mut\">· 1h 41m</span>")
+        self.assertNotIn("de 60m", p101['sitTxt'])
+
+        # 2. Fronteira exata de 1 hora: 60m -> 1h 00m
+        p60 = by_id['pause_60m']
+        self.assertEqual(p60['sitTxt'], "⏸ Pausa · 1h 00m")
+        self.assertEqual(p60['sitHtml'], "⏸ Pausa <span class=\"mut\">· 1h 00m</span>")
+
+        # 3. Fronteira 61m -> 1h 01m
+        p61 = by_id['pause_61m']
+        self.assertEqual(p61['sitTxt'], "⏸ Pausa · 1h 01m")
+
+        # 4. Fronteira de 2 horas: 120m -> 2h 00m
+        p120 = by_id['pause_120m']
+        self.assertEqual(p120['sitTxt'], "⏸ Pausa · 2h 00m")
+
+        # 5. Formato curto abaixo de 1 hora preservado: 59m -> 59m
+        p59 = by_id['pause_59m']
+        self.assertEqual(p59['sitTxt'], "⏸ Pausa · 59m")
+        self.assertEqual(p59['sitHtml'], "⏸ Pausa <span class=\"mut\">· 59m</span>")
+
+        # 6. Formato curto: 12m -> 12m
+        p12 = by_id['pause_12m']
+        self.assertEqual(p12['sitTxt'], "⏸ Pausa · 12m")
+
+        # 7. Formato curto no limite inferior: 0m -> 0m
+        p0 = by_id['pause_0m']
+        self.assertEqual(p0['sitTxt'], "⏸ Pausa · 0m")
+
+        # 8. Linha NPX (fora PBX) com > 1h
+        npx101 = by_id['npx_pause_101m']
+        self.assertEqual(npx101['sitTxt'], "Almoço · 1h 41m")
+        self.assertEqual(npx101['sitHtml'], "Almoço <span class=\"mut\">· 1h 41m</span>")
+
+        # 9. Linha NPX (fora PBX) com < 1h
+        npx59 = by_id['npx_pause_59m']
+        self.assertEqual(npx59['sitTxt'], "Lanche · 59m")
+        self.assertEqual(npx59['sitHtml'], "Lanche <span class=\"mut\">· 59m</span>")
+
+        # 10. Caso existente a1 (10m sem de 30m)
+        r1 = by_id['pbx_free_paused']
+        self.assertEqual(r1['sitTxt'], "⏸ Almoço · 10m")
+        self.assertEqual(r1['sitHtml'], "⏸ Almoço <span class=\"mut\">· 10m</span>")
+
+        # 11. Durações a partir de 24h: formato Nd HHh MMm
+        p24h = by_id['pause_24h']
+        self.assertEqual(p24h['sitTxt'], "⏸ Pausa · 1d 00h 00m")
+        self.assertEqual(p24h['sitHtml'], "⏸ Pausa <span class=\"mut\">· 1d 00h 00m</span>")
+
+        p25h5m = by_id['pause_25h_5m']
+        self.assertEqual(p25h5m['sitTxt'], "⏸ Pausa · 1d 01h 05m")
+
+        p48h12m = by_id['pause_48h_12m']
+        self.assertEqual(p48h12m['sitTxt'], "⏸ Pausa · 2d 00h 12m")
+
+        npx24h = by_id['npx_pause_24h']
+        self.assertEqual(npx24h['sitTxt'], "Almoço · 1d 00h 00m")
+        self.assertEqual(npx24h['sitHtml'], "Almoço <span class=\"mut\">· 1d 00h 00m</span>")
+
+        # 12. Duração válida exibida mesmo SEM pauseMaxMinutes
+        pSemMax = by_id['pause_sem_max_minutos']
+        self.assertEqual(pSemMax['sitTxt'], "⏸ Pausa · 1h 41m")
+        self.assertEqual(pSemMax['sitHtml'], "⏸ Pausa <span class=\"mut\">· 1h 41m</span>")
+
+        pSemMax24h = by_id['pause_sem_max_minutos_24h']
+        self.assertEqual(pSemMax24h['sitTxt'], "⏸ Pausa · 1d 00h 00m")
+
+        # 13. Fallback de início preservado quando pauseMinutes ausente/nulo
+        pFallback = by_id['pause_fallback_start']
+        self.assertEqual(pFallback['sitTxt'], "⏸ Pausa desde 14:30")
+        self.assertEqual(pFallback['sitHtml'], "⏸ Pausa <span class=\"mut\">desde 14:30</span>")
+
+        npxFallback = by_id['npx_pause_fallback_start']
+        self.assertEqual(npxFallback['sitTxt'], "Lanche desde 14:30")
+        self.assertEqual(npxFallback['sitHtml'], "Lanche <span class=\"mut\">desde 14:30</span>")
+
+        # 14. Validações diretas das funções fmtMin e fmtSeg (Tempo e modal)
+        fmt = by_id['fmt_tests']
+        self.assertEqual(fmt['fmt101'], "1h 41m")
+        self.assertEqual(fmt['fmt60'], "1h 00m")
+        self.assertEqual(fmt['fmt61'], "1h 01m")
+        self.assertEqual(fmt['fmt120'], "2h 00m")
+        self.assertEqual(fmt['fmt59'], "59m")
+        self.assertEqual(fmt['fmt12'], "12m")
+        self.assertEqual(fmt['fmt0'], "0m")
+        self.assertEqual(fmt['fmtNull'], "0m")
+        self.assertEqual(fmt['fmtUndefined'], "0m")
+        self.assertEqual(fmt['fmtMin24h'], "1d 00h 00m")
+        self.assertEqual(fmt['fmtMin25h5m'], "1d 01h 05m")
+
+        # Helper fmtSeg (Tempo e modal): >= 24h usa Nd HHh MMm
+        self.assertEqual(fmt['fmtSeg24h'], "1d 00h 00m")
+        self.assertEqual(fmt['fmtSeg25h1m2s'], "1d 01h 01m")
+        self.assertEqual(fmt['fmtSeg2d15h45m'], "2d 15h 45m")
+        self.assertEqual(fmt['fmtSeg1h41m'], "1h 41m")
+        self.assertEqual(fmt['fmtSeg1h0m'], "1h 00m")
+        self.assertEqual(fmt['fmtSeg59s'], "0m 59s")
+        self.assertEqual(fmt['fmtSeg0s'], "0m 00s")
+
 if __name__ == '__main__':
     unittest.main()

@@ -48,8 +48,14 @@
   const ehLivre = a => a.line === 'pbx' ? (!a.paused && a.pbxStatus === 'Free') : (!a.paused && a.status === 1);
 
   function fmtSeg(t) {
-    t = Math.round(t || 0); const h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), s = t % 60;
+    t = Math.round(t || 0);
+    const d = Math.floor(t / 86400), h = Math.floor((t % 86400) / 3600), m = Math.floor(t % 3600 / 60), s = t % 60;
+    if (d) return `${d}d ${String(h).padStart(2, '0')}h ${String(m).padStart(2, '0')}m`;
     return h ? `${h}h ${String(m).padStart(2, '0')}m` : `${m}m ${String(s).padStart(2, '0')}s`;
+  }
+  function fmtMin(t) {
+    const minutos = Math.round(t || 0);
+    return minutos >= 60 ? fmtSeg(minutos * 60) : `${minutos}m`;
   }
   function fmtHora(iso) { if (!iso) return ''; const d = new Date(iso); return isNaN(d) ? '' : d.toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'}); }
   function fmtFone(n) {
@@ -69,6 +75,7 @@
     return filas.find(f => f.key === k) || {key: k, nome: k, temId: false};
   };
   const maxValido = m => m != null && Number.isFinite(Number(m)) && Number(m) >= 0;
+  const minValido = m => m != null && typeof m !== 'boolean' && m !== '' && Number.isFinite(Number(m)) && Number(m) >= 0;
   const estourada = a => {
     if (!a.paused || !maxValido(a.pauseMaxMinutes) || a.pauseMinutes == null) return false;
     const min = Number(a.pauseMinutes);
@@ -101,8 +108,8 @@
       if (a.paused) {
         const tipo = a.pauseType || 'Pausa';
         let pausaInfo = tipo;
-        if (maxValido(a.pauseMaxMinutes) && a.pauseMinutes != null && Number.isFinite(Number(a.pauseMinutes))) {
-          pausaInfo = `${tipo} · ${Math.round(a.pauseMinutes)}m de ${Math.round(a.pauseMaxMinutes)}m`;
+        if (minValido(a.pauseMinutes)) {
+          pausaInfo = `${tipo} · ${fmtMin(a.pauseMinutes)}`;
         } else if (a.pauseStart) {
           pausaInfo = `${tipo} desde ${fmtHora(a.pauseStart)}`;
         }
@@ -112,8 +119,8 @@
     }
     if (a.paused) {
       const tipo = a.pauseType || 'Pausa';
-      if (maxValido(a.pauseMaxMinutes) && a.pauseMinutes != null && Number.isFinite(Number(a.pauseMinutes))) {
-        return `${tipo} · ${Math.round(a.pauseMinutes)}m de ${Math.round(a.pauseMaxMinutes)}m`;
+      if (minValido(a.pauseMinutes)) {
+        return `${tipo} · ${fmtMin(a.pauseMinutes)}`;
       }
       return `${tipo}${a.pauseStart ? ` desde ${fmtHora(a.pauseStart)}` : ''}`;
     }
@@ -138,8 +145,8 @@
       if (a.paused) {
         const tipo = esc(a.pauseType || 'Pausa');
         let pausaTxt = tipo;
-        if (maxValido(a.pauseMaxMinutes) && a.pauseMinutes != null && Number.isFinite(Number(a.pauseMinutes))) {
-          pausaTxt = `${tipo} <span class="mut">· ${Math.round(a.pauseMinutes)}m de ${Math.round(a.pauseMaxMinutes)}m</span>`;
+        if (minValido(a.pauseMinutes)) {
+          pausaTxt = `${tipo} <span class="mut">· ${fmtMin(a.pauseMinutes)}</span>`;
         } else if (a.pauseStart) {
           pausaTxt = `${tipo}${a.pauseStart ? ` <span class="mut">desde ${fmtHora(a.pauseStart)}</span>` : ''}`;
         }
@@ -152,8 +159,8 @@
     }
     if (a.paused) {
       const tipo = esc(a.pauseType || 'Pausa');
-      if (maxValido(a.pauseMaxMinutes) && a.pauseMinutes != null && Number.isFinite(Number(a.pauseMinutes))) {
-        return `${tipo} <span class="mut">· ${Math.round(a.pauseMinutes)}m de ${Math.round(a.pauseMaxMinutes)}m</span>`;
+      if (minValido(a.pauseMinutes)) {
+        return `${tipo} <span class="mut">· ${fmtMin(a.pauseMinutes)}</span>`;
       }
       return `${tipo}${a.pauseStart ? ` <span class="mut">desde ${fmtHora(a.pauseStart)}</span>` : ''}`;
     }
