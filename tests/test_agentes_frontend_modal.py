@@ -241,6 +241,32 @@ class TestAgentesFrontendModal(unittest.TestCase):
         self.assertTrue(u7['bPausarDisabled'])
         self.assertTrue(u7['bTirarDisabled'])
 
+    def test_modal_formatacao_numeros_chamada_pbx(self):
+        """Valida que o modal exibe números PBX formatados em dInfo (558999180044, 5588981669885, ramal e internacional)."""
+        res = subprocess.run(['node', RUNNER_PATH, JS_PATH], capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(res.returncode, 0, f"Erro ao executar runner Node.js:\n{res.stderr}")
+
+        data = json.loads(res.stdout)
+        by_id = {r['id']: r for r in data}
+
+        # Imagem: 558999180044 -> (89) 9918-0044
+        m1 = by_id['modal_pbx_call_558999180044']
+        self.assertIn("<b>(89) 9918-0044</b>", m1['dInfo'])
+        self.assertNotIn("558999180044", m1['dInfo'])
+
+        # Imagem: 5588981669885 -> (88) 98166-9885
+        m2 = by_id['modal_pbx_call_5588981669885']
+        self.assertIn("<b>(88) 98166-9885</b>", m2['dInfo'])
+        self.assertNotIn("5588981669885", m2['dInfo'])
+
+        # Ramal: 2008
+        m3 = by_id['modal_pbx_call_ramal_2008']
+        self.assertIn("<b>2008</b>", m3['dInfo'])
+
+        # Internacional: +14155552671
+        m4 = by_id['modal_pbx_call_internacional']
+        self.assertIn("<b>+14155552671</b>", m4['dInfo'])
+
 
 if __name__ == '__main__':
     unittest.main()

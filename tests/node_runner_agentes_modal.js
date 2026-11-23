@@ -120,6 +120,7 @@ function executarCenario(id, agente, opcoes = {}) {
 
   return {
     id,
+    dInfo: el.dInfo.innerHTML,
     bTransf: { disabled: el.bTransf.disabled, title: el.bTransf.title },
     bPen: { disabled: el.bPen.disabled, title: el.bPen.title },
     bRemoverFila: { disabled: el.bRemoverFila.disabled, title: el.bRemoverFila.title },
@@ -399,5 +400,30 @@ resultados.push({
   bPausarDisabled: el.bPausar.disabled,
   bTirarDisabled: el.bTirar.disabled
 });
+
+// 24. Validação de números PBX formatados no modal (dInfo)
+resultados.push(executarCenario('modal_pbx_call_558999180044', {
+  code: '2001', name: 'Analista 1', queue: 'Fila_Suporte', extension: '2001',
+  line: 'pbx', pbxStatus: 'Busy', pbxNumber: '558999180044', pbxDirection: 'inbound', pbxSeconds: 45, status: 0,
+  paused: false, npxLoggedIn: true, penalty: 1
+}));
+
+resultados.push(executarCenario('modal_pbx_call_5588981669885', {
+  code: '2002', name: 'Analista 2', queue: 'Fila_Suporte', extension: '2002',
+  line: 'pbx', pbxStatus: 'Busy', pbxNumber: '5588981669885', pbxDirection: 'outbound', pbxSeconds: 70, status: 0,
+  paused: false, npxLoggedIn: true, penalty: 1
+}));
+
+resultados.push(executarCenario('modal_pbx_call_ramal_2008', {
+  code: '2003', name: 'Analista 3', queue: 'Fila_Suporte', extension: '2003',
+  line: 'pbx', pbxStatus: 'Ringing', pbxNumber: '2008', pbxDirection: 'inbound', pbxSeconds: 15, status: 0,
+  paused: false, npxLoggedIn: true, penalty: 1
+}));
+
+resultados.push(executarCenario('modal_pbx_call_internacional', {
+  code: '2004', name: 'Analista 4', queue: 'Fila_Suporte', extension: '2004',
+  line: 'pbx', pbxStatus: 'Busy', pbxNumber: '+14155552671', pbxDirection: 'inbound', pbxSeconds: 120, status: 0,
+  paused: false, npxLoggedIn: true, penalty: 1
+}));
 
 console.log(JSON.stringify(resultados));

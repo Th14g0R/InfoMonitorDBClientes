@@ -209,5 +209,70 @@ class TestAgentesFrontendCores(unittest.TestCase):
         self.assertEqual(fmt['fmtSeg59s'], "0m 59s")
         self.assertEqual(fmt['fmtSeg0s'], "0m 00s")
 
+    def test_mascara_telefonia_pbx_e_fmtfone(self):
+        """Valida máscara de números PBX: remoção de 55 somente em comprimentos 12/13, preservando DDD 55, ramal e internacional."""
+        res = subprocess.run(['node', RUNNER_PATH, JS_PATH], capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(res.returncode, 0, f"Erro ao executar runner Node.js:\n{res.stderr}")
+
+        data = json.loads(res.stdout)
+        by_id = {r['id']: r for r in data}
+
+        # 1. Validação em Situação com número 558999180044 (12 dígitos, fixo/móvel com DDI 55)
+        c1 = by_id['chamada_pbx_558999180044']
+        self.assertEqual(c1['sitTxt'], "(89) 9918-0044 (0m 45s)")
+        self.assertIn('<span class="fone">(89) 9918-0044</span>', c1['sitHtml'])
+        self.assertNotIn("558999180044", c1['sitTxt'])
+
+        # 2. Validação em Situação com número 5588981669885 (13 dígitos, celular com DDI 55)
+        c2 = by_id['chamada_pbx_5588981669885']
+        self.assertEqual(c2['sitTxt'], "(88) 98166-9885 (1m 10s)")
+        self.assertIn('<span class="fone">(88) 98166-9885</span>', c2['sitHtml'])
+        self.assertNotIn("5588981669885", c2['sitTxt'])
+
+        # 3. Validação em Situação com ramal 2008 (4 dígitos)
+        c3 = by_id['chamada_pbx_ramal_2008']
+        self.assertEqual(c3['sitTxt'], "2008 (0m 15s)")
+        self.assertIn('<span class="fone">2008</span>', c3['sitHtml'])
+
+        # 4. Validação em Situação com internacional +14155552671
+        c4 = by_id['chamada_pbx_internacional_mais']
+        self.assertEqual(c4['sitTxt'], "+14155552671 (2m 00s)")
+        self.assertIn('<span class="fone">+14155552671</span>', c4['sitHtml'])
+
+        # 5. Validações unitárias completas da função fmtFone
+        f = by_id['fone_tests']
+        # Números da imagem (12 e 13 dígitos) com e sem prefixo '+'
+        self.assertEqual(f['imgFixo'], "(89) 9918-0044")
+        self.assertEqual(f['imgCel'], "(88) 98166-9885")
+        self.assertEqual(f['imgFixoMais'], "(89) 9918-0044")
+        self.assertEqual(f['imgCelMais'], "(88) 98166-9885")
+
+        # Manutenção de DDD 55 local (comprimentos 10 e 11 não removem 55)
+        self.assertEqual(f['ddd55Cel'], "(55) 98166-9885")
+        self.assertEqual(f['ddd55Fixo'], "(55) 3222-1234")
+
+        # DDI 55 + DDD 55 (12 e 13 dígitos removem DDI e preservam DDD)
+        self.assertEqual(f['ddi55Ddd55Cel'], "(55) 98166-9885")
+        self.assertEqual(f['ddi55Ddd55Fixo'], "(55) 3222-1234")
+
+        # Ramais (comprimento curto mantido intacto)
+        self.assertEqual(f['ramal4'], "2008")
+        self.assertEqual(f['ramal3'], "101")
+
+        # Telefonia internacional com '+' explícito preservado
+        self.assertEqual(f['interMaisUs'], "+14155552671")
+        self.assertEqual(f['interMaisPt'], "+351912345678")
+
+        # Evita inferir DDI ambíguo sem '+' explícito
+        self.assertEqual(f['interSemMais'], "141555526710")
+
+        # Padrão NPX 10 e 11 dígitos, local 8 e 9 dígitos, vazios
+        self.assertEqual(f['stdCel'], "(85) 99999-9999")
+        self.assertEqual(f['stdFixo'], "(85) 3222-1100")
+        self.assertEqual(f['local9'], "99999-8888")
+        self.assertEqual(f['local8'], "3333-4444")
+        self.assertEqual(f['vazio'], "")
+        self.assertEqual(f['nulo'], "")
+
 if __name__ == '__main__':
     unittest.main()

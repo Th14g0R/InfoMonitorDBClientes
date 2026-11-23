@@ -59,12 +59,20 @@
   }
   function fmtHora(iso) { if (!iso) return ''; const d = new Date(iso); return isNaN(d) ? '' : d.toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'}); }
   function fmtFone(n) {
-    const d = String(n || '').replace(/\D/g, '');
+    if (!n) return '';
+    const str = String(n).trim();
+    const temMais = str.startsWith('+');
+    let d = str.replace(/\D/g, '');
+    if ((d.length === 12 || d.length === 13) && d.startsWith('55')) {
+      d = d.slice(2);
+    } else if (temMais) {
+      return `+${d}`;
+    }
     if (d.length === 11) return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
     if (d.length === 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
     if (d.length === 9) return `${d.slice(0, 5)}-${d.slice(5)}`;
     if (d.length === 8) return `${d.slice(0, 4)}-${d.slice(4)}`;
-    return n || '';
+    return str;
   }
   const fila = k => {
     if (k === 'PBX_Sem_Fila') {

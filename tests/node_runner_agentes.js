@@ -46,6 +46,7 @@ code = code.replace(/\}\)\(\);?\s*$/, `
     situacaoHtml: typeof __situacaoHtml !== 'undefined' ? __situacaoHtml : (typeof situacaoHtml !== 'undefined' ? situacaoHtml : null),
     fmtMin: typeof fmtMin !== 'undefined' ? fmtMin : null,
     fmtSeg: typeof fmtSeg !== 'undefined' ? fmtSeg : null,
+    fmtFone: typeof fmtFone !== 'undefined' ? fmtFone : null,
     ehLig: typeof ehLig !== 'undefined' ? ehLig : null,
     ehCham: typeof ehCham !== 'undefined' ? ehCham : null,
     ehPausa: typeof ehPausa !== 'undefined' ? ehPausa : null,
@@ -164,6 +165,42 @@ results.push({
   fmtSeg1h0m: fn.fmtSeg(3600),
   fmtSeg59s: fn.fmtSeg(59),
   fmtSeg0s: fn.fmtSeg(0)
+});
+
+// 12. Telefonia PBX e Máscaras de Telefone (fmtFone)
+const c1 = { line: 'pbx', pbxStatus: 'Busy', pbxNumber: '558999180044', pbxDirection: 'inbound', pbxSeconds: 45 };
+results.push({ id: 'chamada_pbx_558999180044', sitTxt: fn.situacaoTexto(c1), sitHtml: fn.situacaoHtml(c1) });
+
+const c2 = { line: 'pbx', pbxStatus: 'Busy', pbxNumber: '5588981669885', pbxDirection: 'outbound', pbxSeconds: 70 };
+results.push({ id: 'chamada_pbx_5588981669885', sitTxt: fn.situacaoTexto(c2), sitHtml: fn.situacaoHtml(c2) });
+
+const c3 = { line: 'pbx', pbxStatus: 'Ringing', pbxNumber: '2008', pbxDirection: 'inbound', pbxSeconds: 15 };
+results.push({ id: 'chamada_pbx_ramal_2008', sitTxt: fn.situacaoTexto(c3), sitHtml: fn.situacaoHtml(c3) });
+
+const c4 = { line: 'pbx', pbxStatus: 'Busy', pbxNumber: '+14155552671', pbxDirection: 'inbound', pbxSeconds: 120 };
+results.push({ id: 'chamada_pbx_internacional_mais', sitTxt: fn.situacaoTexto(c4), sitHtml: fn.situacaoHtml(c4) });
+
+results.push({
+  id: 'fone_tests',
+  imgFixo: fn.fmtFone('558999180044'),
+  imgCel: fn.fmtFone('5588981669885'),
+  imgFixoMais: fn.fmtFone('+558999180044'),
+  imgCelMais: fn.fmtFone('+5588981669885'),
+  ddd55Cel: fn.fmtFone('55981669885'),
+  ddd55Fixo: fn.fmtFone('5532221234'),
+  ddi55Ddd55Cel: fn.fmtFone('5555981669885'),
+  ddi55Ddd55Fixo: fn.fmtFone('555532221234'),
+  ramal4: fn.fmtFone('2008'),
+  ramal3: fn.fmtFone('101'),
+  interMaisUs: fn.fmtFone('+14155552671'),
+  interMaisPt: fn.fmtFone('+351912345678'),
+  interSemMais: fn.fmtFone('141555526710'),
+  stdCel: fn.fmtFone('85999999999'),
+  stdFixo: fn.fmtFone('8532221100'),
+  local9: fn.fmtFone('999998888'),
+  local8: fn.fmtFone('33334444'),
+  vazio: fn.fmtFone(''),
+  nulo: fn.fmtFone(null)
 });
 
 console.log(JSON.stringify(results));
