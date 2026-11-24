@@ -186,7 +186,7 @@
   function direcaoHtml(direcao) {
     if (direcao === 'para') return '<span class="dir-chamada dir-saida">↗ para</span> ';
     if (direcao === 'de') return '<span class="dir-chamada dir-entrada">↙ de</span> ';
-    return '';
+    return '<span class="dir-chamada dir-indefinida" title="Sentido não informado" aria-label="Sentido não informado">↔</span> ';
   }
   function situacaoHtml(a) {
     if (a.line === 'pbx') {

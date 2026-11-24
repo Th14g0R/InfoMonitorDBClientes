@@ -144,6 +144,7 @@ body:has(#ag) { background: var(--cor-fundo, #f4f6f9); margin: 0; }
 }
 #ag .dir-entrada { color: var(--pausa-tx); }
 #ag .dir-saida { color: var(--cham-tx); }
+#ag .dir-indefinida { color: var(--mut); }
 #ag td button { padding: 4px 8px; font-size: 13px; max-width: 100%; }
 #ag .btn-pausa { background: var(--pausa); border-color: var(--pausa); color: #fff; }
 #ag .btn-perigo { background: var(--lig); border-color: var(--lig); color: #fff; }

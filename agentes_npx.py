@@ -571,6 +571,16 @@ def direcao_chamada_npx(status, chamada, codigo):
         return 'outbound'
     if re.fullmatch(r'\d{1,7}', dst) and len(re.sub(r'\D', '', src)) >= 8:
         return 'inbound'
+    # A NPX pode omitir o destino, mas registrar a entrada pela fila no histórico da chamada ativa.
+    linkedid = str(chamada.get('linkedid') or '').strip()
+    if src and not dst and linkedid:
+        filas = nomes_filas()
+        if any(
+            isinstance(registro, dict) and str(registro.get('linkedid') or '').strip() == linkedid
+            and str(registro.get('queue') or '') in filas
+            for registro in status.get('last_calls') or ()
+        ):
+            return 'inbound'
     return None
 
 

@@ -127,6 +127,16 @@ class ColetorTest(unittest.TestCase):
         self.assertEqual(direcao({}, {'direction': 'outgoing'}, '4422008'), 'outbound')
         self.assertIsNone(direcao({'src': '85999990000'}, {}, '4422008'))
 
+    def test_direcao_npx_usa_fila_da_chamada_ativa_quando_dst_ausente(self):
+        status = {'src': '85999990000', 'last_calls': [
+            {'linkedid': 'atual', 'queue': 'InfoBrasil_Suporte'},
+            {'linkedid': 'anterior', 'queue': 'InfoBrasil_Comercial'},
+        ]}
+        direcao = agentes_npx.direcao_chamada_npx
+        self.assertEqual(direcao(status, {'linkedid': 'atual'}, '4422008'), 'inbound')
+        self.assertIsNone(direcao(status, {'linkedid': 'diferente'}, '4422008'))
+        self.assertEqual(direcao(status, {'linkedid': 'atual', 'direction': 'outgoing'}, '4422008'), 'outbound')
+
     def test_sessoes_abertas_de_dias_anteriores_e_encerradas_hoje(self):
         historico = [
             {'code': '4422000', 'agent_name': 'Ana', 'queue': 'InfoBrasil_Comercial', 'logon_date': '2026-10-28T11:23:15-03:00', 'logoff_date': None},
