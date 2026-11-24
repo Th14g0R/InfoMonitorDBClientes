@@ -30,7 +30,7 @@ from zoneinfo import ZoneInfo
 from flask import jsonify, render_template, request, session
 
 from pbx_monitor import (
-    ColetorPbx, FILA_PBX_SEM_FILA, NOME_PBX_SEM_FILA, VALIDADE_PBX,
+    ColetorPbx, FILA_PBX_SEM_FILA, NOME_PBX_SEM_FILA,
     atualizar_inicio_ociosidade, elegivel_alerta_ociosidade_npx,
 )
 from seguranca import registrar_acao_admin
@@ -50,6 +50,7 @@ NOMES_PADRAO = {
 }
 COLUNAS_ORDEM = {'name', 'status', 'tempo', 'penalty', 'situacao'}
 INTERVALO_COLETA = 1.5      # pausa entre coletas (s)
+VALIDADE_ALERTA_NPX = 45.0  # o ciclo consulta o status de vários agentes
 VALIDADE_HOJE = 15          # relatórios do dia (s)
 VALIDADE_HISTORICO = 60     # sessões abertas de dias anteriores (s)
 VALIDADE_HISTORICO_LIMITES = 60.0  # cache de limites de pausa históricos (s)
@@ -671,13 +672,17 @@ class ColetorAgentes:
                     'erro': None if st else 'status indisponível',
                     'npxLoggedIn': bool(logado),
                 })
+        fim_coleta = datetime.now(FUSO)
         elegiveis = {(a['code'], a['queue']) for a in lista if elegivel_alerta_ociosidade_npx(a)}
-        self._ocioso_desde = atualizar_inicio_ociosidade(self._ocioso_desde, elegiveis, agora, self.coletado_em)
+        self._ocioso_desde = atualizar_inicio_ociosidade(
+            self._ocioso_desde, elegiveis, fim_coleta, self.coletado_em,
+            inicio_coleta=agora, validade=VALIDADE_ALERTA_NPX,
+        )
         for a in lista:
             inicio = self._ocioso_desde.get((a['code'], a['queue']))
             if inicio is not None:
                 a['_npxIdleSince'] = inicio
-        self.retrato, self.coletado_em, self.erro = lista, agora, None
+        self.retrato, self.coletado_em, self.erro = lista, fim_coleta, None
         return lista
 
     def dados(self, espera=12):
@@ -840,7 +845,8 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
 
     def _responder_dados(todos_agentes, em, erro_npx, status_pbx):
         agora = datetime.now(FUSO)
-        dados_frescos = em is not None and not erro_npx and status_pbx.get('available') and 0 <= (agora - em).total_seconds() <= VALIDADE_PBX
+        dados_frescos = (em is not None and not erro_npx and status_pbx.get('available')
+                         and 0 <= (agora - em).total_seconds() <= VALIDADE_ALERTA_NPX)
         for a in todos_agentes:
             a.pop('_npxIdleSince', None)
             a['pbxIdleAlert'] = bool(dados_frescos and a.get('pbxIdleAlert'))

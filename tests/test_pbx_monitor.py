@@ -271,6 +271,128 @@ class TestSnapshotPbxP1EDuracao(unittest.TestCase):
 
 
 class TestColetorPbxP5EP6(unittest.TestCase):
+    def test_tempo_livre_pbx_avanca_e_reinicia_apos_ligacao_ou_lacuna(self):
+        coletor = ColetorPbx(cliente=MagicMock(), mapa_analistas={'Thiago': {'ramal': '2008'}})
+        inicio = datetime(2026, 11, 24, 6, 59, 57, tzinfo=pbx_monitor.FUSO)
+        agente = {'code': '4422008', 'name': 'Thiago', 'status': 0, 'penalty': 3,
+                  'npxLoggedIn': True, '_npxIdleSince': inicio + timedelta(seconds=3)}
+        with patch.object(pbx_monitor, 'datetime') as relogio, patch.object(pbx_monitor, 'processar_snapshot_pbx') as snapshot:
+            for segundos in range(0, 904, 3):
+                relogio.now.return_value = inicio + timedelta(seconds=segundos)
+                snapshot.return_value = {'2008': {'status': 'Free', 'seconds': 0}}
+                coletor.coletar()
+                linha = dict(agente)
+                coletor.enriquecer_agentes([linha])
+                self.assertEqual(linha['pbxSeconds'], segundos)
+                self.assertEqual(coletor.obter_agentes_pbx_only(set())[0]['pbxSeconds'], segundos)
+                self.assertEqual(linha['pbxIdleAlert'], segundos == 903)
+
+            for segundos, status, duracao, esperado in (
+                (906, 'Busy', 2, 2), (909, 'Free', 0, 0), (912, 'Free', 0, 3), (930, 'Free', 0, 0),
+            ):
+                relogio.now.return_value = inicio + timedelta(seconds=segundos)
+                snapshot.return_value = {'2008': {'status': status, 'seconds': duracao}}
+                coletor.coletar()
+                linha = dict(agente)
+                coletor.enriquecer_agentes([linha])
+                self.assertEqual(linha['pbxSeconds'], esperado)
+                self.assertFalse(linha['pbxIdleAlert'])
+
+    def test_tempo_livre_reinicia_apos_offline_e_apos_falha(self):
+        coletor = ColetorPbx(cliente=MagicMock(), mapa_analistas={'Thiago': {'ramal': '2008'}})
+        inicio = datetime(2026, 11, 24, 10, 0, 0, tzinfo=pbx_monitor.FUSO)
+        agente = {'code': '4422008', 'name': 'Thiago', 'status': 0, 'npxLoggedIn': True}
+
+        with patch.object(pbx_monitor, 'datetime') as relogio, patch.object(pbx_monitor, 'processar_snapshot_pbx') as snapshot:
+            # 1. Ramal Free por 60 segundos com coletas consecutivas (a cada 10s)
+            for s in range(0, 61, 10):
+                relogio.now.return_value = inicio + timedelta(seconds=s)
+                snapshot.return_value = {'2008': {'status': 'Free', 'seconds': 0}}
+                coletor.coletar()
+            linha = dict(agente)
+            coletor.enriquecer_agentes([linha])
+            self.assertEqual(linha['pbxSeconds'], 60)
+
+            # 2. Ramal fica Offline -> seconds zera e sai do livre_desde
+            relogio.now.return_value = inicio + timedelta(seconds=63)
+            snapshot.return_value = {'2008': {'status': 'Offline', 'seconds': 0}}
+            coletor.coletar()
+            linha = dict(agente)
+            coletor.enriquecer_agentes([linha])
+            self.assertEqual(linha['pbxSeconds'], 0)
+            self.assertNotIn('2008', coletor._livre_desde)
+
+            # 3. Ramal volta a Free -> reinicia contagem do zero a partir do novo momento
+            relogio.now.return_value = inicio + timedelta(seconds=66)
+            snapshot.return_value = {'2008': {'status': 'Free', 'seconds': 0}}
+            coletor.coletar()
+            linha = dict(agente)
+            coletor.enriquecer_agentes([linha])
+            self.assertEqual(linha['pbxSeconds'], 0)
+
+            relogio.now.return_value = inicio + timedelta(seconds=72)
+            snapshot.return_value = {'2008': {'status': 'Free', 'seconds': 0}}
+            coletor.coletar()
+            linha = dict(agente)
+            coletor.enriquecer_agentes([linha])
+            self.assertEqual(linha['pbxSeconds'], 6)
+
+            # 4. Falha no ciclo de coleta -> limpa _livre_desde e seta erro
+            with coletor._trava:
+                coletor.erro = 'Coleta PBX indisponível no momento.'
+                coletor._livre_desde = {}
+
+            # Ao retomar com sucesso, reinicia do zero
+            relogio.now.return_value = inicio + timedelta(seconds=75)
+            snapshot.return_value = {'2008': {'status': 'Free', 'seconds': 0}}
+            coletor.coletar()
+            linha = dict(agente)
+            coletor.enriquecer_agentes([linha])
+            self.assertEqual(linha['pbxSeconds'], 0)
+
+    def test_ciclo_demorado_com_inicio_coleta_evita_falso_reset(self):
+        coletor = ColetorPbx(cliente=MagicMock(), mapa_analistas={'Thiago': {'ramal': '2008'}})
+        t0 = datetime(2026, 11, 24, 14, 0, 0, tzinfo=pbx_monitor.FUSO)
+        agente = {'code': '4422008', 'name': 'Thiago', 'status': 0, 'npxLoggedIn': True}
+
+        with patch.object(pbx_monitor, 'datetime') as relogio, patch.object(pbx_monitor, 'processar_snapshot_pbx') as snapshot:
+            # Ciclo 1 conclui em t0
+            relogio.now.return_value = t0
+            snapshot.return_value = {'2008': {'status': 'Free', 'seconds': 0}}
+            coletor.coletar()
+            self.assertEqual(coletor._livre_desde['2008'], t0)
+            self.assertEqual(coletor.coletado_em, t0)
+
+            # Ciclo 2: disparado em t0 + 3s, mas chamadas HTTP demoram 11 segundos, concluindo em t0 + 14s
+            # Como inicio_coleta (t0 + 3s) ocorreu 3s após t0 (<= 15s), não deve haver falso reset
+            t_inicio = t0 + timedelta(seconds=3)
+            t_fim = t0 + timedelta(seconds=14)
+            relogio.now.side_effect = [t_inicio, t_fim, t_fim, t_fim]
+            snapshot.return_value = {'2008': {'status': 'Free', 'seconds': 0}}
+            coletor.coletar()
+
+            # Inicio original em t0 preservado
+            self.assertEqual(coletor._livre_desde['2008'], t0)
+            self.assertEqual(coletor.coletado_em, t_fim)
+            linha = dict(agente)
+            coletor.enriquecer_agentes([linha])
+            self.assertEqual(linha['pbxSeconds'], 14)
+
+    def test_tempo_livre_visual_conta_fora_da_janela_expediente(self):
+        coletor = ColetorPbx(cliente=MagicMock(), mapa_analistas={'Carol': {'ramal': '2022'}})
+        t_noite = datetime(2026, 11, 24, 21, 30, 0, tzinfo=pbx_monitor.FUSO)
+
+        with patch.object(pbx_monitor, 'datetime') as relogio, patch.object(pbx_monitor, 'processar_snapshot_pbx') as snapshot:
+            for s in range(0, 121, 10):
+                relogio.now.return_value = t_noite + timedelta(seconds=s)
+                snapshot.return_value = {'2022': {'status': 'Free', 'seconds': 0}}
+                coletor.coletar()
+
+            pbx_only = coletor.obter_agentes_pbx_only(set())
+            self.assertEqual(len(pbx_only), 1)
+            self.assertEqual(pbx_only[0]['name'], 'Carol')
+            self.assertEqual(pbx_only[0]['pbxSeconds'], 120)
+
     def test_alerta_visual_exige_15_minutos_continuos_nas_duas_centrais(self):
         coletor = ColetorPbx(cliente=MagicMock(), mapa_analistas={'Thiago': {'ramal': '2008'}})
         agente = {'code': '101', 'name': 'Thiago', 'status': 1, 'paused': False, 'npxLoggedIn': True, 'penalty': 1}

@@ -35,12 +35,22 @@ FILA_PBX_SEM_FILA = 'PBX_Sem_Fila'
 NOME_PBX_SEM_FILA = 'Não logado'
 
 
-def atualizar_inicio_ociosidade(anteriores, chaves, agora, coletado_em):
-    """Mantém só os períodos de ociosidade observados na janela atual."""
-    if not 7 <= agora.hour < 19:
+def atualizar_inicio_ociosidade(anteriores, chaves, agora, coletado_em, inicio_coleta=None, *,
+                                somente_expediente=True, validade=VALIDADE_PBX):
+    """Mantém os períodos de ociosidade com observações consecutivas.
+
+    Para evitar falso reset durante ciclos demorados de coleta com latência de rede,
+    o frescor conservador é avaliado comparando a última coleta concluída (coletado_em)
+    com o momento em que a nova coleta foi iniciada (inicio_coleta, se fornecido),
+    garantindo que o tempo gasto executando chamadas HTTP não penalize indevidamente
+    a continuidade do monitoramento.
+    """
+    if somente_expediente and not 7 <= agora.hour < 19:
         return {}
-    if (coletado_em is None or coletado_em.date() != agora.date()
-            or not 0 <= (agora - coletado_em).total_seconds() <= VALIDADE_PBX):
+    ref = inicio_coleta if inicio_coleta is not None else agora
+    if (coletado_em is None
+            or (somente_expediente and coletado_em.date() != agora.date())
+            or not 0 <= (ref - coletado_em).total_seconds() <= validade):
         anteriores = {}
     return {chave: anteriores.get(chave, agora) for chave in chaves}
 
@@ -513,7 +523,7 @@ class ColetorPbx:
         if not self.cliente.configurado:
             return
 
-        agora = datetime.now(FUSO)
+        inicio_coleta = datetime.now(FUSO)
 
         # Atualiza lista de dispositivos a cada 5 minutos ou se vazia
         if time.monotonic() - self._dispositivos_em >= 300.0 or not self._dispositivos_cache:
@@ -525,6 +535,7 @@ class ColetorPbx:
 
         registrados = self.cliente.listar_dispositivos_registrados()
         chamadas = self.cliente.listar_chamadas_online()
+        agora = datetime.now(FUSO)
 
         snapshot_novo = processar_snapshot_pbx(
             self._dispositivos_cache,
@@ -535,10 +546,14 @@ class ColetorPbx:
         )
 
         with self._trava:
+            ramais_free = {ramal for ramal, info in snapshot_novo.items() if info.get('status') == 'Free'}
             self._livre_desde = atualizar_inicio_ociosidade(
-                self._livre_desde, (ramal for ramal, info in snapshot_novo.items() if info['status'] == 'Free'),
-                agora, self.coletado_em,
+                self._livre_desde, ramais_free,
+                agora, self.coletado_em, inicio_coleta=inicio_coleta,
+                somente_expediente=False,
             )
+            for ramal, inicio in self._livre_desde.items():
+                snapshot_novo[ramal]['seconds'] = int((agora - inicio).total_seconds())
             self.snapshot = snapshot_novo
             self.coletado_em = agora
             self.erro = None
@@ -568,7 +583,7 @@ class ColetorPbx:
         """Aplica os campos pbx* e line em cada agente da lista NPX com unicidade estrita."""
         with self._trava:
             snapshot = dict(self.snapshot)
-            livre_desde = self._livre_desde
+            livre_desde = dict(self._livre_desde)
             coletado_em = self.coletado_em
             erro = self.erro
         agora = datetime.now(FUSO)
@@ -653,7 +668,6 @@ class ColetorPbx:
 
         with self._trava:
             snapshot = dict(self.snapshot)
-
         ramais_npx_casados = set(ramais_npx_casados or ())
         # B1: Default de ambiguidades locais é set(), nunca herda estado antigo em self
         ramais_ambiguos_set = set(ramais_ambiguos) if ramais_ambiguos is not None else set()
