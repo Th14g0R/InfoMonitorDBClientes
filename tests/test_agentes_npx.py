@@ -108,6 +108,25 @@ REG = '/call_center_reports/report_register_points_details'
 
 
 class ColetorTest(unittest.TestCase):
+    def test_fila_soma_chamadas_unicas_e_exige_todas_as_filas(self):
+        painel = MagicMock(configurado=True)
+        cliente = MagicMock(configurado=False)
+        coletor = ColetorAgentes(cliente, cliente_painel=painel)
+        por_fila = {
+            'suporte': [{'linkedid': '1'}, {'linkedid': 'CALLBACK'}, {}],
+            'fiscal': [{'linkedid': '1'}, {'linkedid': '2'}],
+        }
+        painel.obter_wait_calls.side_effect = por_fila.get
+        self.assertEqual(coletor._coletar_waiting_calls(por_fila), 3)
+        self.assertIsNone(coletor._coletar_waiting_calls(('suporte', 'indisponivel')))
+
+    def test_direcao_npx_distingue_ramal_de_origem_e_de_destino(self):
+        direcao = agentes_npx.direcao_chamada_npx
+        self.assertEqual(direcao({'src': '2008', 'dst': '85999990000', 'extension': '2008'}, {}, '4422008'), 'outbound')
+        self.assertEqual(direcao({'src': '85999990000', 'dst': '4422008'}, {}, '4422008'), 'inbound')
+        self.assertEqual(direcao({}, {'direction': 'outgoing'}, '4422008'), 'outbound')
+        self.assertIsNone(direcao({'src': '85999990000'}, {}, '4422008'))
+
     def test_sessoes_abertas_de_dias_anteriores_e_encerradas_hoje(self):
         historico = [
             {'code': '4422000', 'agent_name': 'Ana', 'queue': 'InfoBrasil_Comercial', 'logon_date': '2026-10-28T11:23:15-03:00', 'logoff_date': None},
@@ -2050,6 +2069,102 @@ class RotasPbxIntegracaoTest(unittest.TestCase):
         r_post = self.http.post('/admin/agentes/4422008/colocar-pausa', headers=headers)
         self.assertEqual(r_post.status_code, 503)
         self.assertIn('Dados da NPX indisponíveis no momento.', r_post.get_json()['mensagem'])
+
+    def test_get_dados_retorna_waiting_calls_do_cache(self):
+        self.cliente_npx.token = 'tok_valido'
+        self.coletor_npx.waiting_calls = 5
+        self.coletor_npx.waiting_calls_em = time.monotonic()
+        resp = self.http.get('/agentes/dados')
+        self.assertEqual(resp.status_code, 200)
+        dados = resp.get_json()
+        self.assertEqual(dados.get('waitingCalls'), 5)
+
+    def test_get_dados_com_cache_expirado_retorna_waiting_calls_null(self):
+        self.cliente_npx.token = 'tok_valido'
+        self.coletor_npx.waiting_calls = 5
+        self.coletor_npx.waiting_calls_em = time.monotonic() - agentes_npx.VALIDADE_FILA_NPX - 1
+        resp = self.http.get('/agentes/dados')
+        self.assertEqual(resp.status_code, 200)
+        dados = resp.get_json()
+        self.assertIsNone(dados.get('waitingCalls'))
+
+    def test_get_dados_com_erro_retorna_waiting_calls_null(self):
+        self.cliente_npx.token = 'tok_valido'
+        self.coletor_npx.waiting_calls = 5
+        self.coletor_npx.waiting_calls_em = time.monotonic()
+        self.coletor_npx.erro = 'NPX indisponível'
+        resp = self.http.get('/agentes/dados')
+        self.assertEqual(resp.status_code, 200)
+        dados = resp.get_json()
+        self.assertIsNone(dados.get('waitingCalls'))
+
+    def test_get_dados_multiplos_visitantes_reutiliza_cache_sem_requisicoes(self):
+        self.cliente_npx.token = 'tok_valido'
+        self.coletor_npx.waiting_calls = 2
+        self.coletor_npx.waiting_calls_em = time.monotonic()
+        with patch.object(self.coletor_npx, '_coletar_waiting_calls') as mock_coleta:
+            for _ in range(5):
+                resp = self.http.get('/agentes/dados')
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(resp.get_json().get('waitingCalls'), 2)
+            mock_coleta.assert_not_called()
+
+
+class WaitingCallsTest(unittest.TestCase):
+    def test_dedup_e_contagem_wait_calls(self):
+        cliente = MagicMock()
+        cliente.configurado = True
+
+        def mock_wait_calls(fila):
+            if fila == 'InfoBrasil_Suporte':
+                return [
+                    {'linkedid': 'call-101', 'number': '85999990001', 'wait': '00:02:00'},
+                    {'linkedid': 'call-102', 'number': '85999990002', 'wait': '00:01:00'},
+                    {'linkedid': 'CALLBACK', 'number': '85999990003', 'wait': '00:05:00'},
+                ]
+            elif fila == 'InfoBrasil_Transbordo':
+                return [
+                    {'linkedid': 'call-101', 'number': '85999990001', 'wait': '00:02:00'},
+                    {'linkedid': 'call-103', 'number': '85999990004', 'wait': '00:00:30'},
+                    {'number': '85999990005', 'wait': '00:00:15'},
+                ]
+            return []
+
+        cliente.obter_wait_calls.side_effect = mock_wait_calls
+        coletor = ColetorAgentes(cliente)
+        total = coletor._coletar_waiting_calls(['InfoBrasil_Suporte', 'InfoBrasil_Transbordo'])
+        self.assertEqual(total, 4)
+
+    def test_wait_calls_todas_vazias_retorna_zero(self):
+        cliente = MagicMock()
+        cliente.configurado = True
+        cliente.obter_wait_calls.return_value = []
+        coletor = ColetorAgentes(cliente)
+        total = coletor._coletar_waiting_calls(['InfoBrasil_Suporte'])
+        self.assertEqual(total, 0)
+
+    def test_wait_calls_apenas_callback_retorna_zero(self):
+        cliente = MagicMock()
+        cliente.configurado = True
+        cliente.obter_wait_calls.return_value = [{'linkedid': 'CALLBACK', 'number': '123'}]
+        coletor = ColetorAgentes(cliente)
+        total = coletor._coletar_waiting_calls(['InfoBrasil_Suporte'])
+        self.assertEqual(total, 0)
+
+    def test_wait_calls_falha_total_retorna_none(self):
+        cliente = MagicMock()
+        cliente.configurado = True
+        cliente.obter_wait_calls.side_effect = RuntimeError('Falha de rede')
+        coletor = ColetorAgentes(cliente)
+        total = coletor._coletar_waiting_calls(['InfoBrasil_Suporte'])
+        self.assertIsNone(total)
+
+    def test_wait_calls_sem_cliente_configurado_retorna_none(self):
+        cliente = MagicMock()
+        cliente.configurado = False
+        coletor = ColetorAgentes(cliente)
+        total = coletor._coletar_waiting_calls(['InfoBrasil_Suporte'])
+        self.assertIsNone(total)
 
 
 if __name__ == '__main__':

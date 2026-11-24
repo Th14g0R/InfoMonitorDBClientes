@@ -29,6 +29,7 @@ const elements = {
   'nLog': mockEl(),
   'nPbx': mockEl(),
   'nLivre': mockEl(),
+  'nFila': mockEl({ textContent: '–' }),
   'nCham': mockEl(),
   'nLig': mockEl(),
   'nPausa': mockEl(),
@@ -68,14 +69,22 @@ code = code.replace(/\}\)\(\);?\s*$/, `
     fmtSeg: typeof fmtSeg !== 'undefined' ? fmtSeg : null,
     fmtFone: typeof fmtFone !== 'undefined' ? fmtFone : null,
     ehLig: typeof ehLig !== 'undefined' ? ehLig : null,
+    ehToque: typeof ehToque !== 'undefined' ? ehToque : null,
     ehCham: typeof ehCham !== 'undefined' ? ehCham : null,
+    ehRecebendo: typeof ehRecebendo !== 'undefined' ? ehRecebendo : null,
+    ehDiscendo: typeof ehDiscendo !== 'undefined' ? ehDiscendo : null,
+    ehChamDesc: typeof ehChamDesc !== 'undefined' ? ehChamDesc : null,
     ehPausa: typeof ehPausa !== 'undefined' ? ehPausa : null,
     ehLivre: typeof ehLivre !== 'undefined' ? ehLivre : null,
     logadoNpx: typeof logadoNpx !== 'undefined' ? logadoNpx : null,
+    chamada: typeof chamada !== 'undefined' ? chamada : null,
     linha: typeof linha !== 'undefined' ? linha : null,
+    card: typeof card !== 'undefined' ? card : null,
     render: typeof render !== 'undefined' ? render : null,
     setDados: d => { dados = d; },
     setFilas: f => { filas = f; },
+    setWaitingCalls: w => { waitingCalls = w; },
+    getWaitingCalls: () => waitingCalls,
     ST_PBX: typeof ST_PBX !== 'undefined' ? ST_PBX : null
   };
 })();
@@ -95,8 +104,8 @@ results.push({ id: 'pbx_free_paused', st: fn.stDe(a1), ehPausa: fn.ehPausa(a1), 
 const a2 = { line: 'pbx', pbxStatus: 'Busy', pbxNumber: '85999999999', pbxDirection: 'inbound', paused: true, pauseType: 'Almoço' };
 results.push({ id: 'pbx_busy_paused', st: fn.stDe(a2), ehLig: fn.ehLig(a2), ehPausa: fn.ehPausa(a2) });
 
-// 3. PBX Ringing + paused
-const a3 = { line: 'pbx', pbxStatus: 'Ringing', paused: true, pauseType: 'Almoço' };
+// 3. PBX Ringing + paused (inbound explícito para precedência Ringing com Recebendo)
+const a3 = { line: 'pbx', pbxStatus: 'Ringing', pbxDirection: 'inbound', paused: true, pauseType: 'Almoço' };
 results.push({ id: 'pbx_ringing_paused', st: fn.stDe(a3), ehCham: fn.ehCham(a3), ehPausa: fn.ehPausa(a3) });
 
 // 4. PBX Free + sem pausa
@@ -224,6 +233,9 @@ results.push({
   stdFixo: fn.fmtFone('8532221100'),
   local9: fn.fmtFone('999998888'),
   local8: fn.fmtFone('33334444'),
+  imgZeroCel: fn.fmtFone('088999263130'),
+  imgZeroCelMais: fn.fmtFone('+088999263130'),
+  zeroFixo: fn.fmtFone('08832221234'),
   vazio: fn.fmtFone(''),
   nulo: fn.fmtFone(null)
 });
@@ -250,17 +262,23 @@ results.push({
 });
 
 // 14. Simulação de render() para Contadores do Topo e Cards PBX
-function simularRender(dadosEntrada, filasEntrada) {
+function simularRender(dadosEntrada, filasEntrada, waitingCallsEntrada) {
+  if (typeof fn.setWaitingCalls === 'function') {
+    fn.setWaitingCalls(waitingCallsEntrada !== undefined ? waitingCallsEntrada : null);
+  }
   fn.setDados(dadosEntrada);
   fn.setFilas(filasEntrada || [
     { key: 'Fila_Suporte', nome: 'Suporte N1' },
     { key: 'PBX_Sem_Fila', nome: 'Não logado' }
   ]);
   fn.render();
+  const elFila = elements['nFila'] || elements['nCham'];
   return {
     nLog: Number(elements['nLog'].textContent),
     nPbx: Number(elements['nPbx'].textContent),
     nLivre: Number(elements['nLivre'].textContent),
+    nFila: elFila ? (String(elFila.textContent) === '–' ? null : Number(elFila.textContent)) : null,
+    nFilaTxt: elFila ? String(elFila.textContent) : '–',
     nCham: Number(elements['nCham'].textContent),
     nLig: Number(elements['nLig'].textContent),
     nPausa: Number(elements['nPausa'].textContent),
@@ -336,6 +354,130 @@ results.push({
   htmlFalse: fn.linha(agAlertaFalse),
   htmlUndefined: fn.linha(agAlertaUndefined),
   htmlString: fn.linha(agAlertaString)
+});
+
+// 16. Direção de Chamadas NPX/PBX com sinal visual + texto e mascaramento 088...
+const chNpxSaida = { code: '4422008', extension: '2008', line: 'npx', status: 2, callSrc: '2008', callDst: '088999263130' };
+const chNpxEntrada = { code: '4422008', extension: '2008', line: 'npx', status: 2, callSrc: '088999263130', callDst: '2008' };
+const chPbxSaida = { line: 'pbx', pbxStatus: 'Busy', pbxNumber: '088999263130', pbxDirection: 'outbound' };
+const chPbxEntrada = { line: 'pbx', pbxStatus: 'Busy', pbxNumber: '088999263130', pbxDirection: 'inbound' };
+
+results.push({
+  id: 'chamadas_direcao_tests',
+  npxSaida: {
+    chamada: fn.chamada(chNpxSaida),
+    sitHtml: fn.situacaoHtml(chNpxSaida)
+  },
+  npxEntrada: {
+    chamada: fn.chamada(chNpxEntrada),
+    sitHtml: fn.situacaoHtml(chNpxEntrada)
+  },
+  pbxSaida: {
+    chamada: fn.chamada(chPbxSaida),
+    sitHtml: fn.situacaoHtml(chPbxSaida)
+  },
+  pbxEntrada: {
+    chamada: fn.chamada(chPbxEntrada),
+    sitHtml: fn.situacaoHtml(chPbxEntrada)
+  }
+});
+
+// 17. Diferenciação Recebendo vs Discando vs Chamando durante toque (PBX e NPX)
+const pbxToqueOut = { line: 'pbx', pbxStatus: 'Ringing', pbxNumber: '85999999999', pbxDirection: 'outbound' };
+const pbxToqueIn = { line: 'pbx', pbxStatus: 'Ringing', pbxNumber: '85999999999', pbxDirection: 'inbound' };
+const pbxToqueSemDir = { line: 'pbx', pbxStatus: 'Ringing', pbxNumber: '85999999999' };
+
+const npxToqueOut = { code: '4422008', extension: '2008', line: 'npx', status: 5, callSrc: '2008', callDst: '088999263130' };
+const npxToqueIn = { code: '4422008', extension: '2008', line: 'npx', status: 5, callSrc: '088999263130', callDst: '2008' };
+const npxToqueOutInferida = { code: '4422008', line: 'npx', status: 5, callSrc: '101', callDst: '088999263130' };
+const npxToqueInInferida = { code: '4422008', line: 'npx', status: 5, callSrc: '088999263130', callDst: '101' };
+const npxToqueSemDir = { code: '4422008', line: 'npx', status: 5 };
+
+results.push({
+  id: 'toque_direcao_detalhada_tests',
+  pbxOut: {
+    st: fn.stDe(pbxToqueOut),
+    ehRecebendo: fn.ehRecebendo(pbxToqueOut),
+    ehDiscendo: fn.ehDiscendo(pbxToqueOut),
+    ehChamDesc: fn.ehChamDesc(pbxToqueOut),
+    sitHtml: fn.situacaoHtml(pbxToqueOut)
+  },
+  pbxIn: {
+    st: fn.stDe(pbxToqueIn),
+    ehRecebendo: fn.ehRecebendo(pbxToqueIn),
+    ehDiscendo: fn.ehDiscendo(pbxToqueIn),
+    ehChamDesc: fn.ehChamDesc(pbxToqueIn),
+    sitHtml: fn.situacaoHtml(pbxToqueIn)
+  },
+  pbxSemDir: {
+    st: fn.stDe(pbxToqueSemDir),
+    ehRecebendo: fn.ehRecebendo(pbxToqueSemDir),
+    ehDiscendo: fn.ehDiscendo(pbxToqueSemDir),
+    ehChamDesc: fn.ehChamDesc(pbxToqueSemDir),
+    sitHtml: fn.situacaoHtml(pbxToqueSemDir)
+  },
+  npxOut: {
+    st: fn.stDe(npxToqueOut),
+    ehRecebendo: fn.ehRecebendo(npxToqueOut),
+    ehDiscendo: fn.ehDiscendo(npxToqueOut),
+    ehChamDesc: fn.ehChamDesc(npxToqueOut),
+    sitHtml: fn.situacaoHtml(npxToqueOut)
+  },
+  npxIn: {
+    st: fn.stDe(npxToqueIn),
+    ehRecebendo: fn.ehRecebendo(npxToqueIn),
+    ehDiscendo: fn.ehDiscendo(npxToqueIn),
+    ehChamDesc: fn.ehChamDesc(npxToqueIn),
+    sitHtml: fn.situacaoHtml(npxToqueIn)
+  },
+  npxOutInferida: {
+    st: fn.stDe(npxToqueOutInferida),
+    ehRecebendo: fn.ehRecebendo(npxToqueOutInferida),
+    ehDiscendo: fn.ehDiscendo(npxToqueOutInferida),
+    ehChamDesc: fn.ehChamDesc(npxToqueOutInferida),
+    sitHtml: fn.situacaoHtml(npxToqueOutInferida)
+  },
+  npxInInferida: {
+    st: fn.stDe(npxToqueInInferida),
+    ehRecebendo: fn.ehRecebendo(npxToqueInInferida),
+    ehDiscendo: fn.ehDiscendo(npxToqueInInferida),
+    ehChamDesc: fn.ehChamDesc(npxToqueInInferida),
+    sitHtml: fn.situacaoHtml(npxToqueInInferida)
+  },
+  npxSemDir: {
+    st: fn.stDe(npxToqueSemDir),
+    ehRecebendo: fn.ehRecebendo(npxToqueSemDir),
+    ehDiscendo: fn.ehDiscendo(npxToqueSemDir),
+    ehChamDesc: fn.ehChamDesc(npxToqueSemDir),
+    sitHtml: fn.situacaoHtml(npxToqueSemDir)
+  }
+});
+
+// 18. Contadores de Grupo no card() separando direções
+const grupoAgentes = [
+  { code: 'ag1', queue: 'Fila_Teste', line: 'npx', status: 1 }, // livre
+  { code: 'ag2', queue: 'Fila_Teste', line: 'npx', status: 2 }, // ligação
+  { code: 'ag3', queue: 'Fila_Teste', line: 'npx', status: 0, paused: true, pauseType: 'Lanche' }, // pausa
+  { code: 'ag4', queue: 'Fila_Teste', line: 'npx', status: 5, callSrc: '088999263130', callDst: 'ag4', extension: 'ag4' }, // toque recebendo
+  { code: 'ag5', queue: 'Fila_Teste', line: 'npx', status: 5, callSrc: 'ag5', callDst: '088999263130', extension: 'ag5' }, // toque discando
+  { code: 'ag6', queue: 'Fila_Teste', line: 'npx', status: 5 } // toque sem direção
+];
+fn.setDados(grupoAgentes);
+fn.setFilas([{ key: 'Fila_Teste', nome: 'Fila de Teste' }]);
+const cardHtml = fn.card('Fila_Teste', '<th>Agente</th>');
+
+results.push({
+  id: 'card_grupo_contadores_tests',
+  cardHtml
+});
+
+// 19. Card do Topo Fila alimentado por waitingCalls
+results.push({
+  id: 'waiting_calls_topo_tests',
+  com5: simularRender([], [{ key: 'Fila_Suporte', nome: 'Suporte N1' }], 5),
+  com0: simularRender([], [{ key: 'Fila_Suporte', nome: 'Suporte N1' }], 0),
+  comNull: simularRender([], [{ key: 'Fila_Suporte', nome: 'Suporte N1' }], null),
+  comUndefined: simularRender([], [{ key: 'Fila_Suporte', nome: 'Suporte N1' }], undefined)
 });
 
 console.log(JSON.stringify(results));

@@ -418,13 +418,11 @@ def processar_snapshot_pbx(dispositivos_lista, registrados_lista, chamadas_lista
             caller_id = str(call_info.get('callerid') or call_info.get('cli') or call_info.get('from') or '').strip()
             status_text = str(call_info.get('status_text') or '').upper()
 
-            # Status Ringing derivado apenas se explicitamente conhecido
-            status_pbx = 'Ringing' if ('RING' in status_text) else 'Busy'
-
             src_analista = eh_identificador_analista(src, ramal, username)
             dst_analista = eh_identificador_analista(dst, ramal, username)
 
             # P1: Direção e número com equivalência de identificadores
+            api_direction = str(call_info.get('direction') or call_info.get('call_direction') or '').strip().lower()
             if src_analista and not dst_analista:
                 direction = 'outbound'
                 number = dst
@@ -438,8 +436,10 @@ def processar_snapshot_pbx(dispositivos_lista, registrados_lista, chamadas_lista
                 else:
                     number = 'Ligação Ativa'
             else:
-                direction = 'outbound' if dst else 'inbound'
+                direction = api_direction if api_direction in ('inbound', 'outbound') else ('outbound' if dst else 'inbound')
                 number = dst or src or caller_id
+
+            status_pbx = 'Ringing' if 'RING' in status_text or 'DIAL' in status_text else 'Busy'
 
             # Guarda final: nunca exibir identificador do próprio analista como número
             if eh_identificador_analista(number, ramal, username) or not number:
@@ -641,6 +641,7 @@ class ColetorPbx:
             )
 
             # Precedência estrita e separação de fone/fila:
+            # O toque real no PBX prevalece quando não há chamada ou toque ativo na NPX.
             # 1. Analista ativo na NPX (status != 0) e NÃO em pausa -> 'npx' (NPX ativa primária mantida)
             # 2. PBX registrado (Free, Busy, Ringing) -> 'pbx' (ex: analista em pausa NPX ou status 0)
             # 3. Analista em pausa na NPX (ou ativo) com PBX offline/ausente -> 'npx'
@@ -649,7 +650,9 @@ class ColetorPbx:
             status_npx = a.get('status')
             npx_ativo = status_npx is not None and status_npx != 0
 
-            if npx_ativo and not em_pausa:
+            if pbx_status == 'Ringing' and status_npx not in (2, 5):
+                a['line'] = 'pbx'
+            elif npx_ativo and not em_pausa:
                 a['line'] = 'npx'
             elif pbx_status in ('Free', 'Busy', 'Ringing'):
                 a['line'] = 'pbx'

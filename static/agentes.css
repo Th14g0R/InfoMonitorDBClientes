@@ -45,7 +45,7 @@ body:has(#ag) { background: var(--cor-fundo, #f4f6f9); margin: 0; }
 #ag .chip { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; min-width: 96px; font-size: 13px; color: var(--mut); }
 #ag .chip b { font-size: 22px; display: block; color: var(--tx); }
 #ag .chip.livre b { color: var(--livre); } #ag .chip.lig b { color: var(--lig); }
-#ag .chip.cham b { color: var(--cham); } #ag .chip.pausa b { color: var(--pausa); }
+#ag .chip.cham b, #ag .chip.fila b { color: var(--cham); } #ag .chip.pausa b { color: var(--pausa); }
 #ag .chip.presa { border-color: var(--pausa); } #ag .chip.presa b { color: var(--pausa); }
 #ag #msg { min-height: 20px; margin: 6px 0 10px; }
 /* colunas de grupos: cada coluna empilha os seus de forma independente */

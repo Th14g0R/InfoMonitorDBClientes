@@ -769,6 +769,47 @@ class TestColetorPbxP5EP6(unittest.TestCase):
         self.assertEqual(agentes[0]['line'], 'pbx')
         self.assertFalse(agentes[1]['npxLoggedIn'])
 
+    def test_discagem_pbx_e_exibida_quando_npx_esta_livre(self):
+        mapa = {'Thiago': {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'}}
+        dispositivos = [{'username': '852008.Thiago', 'linha_ip': '2008'}]
+        registrados = [{'device_username': '852008.Thiago', 'device_registered': True}]
+        chamadas = [{
+            'source': '852008.Thiago',
+            'destination': '85999991234',
+            'status_text': 'RINGING',
+            'duration': '5',
+        }]
+        snap = processar_snapshot_pbx(dispositivos, registrados, chamadas, mapa_analistas=mapa)
+        self.assertIn('2008', snap)
+        info = snap['2008']
+        self.assertEqual(info['direction'], 'outbound')
+        self.assertEqual(info['status'], 'Ringing')
+        self.assertEqual(info['number'], '85999991234')
+        coletor = ColetorPbx(cliente=MagicMock(), mapa_analistas=mapa)
+        coletor.snapshot = snap
+        agente = {'code': '4422008', 'name': 'Thiago', 'status': 1, 'paused': False}
+        coletor.enriquecer_agentes([agente])
+        self.assertEqual(agente['line'], 'pbx')
+
+    def test_direcao_inbound_com_status_ringing_fica_ringing(self):
+        # Quando chamada é recebida (inbound) e status_text é RINGING,
+        # status deve ser 'Ringing' (aparelho/softphone tocando)
+        mapa = {'Thiago': {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'}}
+        dispositivos = [{'username': '852008.Thiago', 'linha_ip': '2008'}]
+        registrados = [{'device_username': '852008.Thiago', 'device_registered': True}]
+        chamadas = [{
+            'source': '85988884321',
+            'destination': '852008.Thiago',
+            'status_text': 'RINGING',
+            'duration': '3',
+        }]
+        snap = processar_snapshot_pbx(dispositivos, registrados, chamadas, mapa_analistas=mapa)
+        self.assertIn('2008', snap)
+        info = snap['2008']
+        self.assertEqual(info['direction'], 'inbound')
+        self.assertEqual(info['status'], 'Ringing')
+        self.assertEqual(info['number'], '85988884321')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -51,6 +51,8 @@ NOMES_PADRAO = {
 COLUNAS_ORDEM = {'name', 'status', 'tempo', 'penalty', 'situacao'}
 INTERVALO_COLETA = 1.5      # pausa entre coletas (s)
 VALIDADE_ALERTA_NPX = 45.0  # o ciclo consulta o status de vários agentes
+INTERVALO_FILA_NPX = 10.0
+VALIDADE_FILA_NPX = 30.0
 VALIDADE_HOJE = 15          # relatórios do dia (s)
 VALIDADE_HISTORICO = 60     # sessões abertas de dias anteriores (s)
 VALIDADE_HISTORICO_LIMITES = 60.0  # cache de limites de pausa históricos (s)
@@ -164,6 +166,20 @@ class ClienteNpx:
 
         http_retorno = status if ok else (502 if status in (401, 403) else (status if status >= 400 else 502))
         return {'ok': ok, 'http': http_retorno, 'mensagem': mensagem}
+
+    def obter_wait_calls(self, queue):
+        """Consulta chamadas em espera na API (/rates/wait_calls.json)."""
+        if not self.configurado:
+            return None
+        try:
+            res = self.get(f'/rates/wait_calls.json?queue={urlparse.quote(str(queue))}&queue_type=LOG')
+            if isinstance(res, dict):
+                return res.get('wait_calls')
+            if isinstance(res, list):
+                return res
+        except Exception:
+            return None
+        return None
 
 
 class CSRFParser(HTMLParser):
@@ -487,16 +503,90 @@ class ClientePainelNpx:
             http_retorno = status if ok else (502 if status in (401, 403) else (status if status >= 400 else 502))
             return {'ok': ok, 'http': http_retorno, 'mensagem': msg_final}
 
+    def obter_wait_calls(self, queue):
+        """Consulta chamadas em espera para uma fila (/rates/wait_calls.json)."""
+        if not self.configurado:
+            return None
+        with self._trava:
+            if self._em_cooldown():
+                return None
+            try:
+                status, texto, url_final = self._requisicao_acao('/rates/wait_calls.json', {
+                    'queue': str(queue),
+                    'queue_type': 'LOG',
+                })
+            except Exception as erro:
+                LOGGER.warning('Falha de rede ao consultar wait_calls no painel NPX para fila %s: %s', queue, type(erro).__name__)
+                return None
+
+            def eh_sessao_expirada(st, corpo, u):
+                if st in (401, 403):
+                    return True
+                if '/users/sign_in' in (u or ''):
+                    return True
+                if 'new_user' in corpo or 'users/sign_in' in corpo:
+                    return True
+                try:
+                    json.loads(corpo)
+                    return False
+                except (ValueError, TypeError):
+                    return True
+
+            if eh_sessao_expirada(status, texto, url_final):
+                try:
+                    self.autenticar(forcar=True)
+                    status, texto, _ = self._requisicao_acao('/rates/wait_calls.json', {
+                        'queue': str(queue),
+                        'queue_type': 'LOG',
+                    })
+                except Exception:
+                    return None
+
+            try:
+                if not 200 <= status < 300:
+                    return None
+                obj = json.loads(texto)
+                if isinstance(obj, dict):
+                    return obj.get('wait_calls')
+                if isinstance(obj, list):
+                    return obj
+            except Exception:
+                return None
+            return None
+
+
+def direcao_chamada_npx(status, chamada, codigo):
+    direcao = str(chamada.get('direction') or status.get('call_direction') or '').strip().lower()
+    if direcao in ('outbound', 'outgoing'):
+        return 'outbound'
+    if direcao in ('inbound', 'incoming'):
+        return 'inbound'
+    src, dst = (str(status.get(campo) or '').strip() for campo in ('src', 'dst'))
+    ramais = {codigo, str(status.get('extension') or '').strip()} - {''}
+    if src in ramais and dst not in ramais:
+        return 'outbound'
+    if dst in ramais and src not in ramais:
+        return 'inbound'
+    if re.fullmatch(r'\d{1,7}', src) and len(re.sub(r'\D', '', dst)) >= 8:
+        return 'outbound'
+    if re.fullmatch(r'\d{1,7}', dst) and len(re.sub(r'\D', '', src)) >= 8:
+        return 'inbound'
+    return None
+
 
 class ColetorAgentes:
-    def __init__(self, cliente):
+    def __init__(self, cliente, cliente_painel=None):
         self.cliente = cliente
+        self.cliente_painel = cliente_painel
         self._trava = threading.Lock()
         self._thread = None
+        self._thread_fila = None
         self._parar = threading.Event()
         self._forcar = threading.Event()
         self._acordar = threading.Event()
         self.retrato = None          # lista de agentes
+        self.waiting_calls = None
+        self.waiting_calls_em = 0.0
         self._ocioso_desde = {}
         self.coletado_em = None
         self.erro = None
@@ -516,6 +606,9 @@ class ColetorAgentes:
             self._parar.clear()
             self._thread = threading.Thread(target=self._laco, name='coletor-agentes-npx', daemon=True)
             self._thread.start()
+            if self._thread_fila is None or not self._thread_fila.is_alive():
+                self._thread_fila = threading.Thread(target=self._laco_fila, name='coletor-fila-npx', daemon=True)
+                self._thread_fila.start()
 
     def parar(self):
         self._parar.set()
@@ -535,6 +628,26 @@ class ColetorAgentes:
                 LOGGER.warning('Falha na coleta de agentes da NPX: %s', type(erro).__name__)
             self._acordar.wait(INTERVALO_COLETA)
             self._acordar.clear()
+
+    def _laco_fila(self):
+        while not self._parar.is_set():
+            filas = set(nomes_filas())
+            filas.update(a['queue'] for a in self.retrato or () if a.get('queue'))
+            try:
+                total = self._coletar_waiting_calls(filas)
+            except Exception as erro:
+                LOGGER.warning('Falha na coleta da fila NPX: %s', type(erro).__name__)
+                total = None
+            with self._trava:
+                self.waiting_calls = total
+                self.waiting_calls_em = time.monotonic()
+            self._parar.wait(INTERVALO_FILA_NPX)
+
+    def chamadas_em_espera(self):
+        with self._trava:
+            if time.monotonic() - self.waiting_calls_em <= VALIDADE_FILA_NPX:
+                return self.waiting_calls
+        return None
 
     # ---- coleta ----
     def _relatorio(self, caminho):
@@ -592,6 +705,68 @@ class ColetorAgentes:
         limites = dict(self._limites_hist)
         limites.update(hoje)
         self._limites_cache = limites
+
+    def _coletar_waiting_calls(self, filas):
+        filas_limpas = [f for f in (filas or ()) if f and f != FILA_PBX_SEM_FILA]
+        if not filas_limpas:
+            return 0
+
+        clientes_para_tentar = []
+        if self.cliente_painel and getattr(self.cliente_painel, 'configurado', False):
+            clientes_para_tentar.append(self.cliente_painel)
+        if self.cliente and getattr(self.cliente, 'configurado', False):
+            clientes_para_tentar.append(self.cliente)
+
+        if not clientes_para_tentar:
+            return None
+
+        resultados = None
+        for cli in clientes_para_tentar:
+            def consultar_fila(f):
+                try:
+                    if hasattr(cli, 'obter_wait_calls') and callable(getattr(cli, 'obter_wait_calls')):
+                        val = cli.obter_wait_calls(f)
+                        if isinstance(val, (list, tuple)):
+                            return f, list(val)
+                        if isinstance(val, dict):
+                            return f, val.get('wait_calls')
+                    if hasattr(cli, 'get') and callable(getattr(cli, 'get')):
+                        res = cli.get(f'/rates/wait_calls.json?queue={urlparse.quote(str(f))}&queue_type=LOG')
+                        if isinstance(res, dict):
+                            return f, res.get('wait_calls')
+                        if isinstance(res, (list, tuple)):
+                            return f, list(res)
+                except Exception as err:
+                    LOGGER.warning('Falha ao consultar wait_calls da fila %s: %s', f, type(err).__name__)
+                return f, None
+
+            with ThreadPoolExecutor(max_workers=min(8, max(1, len(filas_limpas)))) as pool:
+                res_tentativa = list(pool.map(consultar_fila, filas_limpas))
+
+            if all(isinstance(res, list) for _, res in res_tentativa):
+                resultados = res_tentativa
+                break
+
+        if resultados is None:
+            return None
+
+        chamadas_unicas = set()
+        total_sem_id = 0
+        for _, lista in resultados:
+            if not lista or not isinstance(lista, list):
+                continue
+            for c in lista:
+                if not isinstance(c, dict):
+                    continue
+                lid = str(c.get('linkedid') or '').strip()
+                if lid.upper() == 'CALLBACK':
+                    continue
+                if lid:
+                    chamadas_unicas.add(lid)
+                else:
+                    total_sem_id += 1
+
+        return len(chamadas_unicas) + total_sem_id
 
     def coletar(self):
         agora = datetime.now(FUSO)
@@ -651,6 +826,7 @@ class ColetorAgentes:
                         max_minutos = self._limites_cache.get(str(tipo))
 
             chamada = (st or {}).get('current_call') or {}
+            direcao = direcao_chamada_npx(st or {}, chamada, codigo)
             for fila in info['filas'] or ['']:
                 logado = (codigo, fila) in sessoes_logon or (codigo in codigos_logon and not fila)
                 lista.append({
@@ -669,6 +845,7 @@ class ColetorAgentes:
                     'callSrc': (st or {}).get('src') or None,
                     'callDst': (st or {}).get('dst') or None,
                     'callClient': chamada.get('client_name') or None,
+                    'callDirection': direcao,
                     'erro': None if st else 'status indisponível',
                     'npxLoggedIn': bool(logado),
                 })
@@ -788,7 +965,7 @@ def alterar_prioridade(cliente_painel, dados, coletor=None):
 def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel=None, coletor_pbx=None):
     cliente = cliente or ClienteNpx()
     cliente_painel = cliente_painel or ClientePainelNpx()
-    coletor = ColetorAgentes(cliente)
+    coletor = ColetorAgentes(cliente, cliente_painel=cliente_painel)
     coletor_pbx = coletor_pbx or ColetorPbx()
     layout = LayoutAgentes(conectar)
     bp.coletor_agentes = coletor
@@ -843,7 +1020,7 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
                     return jsonify(ok=False, mensagem='Ação indisponível para agentes operando via PBX ou offline na NPX.'), 400
         return None
 
-    def _responder_dados(todos_agentes, em, erro_npx, status_pbx):
+    def _responder_dados(todos_agentes, em, erro_npx, status_pbx, waiting_calls=None):
         agora = datetime.now(FUSO)
         dados_frescos = (em is not None and not erro_npx and status_pbx.get('available')
                          and 0 <= (agora - em).total_seconds() <= VALIDADE_ALERTA_NPX)
@@ -873,6 +1050,7 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
             painelConfigurado=bool(cliente_painel and cliente_painel.configurado),
             pbxConnection=status_pbx,
             filas=[{'key': k, 'nome': _formatar_nome_fila(k)} for k in chaves],
+            waitingCalls=waiting_calls,
             agentes=agentes_retorno)
         resposta.headers['Cache-Control'] = 'no-store'
         return resposta
@@ -904,7 +1082,7 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
             em = datetime.now(FUSO)
             erro_npx = 'NPX_API_TOKEN não configurado no .env do servidor.'
             todos_agentes = coletor_pbx.obter_agentes_pbx_only(set()) if pbx_disponivel else []
-            return _responder_dados(todos_agentes, em, erro_npx, status_pbx)
+            return _responder_dados(todos_agentes, em, erro_npx, status_pbx, waiting_calls=None)
 
         # NPX configurado: obtém dados da NPX
         # Se PBX tem cache disponível, não bloqueia 12s se NPX ainda não tiver retrato
@@ -920,7 +1098,7 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
             em = datetime.now(FUSO)
             erro_npx = erro or 'Sem resposta da NPX.'
             todos_agentes = coletor_pbx.obter_agentes_pbx_only(set())
-            return _responder_dados(todos_agentes, em, erro_npx, status_pbx)
+            return _responder_dados(todos_agentes, em, erro_npx, status_pbx, waiting_calls=None)
 
         # NPX disponível e com dados:
         if erro:
@@ -949,7 +1127,8 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
             for a in todos_agentes:
                 a['npxLoggedIn'] = False
 
-        return _responder_dados(todos_agentes, em, erro, status_pbx)
+        waiting_calls = None if erro else coletor.chamadas_em_espera()
+        return _responder_dados(todos_agentes, em, erro, status_pbx, waiting_calls=waiting_calls)
 
     @bp.route('/admin/agentes/layout', methods=['POST'], endpoint='agentes_layout')
     def salvar_layout():

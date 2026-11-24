@@ -26,25 +26,39 @@
 
   let dados = [], filas = [], carregando = false, sel = null, arrastando = null, alvo = null, painelConfigurado = true;
   let layout = CFG.layout || {cols: 2, c1: [], c2: [], ord: {col: 'status', dir: 1}};
-  let timerSalvar = null;
+  let timerSalvar = null, waitingCalls = null;
 
   // ---------- utilidades ----------
   const stDe = a => {
     if (a.line === 'pbx') {
       if (a.pbxStatus === 'Busy') return ST_PBX['Busy'];
-      if (a.pbxStatus === 'Ringing') return ST_PBX['Ringing'];
+      if (a.pbxStatus === 'Ringing') {
+        const c = chamada(a);
+        const rotulo = c?.dir === 'para' ? 'Discando' : (c?.dir === 'de' ? 'Recebendo' : 'Chamando');
+        return [rotulo, 'var(--pbx-cham)', 1, 'l-pbx-cham'];
+      }
       if (a.paused) return ['Em pausa', 'var(--pbx-pausa)', 0, 'l-pbx-pausa'];
       return ST_PBX[String(a.pbxStatus || '')] || [a.pbxStatus || a.erro || 'Desconhecido', 'var(--off)', 5, 'l-pbx-off'];
     }
     if (a.line === 'off') {
       return ST['0'];
     }
-    return a.paused ? ST['-1'] : (ST[String(a.status)] || [a.erro || 'Desconhecido', 'var(--off)', 5, 'l-off']);
+    if (a.paused) return ST['-1'];
+    if (a.status === 5) {
+      const c = chamada(a);
+      const rotulo = c?.dir === 'para' ? 'Discando' : (c?.dir === 'de' ? 'Recebendo' : 'Chamando');
+      return [rotulo, 'var(--cham)', 1, 'l-cham'];
+    }
+    return ST[String(a.status)] || [a.erro || 'Desconhecido', 'var(--off)', 5, 'l-off'];
   };
   const segs = a => a.line === 'pbx' ? (a.pbxSeconds || 0) : (a.paused ? (a.pauseMinutes != null ? a.pauseMinutes * 60 : (a.seconds || 0)) : (a.seconds || 0));
   const ehLig = a => a.line === 'pbx' ? (a.pbxStatus === 'Busy') : (!a.paused && a.status === 2);
-  const ehCham = a => a.line === 'pbx' ? (a.pbxStatus === 'Ringing') : (!a.paused && a.status === 5);
-  const ehPausa = a => !!a.paused && !ehLig(a) && !ehCham(a);
+  const ehToque = a => a.line === 'pbx' ? (a.pbxStatus === 'Ringing') : (!a.paused && a.status === 5);
+  const ehCham = ehToque;
+  const ehRecebendo = a => ehToque(a) && chamada(a)?.dir === 'de';
+  const ehDiscendo = a => ehToque(a) && chamada(a)?.dir === 'para';
+  const ehChamDesc = a => ehToque(a) && !chamada(a)?.dir;
+  const ehPausa = a => !!a.paused && !ehLig(a) && !ehToque(a);
   const ehLivre = a => a.line === 'pbx' ? (!a.paused && a.pbxStatus === 'Free') : (!a.paused && a.status === 1);
   const logadoNpx = a => a?.npxLoggedIn === true;
 
@@ -66,6 +80,8 @@
     let d = str.replace(/\D/g, '');
     if ((d.length === 12 || d.length === 13) && d.startsWith('55')) {
       d = d.slice(2);
+    } else if (d.startsWith('0') && (d.length === 12 || d.length === 11) && d[1] !== '0') {
+      d = d.slice(1);
     } else if (temMais) {
       return `+${d}`;
     }
@@ -96,18 +112,45 @@
   function chamada(a) {
     if (a.line === 'pbx') {
       const num = a.pbxNumber || '';
-      const dir = a.pbxDirection === 'outbound' ? 'para' : 'de';
+      const dir = a.pbxDirection === 'outbound' ? 'para' : (a.pbxDirection === 'inbound' ? 'de' : '');
       return (num || a.pbxStatus === 'Busy' || a.pbxStatus === 'Ringing') ? {num, dir} : null;
     }
-    const num = a.callSrc || a.callDst || a.callClient || '';
-    return num ? {num, dir: a.callDst && !a.callSrc ? 'para' : 'de'} : null;
+    const src = String(a.callSrc || '').trim();
+    const dst = String(a.callDst || '').trim();
+    const client = String(a.callClient || '').trim();
+    const me = new Set([String(a.extension || '').trim(), String(a.code || '').trim()].filter(Boolean));
+
+    let num = src || dst || client;
+    let dir = '';
+    if (a.callDirection === 'outbound') {
+      num = dst && !me.has(dst) ? dst : (src && !me.has(src) ? src : client);
+      dir = 'para';
+    } else if (a.callDirection === 'inbound') {
+      num = src && !me.has(src) ? src : (dst && !me.has(dst) ? dst : client);
+      dir = 'de';
+    } else if (me.has(src)) {
+      num = dst || client;
+      dir = 'para';
+    } else if (me.has(dst)) {
+      num = src || client;
+      dir = 'de';
+    } else if (/^\d{1,7}$/.test(src) && dst.replace(/\D/g, '').length >= 8) {
+      num = dst;
+      dir = 'para';
+    } else if (src.replace(/\D/g, '').length >= 8 && /^\d{1,7}$/.test(dst)) {
+      num = src;
+      dir = 'de';
+    }
+    return (num || a.status === 2 || a.status === 5) ? {num, dir} : null;
   }
   function situacaoTexto(a) {
     if (a.line === 'pbx') {
       const dur = a.pbxSeconds ? ` (${fmtSeg(a.pbxSeconds)})` : '';
       let res = '';
       if (a.pbxStatus === 'Busy' || a.pbxStatus === 'Ringing') {
-        const num = a.pbxNumber ? fmtFone(a.pbxNumber) : (a.pbxStatus === 'Ringing' ? 'Chamando' : 'Em ligação');
+        const c = chamada(a);
+        const rotuloToque = c?.dir === 'para' ? 'Discando' : (c?.dir === 'de' ? 'Recebendo' : 'Chamando');
+        const num = a.pbxNumber ? fmtFone(a.pbxNumber) : (a.pbxStatus === 'Ringing' ? rotuloToque : 'Em ligação');
         res = `${num}${dur}`;
       } else if (a.pbxStatus === 'Free') {
         res = a.paused ? '' : 'Livre';
@@ -133,8 +176,14 @@
       }
       return `${tipo}${a.pauseStart ? ` desde ${fmtHora(a.pauseStart)}` : ''}`;
     }
-    const c = chamada(a); return c ? c.num : '';
+    const c = chamada(a);
+    if (!c) return '';
+    if (c.num) return fmtFone(c.num);
+    if (a.status === 5) return c.dir === 'para' ? 'Discando' : (c.dir === 'de' ? 'Recebendo' : 'Chamando');
+    if (a.status === 2) return 'Em ligação';
+    return '';
   }
+  const dirTxt = d => d === 'para' ? '↗ para' : d === 'de' ? '↙ de' : '';
   function situacaoHtml(a) {
     if (a.line === 'pbx') {
       const dur = a.pbxSeconds != null && a.pbxSeconds > 0 ? ` <span class="mut">(${fmtSeg(a.pbxSeconds)})</span>` : '';
@@ -142,9 +191,11 @@
       if (a.pbxStatus === 'Busy' || a.pbxStatus === 'Ringing') {
         const c = chamada(a);
         if (c && c.num) {
-          chamadaHtml = `📞 <span class="mut">${c.dir}</span> <span class="fone">${esc(fmtFone(c.num))}</span>${dur}`;
+          const dt = dirTxt(c.dir);
+          chamadaHtml = `📞 ${dt ? `<span class="mut">${dt}</span> ` : ''}<span class="fone">${esc(fmtFone(c.num))}</span>${dur}`;
         } else {
-          chamadaHtml = `<span class="mut">${a.pbxStatus === 'Ringing' ? 'Chamando' : 'Em ligação'}</span>${dur}`;
+          const rotuloToque = c?.dir === 'para' ? 'Discando' : (c?.dir === 'de' ? 'Recebendo' : 'Chamando');
+          chamadaHtml = `<span class="mut">${a.pbxStatus === 'Ringing' ? rotuloToque : 'Em ligação'}</span>${dur}`;
         }
       } else if (a.pbxStatus === 'Free') {
         chamadaHtml = a.paused ? '' : '<span class="mut">Livre</span>';
@@ -175,8 +226,12 @@
     }
     if (a.status === 2 || a.status === 5) {
       const c = chamada(a);
-      if (!c) return `<span class="mut">${a.status === 5 ? 'Chamando' : 'Em ligação'}</span>`;
-      return `📞 <span class="mut">${c.dir}</span> <span class="fone">${esc(fmtFone(c.num))}</span>`;
+      if (!c || !c.num) {
+        const rotuloToque = c?.dir === 'para' ? 'Discando' : (c?.dir === 'de' ? 'Recebendo' : 'Chamando');
+        return `<span class="mut">${a.status === 5 ? rotuloToque : 'Em ligação'}</span>`;
+      }
+      const dt = dirTxt(c.dir);
+      return `📞 ${dt ? `<span class="mut">${dt}</span> ` : ''}<span class="fone">${esc(fmtFone(c.num))}</span>`;
     }
     return '<span class="mut">—</span>';
   }
@@ -237,9 +292,17 @@
     if (k === 'PBX_Sem_Fila' && !todos.length) return '';
     const lista = ordenar(todos.filter(a => !soPausa() || a.paused));
     const n = f => todos.filter(f).length;
+    const nRec = n(ehRecebendo);
+    const nDisc = n(ehDiscendo);
+    const nDesc = n(ehChamDesc);
+    const toqueCont = [
+      `<span style="color:var(--cham)">${nRec} recebendo</span>`,
+      `<span style="color:var(--cham)">${nDisc} discando</span>`,
+      nDesc ? `<span style="color:var(--cham)">${nDesc} chamando</span>` : ''
+    ].filter(Boolean).join('');
     const cont = `<div class="cont">
         <span style="color:var(--livre)">${n(ehLivre)} livres</span>
-        <span style="color:var(--cham)">${n(ehCham)} recebendo</span>
+        ${toqueCont}
         <span style="color:var(--lig)">${n(ehLig)} em ligação</span>
         <span style="color:var(--pausa)">${n(ehPausa)} em pausa</span></div>`;
     const corpo = lista.length
@@ -259,7 +322,9 @@
     const conta = f => u.filter(f).length;
     $('nLog').textContent = u.length;
     $('nLivre').textContent = conta(ehLivre);
-    $('nCham').textContent = conta(ehCham);
+    const elFila = $('nFila') || $('nCham');
+    if (elFila) elFila.textContent = waitingCalls != null ? waitingCalls : '–';
+    if ($('nCham') && $('nCham') !== elFila) $('nCham').textContent = conta(ehCham);
     $('nLig').textContent = conta(ehLig);
     $('nPausa').textContent = conta(ehPausa);
     $('nPresa').textContent = conta(estourada);
@@ -288,6 +353,7 @@
       const j = await r.json();
       if (!r.ok) throw new Error(j.erro || r.status);
       dados = j.agentes || []; filas = j.filas || [];
+      waitingCalls = Number.isSafeInteger(j.waitingCalls) && j.waitingCalls >= 0 ? j.waitingCalls : null;
       painelConfigurado = j.painelConfigurado !== false;
       const pbxConn = j.pbxConnection || null;
       const avisoPbx = $('avisoPbx');
@@ -309,6 +375,8 @@
       render();
       if (sel && $('dlg') && $('dlg').open) atualizarDialogo();
     } catch (e) {
+      waitingCalls = null;
+      $('nFila').textContent = '–';
       if (dados.some(a => a.pbxIdleAlert === true)) {
         dados = dados.map(a => a.pbxIdleAlert === true ? {...a, pbxIdleAlert: false} : a);
         render();
@@ -401,11 +469,11 @@
     let callTxt = '';
     if (ehPbx) {
       if (c && c.num) {
-        callTxt = ` 📞 ${c.dir} <b>${esc(fmtFone(c.num))}</b>${a.pbxSeconds ? ` (${fmtSeg(a.pbxSeconds)})` : ''}`;
+        callTxt = ` 📞 ${dirTxt(c.dir)} <b>${esc(fmtFone(c.num))}</b>${a.pbxSeconds ? ` (${fmtSeg(a.pbxSeconds)})` : ''}`;
       }
     } else {
       if (c && !a.paused && c.num) {
-        callTxt = ` 📞 ${c.dir} <b>${esc(fmtFone(c.num))}</b>`;
+        callTxt = ` 📞 ${dirTxt(c.dir)} <b>${esc(fmtFone(c.num))}</b>`;
       }
     }
 

@@ -268,6 +268,11 @@ class TestAgentesFrontendCores(unittest.TestCase):
         # Evita inferir DDI ambíguo sem '+' explícito
         self.assertEqual(f['interSemMais'], "141555526710")
 
+        # Números com 0 inicial da telefonia brasileira (12 dígitos celular ou 11 fixo: 0 + DDD + número)
+        self.assertEqual(f['imgZeroCel'], "(88) 99926-3130")
+        self.assertEqual(f['imgZeroCelMais'], "(88) 99926-3130")
+        self.assertEqual(f['zeroFixo'], "(88) 3222-1234")
+
         # Padrão NPX 10 e 11 dígitos, local 8 e 9 dígitos, vazios
         self.assertEqual(f['stdCel'], "(85) 99999-9999")
         self.assertEqual(f['stdFixo'], "(85) 3222-1100")
@@ -428,6 +433,155 @@ class TestAgentesFrontendCores(unittest.TestCase):
         self.assertIn('grid-column: 1 / -1', css, "Situação e ações devem ocupar largura total para evitar corte")
         self.assertIn('overflow-wrap: anywhere', css, "Quebra de palavra não-mutilante no mobile")
         self.assertIn('min-height: 32px', css, "Botões de ação devem ter área de toque confortável")
+
+    def test_direcao_chamada_sinal_visual_e_fonte_npx(self):
+        """Valida sinal visual + texto nas direções de chamada (NPX e PBX) e fonte confiável de direção NPX."""
+        res = subprocess.run(['node', RUNNER_PATH, JS_PATH], capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(res.returncode, 0, f"Erro ao executar runner Node.js:\n{res.stderr}")
+
+        data = json.loads(res.stdout)
+        by_id = {r['id']: r for r in data}
+        cd = by_id['chamadas_direcao_tests']
+
+        # 1. NPX Saída (agente discou): dir='para', sinal visual '↗ para', número mascarado
+        self.assertEqual(cd['npxSaida']['chamada']['dir'], 'para')
+        self.assertEqual(cd['npxSaida']['chamada']['num'], '088999263130')
+        self.assertIn('↗ para', cd['npxSaida']['sitHtml'])
+        self.assertIn('(88) 99926-3130', cd['npxSaida']['sitHtml'])
+
+        # 2. NPX Entrada (agente recebeu): dir='de', sinal visual '↙ de', número mascarado
+        self.assertEqual(cd['npxEntrada']['chamada']['dir'], 'de')
+        self.assertEqual(cd['npxEntrada']['chamada']['num'], '088999263130')
+        self.assertIn('↙ de', cd['npxEntrada']['sitHtml'])
+        self.assertIn('(88) 99926-3130', cd['npxEntrada']['sitHtml'])
+
+        # 3. PBX Saída: preserva direção e formata número da imagem
+        self.assertEqual(cd['pbxSaida']['chamada']['dir'], 'para')
+        self.assertIn('↗ para', cd['pbxSaida']['sitHtml'])
+        self.assertIn('(88) 99926-3130', cd['pbxSaida']['sitHtml'])
+
+        # 4. PBX Entrada: preserva direção e formata número da imagem
+        self.assertEqual(cd['pbxEntrada']['chamada']['dir'], 'de')
+        self.assertIn('↙ de', cd['pbxEntrada']['sitHtml'])
+        self.assertIn('(88) 99926-3130', cd['pbxEntrada']['sitHtml'])
+
+    def test_card_fila_substitui_recebendo_e_consome_waitingcalls(self):
+        """Valida substituição do card Recebendo por Fila alimentado pelo dado da API j.waitingCalls (número ou null)."""
+        # 1. HTML possui card 'fila' com id 'nFila' e não mais 'recebendo' / 'nCham'
+        with open(HTML_PATH, 'r', encoding='utf-8') as f:
+            html = f.read()
+
+        self.assertIn('<div class="chip fila"><b id="nFila">–</b>Fila</div>', html, "Card do topo deve ser Fila com id nFila")
+        self.assertNotIn('<div class="chip cham"><b id="nCham">–</b>recebendo</div>', html, "Card antigo Recebendo deve ser substituído")
+
+        # 2. CSS possui regra para .chip.fila b
+        with open(CSS_PATH, 'r', encoding='utf-8') as f:
+            css = f.read()
+
+        self.assertIn('.chip.fila b', css, "CSS deve estilizar .chip.fila b")
+
+        # 3. Execução via runner Node: validação dos valores de waitingCalls
+        res = subprocess.run(['node', RUNNER_PATH, JS_PATH], capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(res.returncode, 0, f"Erro ao executar runner Node.js:\n{res.stderr}")
+
+        data = json.loads(res.stdout)
+        by_id = {r['id']: r for r in data}
+        wt = by_id['waiting_calls_topo_tests']
+
+        # waitingCalls com valor numérico positivo (ex: 5)
+        self.assertEqual(wt['com5']['nFila'], 5)
+        self.assertEqual(wt['com5']['nFilaTxt'], '5')
+
+        # waitingCalls com 0 chamadas
+        self.assertEqual(wt['com0']['nFila'], 0)
+        self.assertEqual(wt['com0']['nFilaTxt'], '0')
+
+        # waitingCalls null -> exibe '–'
+        self.assertIsNone(wt['comNull']['nFila'])
+        self.assertEqual(wt['comNull']['nFilaTxt'], '–')
+
+        # waitingCalls undefined -> exibe '–'
+        self.assertIsNone(wt['comUndefined']['nFila'])
+        self.assertEqual(wt['comUndefined']['nFilaTxt'], '–')
+
+    def test_toque_diferencia_recebendo_discando_chamando_e_contadores_grupo(self):
+        """Valida que durante toque (NPX e PBX) diferencia Recebendo, Discando e Chamando (desconhecido sem mentir), e separa no grupo."""
+        res = subprocess.run(['node', RUNNER_PATH, JS_PATH], capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(res.returncode, 0, f"Erro ao executar runner Node.js:\n{res.stderr}")
+
+        data = json.loads(res.stdout)
+        by_id = {r['id']: r for r in data}
+        t = by_id['toque_direcao_detalhada_tests']
+
+        # 1. PBX Toque Outbound -> 'Discando'
+        self.assertEqual(t['pbxOut']['st'][0], 'Discando')
+        self.assertEqual(t['pbxOut']['st'][1], 'var(--pbx-cham)')
+        self.assertTrue(t['pbxOut']['ehDiscendo'])
+        self.assertFalse(t['pbxOut']['ehRecebendo'])
+        self.assertFalse(t['pbxOut']['ehChamDesc'])
+        self.assertIn('↗ para', t['pbxOut']['sitHtml'])
+
+        # 2. PBX Toque Inbound -> 'Recebendo'
+        self.assertEqual(t['pbxIn']['st'][0], 'Recebendo')
+        self.assertEqual(t['pbxIn']['st'][1], 'var(--pbx-cham)')
+        self.assertTrue(t['pbxIn']['ehRecebendo'])
+        self.assertFalse(t['pbxIn']['ehDiscendo'])
+        self.assertFalse(t['pbxIn']['ehChamDesc'])
+        self.assertIn('↙ de', t['pbxIn']['sitHtml'])
+
+        # 3. PBX Toque Sem Direção -> 'Chamando' (sem mentir entrada/saída)
+        self.assertEqual(t['pbxSemDir']['st'][0], 'Chamando')
+        self.assertEqual(t['pbxSemDir']['st'][1], 'var(--pbx-cham)')
+        self.assertTrue(t['pbxSemDir']['ehChamDesc'])
+        self.assertFalse(t['pbxSemDir']['ehRecebendo'])
+        self.assertFalse(t['pbxSemDir']['ehDiscendo'])
+        self.assertNotIn('↗ para', t['pbxSemDir']['sitHtml'])
+        self.assertNotIn('↙ de', t['pbxSemDir']['sitHtml'])
+
+        # 4. NPX Toque Outbound (callSrc do agente discando para fora) -> 'Discando'
+        self.assertEqual(t['npxOut']['st'][0], 'Discando')
+        self.assertEqual(t['npxOut']['st'][1], 'var(--cham)')
+        self.assertTrue(t['npxOut']['ehDiscendo'])
+        self.assertFalse(t['npxOut']['ehRecebendo'])
+        self.assertFalse(t['npxOut']['ehChamDesc'])
+        self.assertIn('↗ para', t['npxOut']['sitHtml'])
+
+        # 5. NPX Toque Inbound (callDst do agente recebendo da rua) -> 'Recebendo'
+        self.assertEqual(t['npxIn']['st'][0], 'Recebendo')
+        self.assertEqual(t['npxIn']['st'][1], 'var(--cham)')
+        self.assertTrue(t['npxIn']['ehRecebendo'])
+        self.assertFalse(t['npxIn']['ehDiscendo'])
+        self.assertFalse(t['npxIn']['ehChamDesc'])
+        self.assertIn('↙ de', t['npxIn']['sitHtml'])
+
+        # 6. NPX Toque Outbound por inferência de ramal -> número externo longo (nunca inferir entrada de status 5!)
+        self.assertEqual(t['npxOutInferida']['st'][0], 'Discando')
+        self.assertTrue(t['npxOutInferida']['ehDiscendo'])
+        self.assertFalse(t['npxOutInferida']['ehRecebendo'])
+        self.assertIn('↗ para', t['npxOutInferida']['sitHtml'])
+
+        # 7. NPX Toque Inbound por inferência de número externo -> ramal
+        self.assertEqual(t['npxInInferida']['st'][0], 'Recebendo')
+        self.assertTrue(t['npxInInferida']['ehRecebendo'])
+        self.assertFalse(t['npxInInferida']['ehDiscendo'])
+        self.assertIn('↙ de', t['npxInInferida']['sitHtml'])
+
+        # 8. NPX Toque Sem Direção (desconhecido) -> 'Chamando' (sem inferir entrada de status 5)
+        self.assertEqual(t['npxSemDir']['st'][0], 'Chamando')
+        self.assertEqual(t['npxSemDir']['st'][1], 'var(--cham)')
+        self.assertTrue(t['npxSemDir']['ehChamDesc'])
+        self.assertFalse(t['npxSemDir']['ehRecebendo'])
+        self.assertFalse(t['npxSemDir']['ehDiscendo'])
+        self.assertIn('Chamando', t['npxSemDir']['sitHtml'])
+
+        # 9. Contadores de Grupo no card() separando as direções
+        cg = by_id['card_grupo_contadores_tests']
+        self.assertIn('1 livres', cg['cardHtml'])
+        self.assertIn('1 recebendo', cg['cardHtml'])
+        self.assertIn('1 discando', cg['cardHtml'])
+        self.assertIn('1 chamando', cg['cardHtml'])
+        self.assertIn('1 em ligação', cg['cardHtml'])
+        self.assertIn('1 em pausa', cg['cardHtml'])
 
 if __name__ == '__main__':
     unittest.main()
