@@ -15,7 +15,7 @@
   </script>
   <link rel="stylesheet" href="/static/ui.css?v=menu-20261023-1">
   <link rel="stylesheet" href="/static/menu_navegacao.css?v=menu-20261023-1">
-  <link rel="stylesheet" href="/static/agentes.css?v=20261124-1">
+  <link rel="stylesheet" href="/static/agentes.css?v=20261124-3">
   <script src="/static/csrf.js"></script>
   <script src="/static/ui.js?v=menu-20261023-1" defer></script>
 </head>
@@ -46,7 +46,7 @@
       <div class="chip cham"><b id="nCham">–</b>recebendo</div>
       <div class="chip lig"><b id="nLig">–</b>em ligação</div>
       <div class="chip pausa"><b id="nPausa">–</b>em pausa</div>
-      <div class="chip presa"><b id="nPresa">–</b>pausa estourada</div>
+      <div class="chip presa" title="Pausas acima do limite"><b id="nPresa">–</b>Excedidos</div>
     </div>
     <div id="avisoPbx" class="ag-aviso-pbx" style="display:none;" role="status"></div>
     <div id="msg" role="status"></div>
@@ -77,6 +77,6 @@
   {% endif %}
 </div>
 <script type="application/json" id="cfg-agentes">{{ {'pode': pode_gerenciar, 'layout': layout_inicial} | tojson }}</script>
-<script src="/static/agentes.js?v=20261124-3"></script>
+<script src="/static/agentes.js?v=20261124-5"></script>
 </body>
 </html>

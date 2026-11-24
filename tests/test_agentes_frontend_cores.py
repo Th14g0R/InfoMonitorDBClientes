@@ -6,12 +6,14 @@ import unittest
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 JS_PATH = os.path.join(ROOT_DIR, 'static', 'agentes.js')
 CSS_PATH = os.path.join(ROOT_DIR, 'static', 'agentes.css')
+HTML_PATH = os.path.join(ROOT_DIR, 'templates', 'agentes.html')
 RUNNER_PATH = os.path.join(ROOT_DIR, 'tests', 'node_runner_agentes.js')
 
 class TestAgentesFrontendCores(unittest.TestCase):
     def setUp(self):
         self.assertTrue(os.path.exists(JS_PATH), "static/agentes.js deve existir")
         self.assertTrue(os.path.exists(CSS_PATH), "static/agentes.css deve existir")
+        self.assertTrue(os.path.exists(HTML_PATH), "templates/agentes.html deve existir")
         self.assertTrue(os.path.exists(RUNNER_PATH), "tests/node_runner_agentes.js deve existir")
 
     def test_node_check_sintaxe_js(self):
@@ -371,7 +373,9 @@ class TestAgentesFrontendCores(unittest.TestCase):
 
         # 1. pbxIdleAlert: true deve renderizar a classe 'alerta-pbx' e o texto acessível
         self.assertIn('alerta-pbx', alerta['htmlTrue'], "Linha do agente deve conter a classe alerta-pbx quando pbxIdleAlert=true")
-        self.assertIn('<span class="alerta-pbx-texto">Retorne ao ramal NPX</span>', alerta['htmlTrue'], "Linha do agente deve conter o texto de alerta")
+        celulas = alerta['htmlTrue'].split('<td')
+        self.assertNotIn('Retorne ao ramal NPX', celulas[1])
+        self.assertIn('<span class="alerta-pbx-texto">Retorne ao ramal NPX</span>', celulas[5])
 
         # 2. pbxIdleAlert: false não deve renderizar o alerta
         self.assertNotIn('alerta-pbx', alerta['htmlFalse'], "Linha não deve conter alerta-pbx quando pbxIdleAlert=false")
@@ -393,6 +397,37 @@ class TestAgentesFrontendCores(unittest.TestCase):
         self.assertIn('.alerta-pbx-texto', css, "CSS deve conter estilo para .alerta-pbx-texto")
         self.assertIn('prefers-reduced-motion: no-preference', css, "Animação de pulso deve ser restrita a no-preference")
         self.assertIn('@keyframes ag-alerta-pbx', css, "CSS deve definir o keyframe ag-alerta-pbx")
+
+    def test_responsividade_mobile_393px_e_rotulo_excedidos(self):
+        """Valida que o chip de pausa estourada foi alterado para 'Excedidos' e que o CSS contém as regras responsivas para 393px/mobile."""
+        # 1. Rótulo 'Excedidos' no HTML
+        with open(HTML_PATH, 'r', encoding='utf-8') as f:
+            html = f.read()
+
+        self.assertIn('<b id="nPresa">–</b>Excedidos</div>', html, "Chip deve exibir rótulo 'Excedidos'")
+        self.assertNotIn('<b id="nPresa">–</b>pausa estourada</div>', html, "Rótulo antigo 'pausa estourada' deve ser removido")
+
+        # 2. Regras de responsividade no CSS para mobile / 393px
+        with open(CSS_PATH, 'r', encoding='utf-8') as f:
+            css = f.read()
+
+        # Media query mobile
+        self.assertIn('@media (max-width: 660px)', css)
+
+        # Chips simétricos e bem distribuídos (grid 8 colunas com span 2 e grid-auto-rows 1fr)
+        self.assertIn('repeat(8, minmax(0, 1fr))', css, "Grid deve definir colunas simétricas para os chips")
+        self.assertIn('grid-auto-rows: 1fr', css, "Chips devem ter alturas iguais")
+        self.assertIn('grid-column: span 2', css, "Chips devem ter larguras proporcionais iguais")
+
+        # Espaçamento de grupos
+        self.assertIn('.fila-h', css)
+        self.assertIn('.cont', css)
+
+        # Tabela não-mutilante para situação e ações (ocupando linha inteira em mobile)
+        self.assertIn('td:nth-child(5)', css, "Situação deve ter regra específica no mobile")
+        self.assertIn('grid-column: 1 / -1', css, "Situação e ações devem ocupar largura total para evitar corte")
+        self.assertIn('overflow-wrap: anywhere', css, "Quebra de palavra não-mutilante no mobile")
+        self.assertIn('min-height: 32px', css, "Botões de ação devem ter área de toque confortável")
 
 if __name__ == '__main__':
     unittest.main()

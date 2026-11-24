@@ -226,11 +226,11 @@
       : (a.seconds == null && !a.paused ? '–' : fmtSeg(segs(a)));
 
     return `<tr class="${st[3]}${est ? ' estourada presa' : ''}${alertaPbx ? ' alerta-pbx' : ''}" style="--c:${st[1]}">
-      <td>${nome}<br><span class="mut" title="${esc(a.code)}">${sub}</span>${alertaPbx ? '<span class="alerta-pbx-texto">Retorne ao ramal NPX</span>' : ''}</td>
+      <td>${nome}<br><span class="mut" title="${esc(a.code)}">${sub}</span></td>
       <td><div class="st-cell"><span class="pill ${st[3]}" style="--c:${st[1]}"><span class="pill-txt">${esc(st[0])}</span></span>${tagLinha}</div></td>
       <td class="tempo">${tempoTxt}</td>
       <td>${esc(a.penalty ?? '–')}</td>
-      <td>${situacaoHtml(a)}</td><td>${btn}</td></tr>`;
+      <td>${alertaPbx ? '<span class="alerta-pbx-texto">Retorne ao ramal NPX</span>' : situacaoHtml(a)}</td><td>${btn}</td></tr>`;
   }
   function card(k, cab) {
     const todos = dados.filter(a => a.queue === k);

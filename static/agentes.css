@@ -108,17 +108,15 @@ body:has(#ag) { background: var(--cor-fundo, #f4f6f9); margin: 0; }
   #ag tr.estourada td, #ag tr.presa td, #ag tr.estourada .pill, #ag tr.presa .pill, #ag tr.l-cham .pill::before, #ag tr.l-pbx-cham .pill::before { animation: none !important; }
 }
 #ag tr td:first-child { box-shadow: inset 4px 0 0 var(--c, transparent); }
-#ag tr.alerta-pbx td { background: color-mix(in srgb, #e59a15 16%, var(--card)); }
+#ag tr.alerta-pbx td { background: color-mix(in srgb, #e59a15 22%, var(--card)); }
 #ag tr.alerta-pbx td:first-child { box-shadow: inset 4px 0 0 #e59a15; }
 #ag .alerta-pbx-texto {
-  display: block; width: fit-content; max-width: 100%; margin-top: 4px; padding: 2px 5px;
-  border: 1px solid #e59a15; border-radius: 4px; color: var(--tx); background: var(--card);
-  font-size: 11px; font-weight: 700; white-space: normal;
+  color: var(--tx); font-weight: 700; white-space: normal;
 }
 @media (prefers-reduced-motion: no-preference) {
-  #ag .alerta-pbx-texto { animation: ag-alerta-pbx 3s ease-in-out infinite; }
+  #ag tr.alerta-pbx td { animation: ag-alerta-pbx 2.5s ease-in-out infinite; }
 }
-@keyframes ag-alerta-pbx { 50% { background: color-mix(in srgb, #e59a15 24%, var(--card)); } }
+@keyframes ag-alerta-pbx { 50% { background: color-mix(in srgb, #e59a15 52%, var(--card)); } }
 #ag td:has(.st-cell) { padding-left: 4px; padding-right: 4px; }
 #ag .st-cell { display: flex; align-items: center; gap: 3px; min-width: 0; width: 100%; }
 #ag .st-cell .pill { min-width: 0; flex: 1 1 auto; padding: 2px 5px; font-size: 10.5px; gap: 3px; border-radius: 6px; }
@@ -155,5 +153,43 @@ body:has(#ag) { background: var(--cor-fundo, #f4f6f9); margin: 0; }
 #ag .linha { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 #ag #dlgMsg { min-height: 20px; font-size: 14px; margin-top: 6px; }
 #ag .dlg-f { display: flex; justify-content: flex-end; padding: 0 18px 16px; }
-@media (max-width: 640px) { #ag .ag-topo, #ag .ag-corpo, #ag .ag-menu { padding-left: 16px; padding-right: 16px; } }
+@media (max-width: 660px) {
+  #ag .ag-topo, #ag .ag-corpo, #ag .ag-menu { padding-left: 12px; padding-right: 12px; }
+  #ag .ag-topo { padding-top: 10px; padding-bottom: 10px; gap: 8px 12px; }
+  #ag .ag-ctl { font-size: 13px; gap: 8px 12px; }
+  #ag .ag-ctl .seg { display: none; }
+  #ag #msg:empty { display: none; }
+
+  #ag .resumo { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 6px; grid-auto-rows: 1fr; }
+  #ag .chip { grid-column: span 2; min-width: 0; padding: 7px 2px; text-align: center; font-size: 11px; }
+  #ag .chip:nth-child(5) { grid-column: 2 / span 2; }
+  #ag .chip b { font-size: 20px; }
+
+  #ag #filas, #ag .col { gap: 12px; }
+  #ag .fila-h { padding: 9px 10px; gap: 6px 10px; }
+  #ag .cont { width: 100%; margin-left: 0; gap: 4px 10px; font-size: 12px; }
+  #ag .cont span::before { width: 6px; height: 6px; margin-right: 4px; }
+
+  #ag .wrap { overflow-x: visible; }
+  #ag table, #ag thead, #ag tbody { display: block; min-width: 0; }
+  #ag colgroup { display: none; }
+  #ag thead tr, #ag tbody tr { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1.4fr) minmax(0, 1fr) minmax(44px, .5fr);
+    border-left: 4px solid transparent; border-bottom: 1px solid var(--line); }
+  #ag thead th { padding: 4px 5px; border: 0; font-size: 10px; }
+  #ag thead th:first-child, #ag thead th:nth-child(5) { padding-left: 8px; }
+  #ag thead th:nth-child(4) { padding-inline: 0; text-align: center; }
+  #ag thead th:nth-child(5) { grid-column: 1 / -1; padding-top: 0; }
+  #ag thead th:last-child { display: none; }
+
+  #ag tbody tr { border-left-color: var(--c, transparent); }
+  #ag tbody tr:last-child { border-bottom: 0; }
+  #ag tbody tr.alerta-pbx { border-left-color: #e59a15; }
+  #ag tbody td { min-width: 0; border: 0; padding: 7px 5px; font-size: 13px; white-space: normal; overflow-wrap: anywhere; }
+  #ag tbody tr td:first-child { box-shadow: none; padding-left: 8px; }
+  #ag tbody td:nth-child(4) { text-align: center; }
+  #ag tbody td:nth-child(5), #ag tbody td:last-child { grid-column: 1 / -1; padding: 3px 8px 8px; }
+  #ag tbody td:last-child:empty { display: none; }
+  #ag td button { min-height: 32px; }
+  #ag td button.nome { min-height: 0; white-space: normal; overflow-wrap: anywhere; text-align: left; }
+}
 #ag.leitura th:last-child, #ag.leitura td:last-child { padding: 0; }
