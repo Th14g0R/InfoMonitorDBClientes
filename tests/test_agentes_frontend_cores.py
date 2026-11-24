@@ -274,5 +274,125 @@ class TestAgentesFrontendCores(unittest.TestCase):
         self.assertEqual(f['vazio'], "")
         self.assertEqual(f['nulo'], "")
 
+    def test_matriz_logado_npx_contrato_sessao(self):
+        """Valida que logadoNpx cumpre estritamente o contrato booleano npxLoggedIn e casos sem flag (sem inferir MicroSIP)."""
+        res = subprocess.run(['node', RUNNER_PATH, JS_PATH], capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(res.returncode, 0, f"Erro ao executar runner Node.js:\n{res.stderr}")
+
+        data = json.loads(res.stdout)
+        by_id = {r['id']: r for r in data}
+        m = by_id['logado_npx_matrix']
+
+        # 1. Contrato npxLoggedIn booleano true confirma sessão
+        self.assertTrue(m['pbx_loggedin_true'], "PBX com npxLoggedIn: true deve ter sessão confirmada (inclusive se line pbx)")
+        self.assertTrue(m['npx_loggedin_true'], "NPX com npxLoggedIn: true deve ter sessão confirmada")
+        self.assertTrue(m['off_loggedin_true'], "OFF com npxLoggedIn: true deve ter sessão confirmada")
+
+        # 2. Contrato npxLoggedIn booleano false e string truthy recusam sessão
+        self.assertFalse(m['pbx_loggedin_false'], "PBX com npxLoggedIn: false deve ser recusado")
+        self.assertFalse(m['npx_loggedin_false'], "NPX com npxLoggedIn: false deve ser recusado")
+        self.assertFalse(m['string_truthy'], "String 'true' não deve ser aceita como sessão confirmada")
+
+        # 3. Casos sem flag: nunca inferir sessão pelo MicroSIP
+        self.assertFalse(m['sem_flag_pbx_free'], "PBX Free sem flag não deve inferir login NPX")
+        self.assertFalse(m['sem_flag_pbx_busy'], "PBX Busy sem flag não deve inferir login NPX")
+        self.assertFalse(m['sem_flag_pbx_sem_fila'], "PBX_Sem_Fila sem flag não deve inferir login NPX")
+        self.assertFalse(m['sem_flag_pbx_code'], "Código prefixado pbx- sem flag não deve inferir login NPX")
+        self.assertFalse(m['sem_flag_off'], "Linha off sem flag não tem sessão")
+
+        # 4. Casos sem flag: seguir dados reais de sessão na NPX
+        for estado in ('livre', 'lig', 'cham', 'pausa'):
+            with self.subTest(estado=estado):
+                self.assertFalse(m[f'sem_flag_npx_{estado}'])
+        self.assertFalse(m['sem_flag_npx_deslogado'], "NPX com status=0 e paused=false está deslogado")
+
+    def test_contadores_topo_e_card_separado_pbx(self):
+        """Valida que contadores do topo consideram exclusivamente agentes com sessão NPX e que PBX sem fila possui card separado."""
+        res = subprocess.run(['node', RUNNER_PATH, JS_PATH], capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(res.returncode, 0, f"Erro ao executar runner Node.js:\n{res.stderr}")
+
+        data = json.loads(res.stdout)
+        by_id = {r['id']: r for r in data}
+
+        # 1. Caso da imagem: 1 analista PBX-only sem sessão na fila NPX
+        # Topo deve mostrar 0 logados e 0 livres NPX, 1 só PBX. Card separado PBX_Sem_Fila deve estar visível no grupo.
+        img = by_id['topo_cenario_imagem_pbx_sem_fila']
+        self.assertEqual(img['nLog'], 0, "Topo deve exibir 0 logados NPX no caso da imagem")
+        self.assertEqual(img['nLivre'], 0, "Topo deve exibir 0 livres NPX no caso da imagem")
+        self.assertEqual(img['nCham'], 0)
+        self.assertEqual(img['nLig'], 0)
+        self.assertEqual(img['nPausa'], 0)
+        self.assertEqual(img['nPresa'], 0)
+        self.assertEqual(img['nPbx'], 1, "Topo deve exibir 1 no chip 'só PBX'")
+        self.assertTrue(img['temCardPbx'], "Card separado PBX_Sem_Fila deve estar visível no grupo")
+
+        # 2. PBX com logon NPX confirmado (inclusive se line pbx)
+        # Topo deve contabilizar o agente como logado e livre NPX
+        pbx_npx = by_id['topo_cenario_pbx_com_npx_logon']
+        self.assertEqual(pbx_npx['nLog'], 1, "Topo deve contabilizar 1 logado quando line pbx tem sessão confirmada")
+        self.assertEqual(pbx_npx['nLivre'], 1, "Topo deve contabilizar 1 livre quando PBX Free tem sessão confirmada")
+        self.assertEqual(pbx_npx['nPbx'], 0, "Não deve constar em 'só PBX' pois está logado na NPX")
+        self.assertFalse(pbx_npx['temCardPbx'], "Card PBX_Sem_Fila não deve ser exibido quando não há agentes sem fila")
+
+        # 3. Deduplicação multi-fila: mesmo código em 2 filas NPX conta apenas 1 vez no topo
+        dedup = by_id['topo_cenario_deduplicacao_multi_fila']
+        self.assertEqual(dedup['nLog'], 1, "Deduplicação por código deve contar 1 agente no topo")
+        self.assertEqual(dedup['nLivre'], 1)
+
+        # 4. Caso sem flag: PBX-only não infere login
+        sem_flag_pbx = by_id['topo_cenario_sem_flag_pbx_only']
+        self.assertEqual(sem_flag_pbx['nLog'], 0)
+        self.assertEqual(sem_flag_pbx['nLivre'], 0)
+        self.assertEqual(sem_flag_pbx['nPbx'], 1)
+        self.assertTrue(sem_flag_pbx['temCardPbx'])
+
+        # 5. Caso sem flag: NPX livre infere sessão
+        sem_flag_npx = by_id['topo_cenario_sem_flag_npx_livre']
+        self.assertEqual(sem_flag_npx['nLog'], 0)
+        self.assertEqual(sem_flag_npx['nLivre'], 0)
+        self.assertEqual(sem_flag_npx['nPbx'], 0)
+
+        # 6. Cenário misto: 1 NPX livre, 1 PBX+NPX em ligação, 1 PBX-only sem sessão
+        misto = by_id['topo_cenario_misto']
+        self.assertEqual(misto['nLog'], 2, "2 agentes logados em fila NPX")
+        self.assertEqual(misto['nLivre'], 1, "1 livre na NPX")
+        self.assertEqual(misto['nLig'], 1, "1 em ligação PBX com sessão NPX")
+        self.assertEqual(misto['nPbx'], 1, "1 agente só PBX")
+        self.assertTrue(misto['temCardPbx'], "Card PBX_Sem_Fila visível no grupo para o agente PBX-only")
+
+    def test_alerta_visual_retorne_ramal_npx_pbxidlealert(self):
+        """Valida alerta visual acessível na linha do agente (badge/texto 'Retorne ao ramal NPX') condicionado a pbxIdleAlert: true."""
+        res = subprocess.run(['node', RUNNER_PATH, JS_PATH], capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(res.returncode, 0, f"Erro ao executar runner Node.js:\n{res.stderr}")
+
+        data = json.loads(res.stdout)
+        by_id = {r['id']: r for r in data}
+        alerta = by_id['alerta_pbx_idle_tests']
+
+        # 1. pbxIdleAlert: true deve renderizar a classe 'alerta-pbx' e o texto acessível
+        self.assertIn('alerta-pbx', alerta['htmlTrue'], "Linha do agente deve conter a classe alerta-pbx quando pbxIdleAlert=true")
+        self.assertIn('<span class="alerta-pbx-texto">Retorne ao ramal NPX</span>', alerta['htmlTrue'], "Linha do agente deve conter o texto de alerta")
+
+        # 2. pbxIdleAlert: false não deve renderizar o alerta
+        self.assertNotIn('alerta-pbx', alerta['htmlFalse'], "Linha não deve conter alerta-pbx quando pbxIdleAlert=false")
+        self.assertNotIn('Retorne ao ramal NPX', alerta['htmlFalse'])
+
+        # 3. pbxIdleAlert: undefined (ausente) não deve renderizar o alerta
+        self.assertNotIn('alerta-pbx', alerta['htmlUndefined'], "Linha não deve conter alerta-pbx quando flag ausente")
+        self.assertNotIn('Retorne ao ramal NPX', alerta['htmlUndefined'])
+
+        # 4. pbxIdleAlert: "true" (string) não deve renderizar o alerta (booleano estrito)
+        self.assertNotIn('alerta-pbx', alerta['htmlString'], "Linha não deve aceitar string truthy")
+        self.assertNotIn('Retorne ao ramal NPX', alerta['htmlString'])
+
+        # 5. Validação no CSS: regras de destaque acessível e respeito a prefers-reduced-motion
+        with open(CSS_PATH, 'r', encoding='utf-8') as f:
+            css = f.read()
+
+        self.assertIn('tr.alerta-pbx td', css, "CSS deve conter estilo para tr.alerta-pbx td")
+        self.assertIn('.alerta-pbx-texto', css, "CSS deve conter estilo para .alerta-pbx-texto")
+        self.assertIn('prefers-reduced-motion: no-preference', css, "Animação de pulso deve ser restrita a no-preference")
+        self.assertIn('@keyframes ag-alerta-pbx', css, "CSS deve definir o keyframe ag-alerta-pbx")
+
 if __name__ == '__main__':
     unittest.main()

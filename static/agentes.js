@@ -46,6 +46,7 @@
   const ehCham = a => a.line === 'pbx' ? (a.pbxStatus === 'Ringing') : (!a.paused && a.status === 5);
   const ehPausa = a => !!a.paused && !ehLig(a) && !ehCham(a);
   const ehLivre = a => a.line === 'pbx' ? (!a.paused && a.pbxStatus === 'Free') : (!a.paused && a.status === 1);
+  const logadoNpx = a => a?.npxLoggedIn === true;
 
   function fmtSeg(t) {
     t = Math.round(t || 0);
@@ -209,6 +210,7 @@
   // ---------- desenho ----------
   function linha(a) {
     const st = stDe(a), est = estourada(a);
+    const alertaPbx = a.pbxIdleAlert === true;
     const nome = PODE ? `<button type="button" class="nome" data-abrir="${esc(a.code)}" data-fila="${esc(a.queue)}">${esc(a.name)}</button>`
                       : `<span class="nome">${esc(a.name)}</span>`;
     const btn = PODE && a.paused ? `<button type="button" class="${est ? 'btn-pausa' : ''}" data-tirar="${esc(a.code)}" data-nome="${esc(a.name)}">Tirar pausa</button>` : '';
@@ -223,8 +225,8 @@
       ? (a.pbxSeconds == null ? '–' : fmtSeg(a.pbxSeconds))
       : (a.seconds == null && !a.paused ? '–' : fmtSeg(segs(a)));
 
-    return `<tr class="${st[3]}${est ? ' estourada presa' : ''}" style="--c:${st[1]}">
-      <td>${nome}<br><span class="mut" title="${esc(a.code)}">${sub}</span></td>
+    return `<tr class="${st[3]}${est ? ' estourada presa' : ''}${alertaPbx ? ' alerta-pbx' : ''}" style="--c:${st[1]}">
+      <td>${nome}<br><span class="mut" title="${esc(a.code)}">${sub}</span>${alertaPbx ? '<span class="alerta-pbx-texto">Retorne ao ramal NPX</span>' : ''}</td>
       <td><div class="st-cell"><span class="pill ${st[3]}" style="--c:${st[1]}"><span class="pill-txt">${esc(st[0])}</span></span>${tagLinha}</div></td>
       <td class="tempo">${tempoTxt}</td>
       <td>${esc(a.penalty ?? '–')}</td>
@@ -249,7 +251,11 @@
   }
   function render() {
     if (arrastando) return;   // não redesenha no meio de um arraste
-    const u = [...new Map(dados.map(a => [a.code, a])).values()];
+    const u = [...new Map(dados.filter(logadoNpx).map(a => [a.code, a])).values()];
+    const codigosNpx = new Set(u.map(a => a.code));
+    const ramaisNpx = new Set(u.map(a => a.pbxExtension).filter(Boolean));
+    const soPbx = dados.filter(a => a.line === 'pbx' && !codigosNpx.has(a.code) && !ramaisNpx.has(a.pbxExtension));
+    $('nPbx').textContent = new Set(soPbx.map(a => a.pbxExtension || a.code)).size;
     const conta = f => u.filter(f).length;
     $('nLog').textContent = u.length;
     $('nLivre').textContent = conta(ehLivre);
@@ -303,6 +309,10 @@
       render();
       if (sel && $('dlg') && $('dlg').open) atualizarDialogo();
     } catch (e) {
+      if (dados.some(a => a.pbxIdleAlert === true)) {
+        dados = dados.map(a => a.pbxIdleAlert === true ? {...a, pbxIdleAlert: false} : a);
+        render();
+      }
       $('msg').textContent = 'Erro ao consultar a NPX: ' + e.message;
     } finally { carregando = false; }
   }

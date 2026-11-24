@@ -108,6 +108,17 @@ body:has(#ag) { background: var(--cor-fundo, #f4f6f9); margin: 0; }
   #ag tr.estourada td, #ag tr.presa td, #ag tr.estourada .pill, #ag tr.presa .pill, #ag tr.l-cham .pill::before, #ag tr.l-pbx-cham .pill::before { animation: none !important; }
 }
 #ag tr td:first-child { box-shadow: inset 4px 0 0 var(--c, transparent); }
+#ag tr.alerta-pbx td { background: color-mix(in srgb, #e59a15 16%, var(--card)); }
+#ag tr.alerta-pbx td:first-child { box-shadow: inset 4px 0 0 #e59a15; }
+#ag .alerta-pbx-texto {
+  display: block; width: fit-content; max-width: 100%; margin-top: 4px; padding: 2px 5px;
+  border: 1px solid #e59a15; border-radius: 4px; color: var(--tx); background: var(--card);
+  font-size: 11px; font-weight: 700; white-space: normal;
+}
+@media (prefers-reduced-motion: no-preference) {
+  #ag .alerta-pbx-texto { animation: ag-alerta-pbx 3s ease-in-out infinite; }
+}
+@keyframes ag-alerta-pbx { 50% { background: color-mix(in srgb, #e59a15 24%, var(--card)); } }
 #ag td:has(.st-cell) { padding-left: 4px; padding-right: 4px; }
 #ag .st-cell { display: flex; align-items: center; gap: 3px; min-width: 0; width: 100%; }
 #ag .st-cell .pill { min-width: 0; flex: 1 1 auto; padding: 2px 5px; font-size: 10.5px; gap: 3px; border-radius: 6px; }

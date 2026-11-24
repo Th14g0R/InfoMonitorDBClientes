@@ -5,19 +5,44 @@ const jsPath = process.argv[2];
 let code = fs.readFileSync(jsPath, 'utf8');
 
 // Cria ambiente sandbox simulando o DOM mínimo de agentes.html
+function mockEl(props = {}) {
+  return {
+    textContent: '',
+    innerHTML: '',
+    value: '',
+    disabled: false,
+    checked: false,
+    title: '',
+    style: {},
+    classList: { add: () => {}, remove: () => {}, toggle: () => {}, contains: () => false },
+    setAttribute: function(k, v) { this[k] = v; },
+    getAttribute: function(k) { return this[k]; },
+    addEventListener: () => {},
+    querySelectorAll: () => [],
+    ...props
+  };
+}
+
+const elements = {
+  'ag': mockEl(),
+  'cfg-agentes': mockEl({ textContent: '{"pode":true,"layout":{"cols":2,"c1":[],"c2":[],"ord":{"col":"status","dir":1}}}' }),
+  'nLog': mockEl(),
+  'nPbx': mockEl(),
+  'nLivre': mockEl(),
+  'nCham': mockEl(),
+  'nLig': mockEl(),
+  'nPausa': mockEl(),
+  'nPresa': mockEl(),
+  'filas': mockEl(),
+  'msg': mockEl(),
+  'avisoPbx': mockEl(),
+  'hora': mockEl(),
+  'soPausa': mockEl({ checked: false })
+};
+
 const sandbox = {
   document: {
-    getElementById: (id) => {
-      if (id === 'cfg-agentes') return { textContent: '{"pode":true,"layout":{"cols":2,"c1":[],"c2":[],"ord":{"col":"status","dir":1}}}' };
-      return {
-        addEventListener: () => {},
-        querySelectorAll: () => [],
-        setAttribute: () => {},
-        textContent: '',
-        innerHTML: '',
-        style: {}
-      };
-    },
+    getElementById: (id) => elements[id] || mockEl(),
     documentElement: { classList: { add: () => {}, remove: () => {}, contains: () => false, toggle: () => {} } },
     querySelectorAll: () => [],
     addEventListener: () => {}
@@ -34,16 +59,11 @@ const sandbox = {
   console: console
 };
 
-// Instrumenta a IIFE para exportar as funções internas de interesse
-code = code.replace(/const stDe = a => \{/, 'const __stDe = a => {');
-code = code.replace(/function situacaoTexto\(a\) \{/, 'function __situacaoTexto(a) {');
-code = code.replace(/function situacaoHtml\(a\) \{/, 'function __situacaoHtml(a) {');
-
 code = code.replace(/\}\)\(\);?\s*$/, `
   globalThis.__exported = {
-    stDe: typeof __stDe !== 'undefined' ? __stDe : (typeof stDe !== 'undefined' ? stDe : null),
-    situacaoTexto: typeof __situacaoTexto !== 'undefined' ? __situacaoTexto : (typeof situacaoTexto !== 'undefined' ? situacaoTexto : null),
-    situacaoHtml: typeof __situacaoHtml !== 'undefined' ? __situacaoHtml : (typeof situacaoHtml !== 'undefined' ? situacaoHtml : null),
+    stDe: typeof stDe !== 'undefined' ? stDe : null,
+    situacaoTexto: typeof situacaoTexto !== 'undefined' ? situacaoTexto : null,
+    situacaoHtml: typeof situacaoHtml !== 'undefined' ? situacaoHtml : null,
     fmtMin: typeof fmtMin !== 'undefined' ? fmtMin : null,
     fmtSeg: typeof fmtSeg !== 'undefined' ? fmtSeg : null,
     fmtFone: typeof fmtFone !== 'undefined' ? fmtFone : null,
@@ -51,6 +71,11 @@ code = code.replace(/\}\)\(\);?\s*$/, `
     ehCham: typeof ehCham !== 'undefined' ? ehCham : null,
     ehPausa: typeof ehPausa !== 'undefined' ? ehPausa : null,
     ehLivre: typeof ehLivre !== 'undefined' ? ehLivre : null,
+    logadoNpx: typeof logadoNpx !== 'undefined' ? logadoNpx : null,
+    linha: typeof linha !== 'undefined' ? linha : null,
+    render: typeof render !== 'undefined' ? render : null,
+    setDados: d => { dados = d; },
+    setFilas: f => { filas = f; },
     ST_PBX: typeof ST_PBX !== 'undefined' ? ST_PBX : null
   };
 })();
@@ -201,6 +226,116 @@ results.push({
   local8: fn.fmtFone('33334444'),
   vazio: fn.fmtFone(''),
   nulo: fn.fmtFone(null)
+});
+
+// 13. Matriz de Elegibilidade logadoNpx
+results.push({
+  id: 'logado_npx_matrix',
+  pbx_loggedin_true: fn.logadoNpx({ line: 'pbx', pbxStatus: 'Free', npxLoggedIn: true }),
+  npx_loggedin_true: fn.logadoNpx({ line: 'npx', status: 1, npxLoggedIn: true }),
+  off_loggedin_true: fn.logadoNpx({ line: 'off', status: 0, npxLoggedIn: true }),
+  pbx_loggedin_false: fn.logadoNpx({ line: 'pbx', pbxStatus: 'Free', npxLoggedIn: false }),
+  npx_loggedin_false: fn.logadoNpx({ line: 'npx', status: 1, npxLoggedIn: false }),
+  string_truthy: fn.logadoNpx({ line: 'pbx', pbxStatus: 'Free', npxLoggedIn: 'true' }),
+  sem_flag_pbx_free: fn.logadoNpx({ line: 'pbx', pbxStatus: 'Free' }),
+  sem_flag_pbx_busy: fn.logadoNpx({ line: 'pbx', pbxStatus: 'Busy', pbxNumber: '85999999999' }),
+  sem_flag_pbx_sem_fila: fn.logadoNpx({ queue: 'PBX_Sem_Fila', line: 'pbx' }),
+  sem_flag_pbx_code: fn.logadoNpx({ code: 'pbx-2008', line: 'pbx' }),
+  sem_flag_off: fn.logadoNpx({ line: 'off', status: 0 }),
+  sem_flag_npx_livre: fn.logadoNpx({ line: 'npx', status: 1 }),
+  sem_flag_npx_lig: fn.logadoNpx({ line: 'npx', status: 2 }),
+  sem_flag_npx_cham: fn.logadoNpx({ line: 'npx', status: 5 }),
+  sem_flag_npx_pausa: fn.logadoNpx({ line: 'npx', status: 0, paused: true }),
+  sem_flag_npx_deslogado: fn.logadoNpx({ line: 'npx', status: 0, paused: false })
+});
+
+// 14. Simulação de render() para Contadores do Topo e Cards PBX
+function simularRender(dadosEntrada, filasEntrada) {
+  fn.setDados(dadosEntrada);
+  fn.setFilas(filasEntrada || [
+    { key: 'Fila_Suporte', nome: 'Suporte N1' },
+    { key: 'PBX_Sem_Fila', nome: 'Não logado' }
+  ]);
+  fn.render();
+  return {
+    nLog: Number(elements['nLog'].textContent),
+    nPbx: Number(elements['nPbx'].textContent),
+    nLivre: Number(elements['nLivre'].textContent),
+    nCham: Number(elements['nCham'].textContent),
+    nLig: Number(elements['nLig'].textContent),
+    nPausa: Number(elements['nPausa'].textContent),
+    nPresa: Number(elements['nPresa'].textContent),
+    temCardPbx: elements['filas'].innerHTML.includes('data-fila="PBX_Sem_Fila"')
+  };
+}
+
+// 14.1 Cenário da Imagem: 1 analista PBX-only sem sessão na fila NPX
+results.push({
+  id: 'topo_cenario_imagem_pbx_sem_fila',
+  ...simularRender([
+    { code: 'pbx-2008', name: 'Analista 2008', queue: 'PBX_Sem_Fila', line: 'pbx', pbxStatus: 'Free', pbxExtension: '2008', npxLoggedIn: false }
+  ])
+});
+
+// 14.2 Cenário PBX com sessão NPX confirmada (inclusive se line pbx)
+results.push({
+  id: 'topo_cenario_pbx_com_npx_logon',
+  ...simularRender([
+    { code: '4422008', name: 'Analista Alfa', queue: 'Fila_Suporte', line: 'pbx', pbxStatus: 'Free', pbxExtension: '2008', npxLoggedIn: true }
+  ])
+});
+
+// 14.3 Cenário Deduplicação Multi-fila (mesmo código de agente em 2 filas NPX)
+results.push({
+  id: 'topo_cenario_deduplicacao_multi_fila',
+  ...simularRender([
+    { code: '4422008', name: 'Analista Alfa', queue: 'Fila_Suporte', line: 'pbx', pbxStatus: 'Free', npxLoggedIn: true },
+    { code: '4422008', name: 'Analista Alfa', queue: 'Fila_Comercial', line: 'pbx', pbxStatus: 'Free', npxLoggedIn: true }
+  ], [
+    { key: 'Fila_Suporte', nome: 'Suporte N1' },
+    { key: 'Fila_Comercial', nome: 'Comercial' },
+    { key: 'PBX_Sem_Fila', nome: 'Não logado' }
+  ])
+});
+
+// 14.4 Cenário Sem Flag: PBX Free não infere sessão MicroSIP
+results.push({
+  id: 'topo_cenario_sem_flag_pbx_only',
+  ...simularRender([
+    { code: 'pbx-2008', name: 'Analista 2008', queue: 'PBX_Sem_Fila', line: 'pbx', pbxStatus: 'Free', pbxExtension: '2008' }
+  ])
+});
+
+// 14.5 Cenário Sem Flag: NPX livre infere dados de sessão da NPX
+results.push({
+  id: 'topo_cenario_sem_flag_npx_livre',
+  ...simularRender([
+    { code: '1001', name: 'Analista NPX', queue: 'Fila_Suporte', line: 'npx', status: 1 }
+  ])
+});
+
+// 14.6 Cenário Misto: 1 NPX livre, 1 PBX+NPX em ligação, 1 PBX-only sem sessão
+results.push({
+  id: 'topo_cenario_misto',
+  ...simularRender([
+    { code: '1001', name: 'Analista 1', queue: 'Fila_Suporte', line: 'npx', status: 1, npxLoggedIn: true },
+    { code: '4422008', name: 'Analista 2', queue: 'Fila_Suporte', line: 'pbx', pbxStatus: 'Busy', pbxNumber: '85988887777', pbxSeconds: 30, npxLoggedIn: true },
+    { code: 'pbx-3001', name: 'Analista 3', queue: 'PBX_Sem_Fila', line: 'pbx', pbxStatus: 'Free', pbxExtension: '3001', npxLoggedIn: false }
+  ])
+});
+
+// 15. Alerta Visual de Retorno ao Ramal NPX (pbxIdleAlert)
+const agAlertaTrue = { code: '4422008', name: 'Analista Alfa', queue: 'Fila_Suporte', line: 'pbx', pbxStatus: 'Free', pbxExtension: '2008', npxLoggedIn: true, pbxIdleAlert: true };
+const agAlertaFalse = { code: '4422008', name: 'Analista Alfa', queue: 'Fila_Suporte', line: 'pbx', pbxStatus: 'Free', pbxExtension: '2008', npxLoggedIn: true, pbxIdleAlert: false };
+const agAlertaUndefined = { code: '4422008', name: 'Analista Alfa', queue: 'Fila_Suporte', line: 'pbx', pbxStatus: 'Free', pbxExtension: '2008', npxLoggedIn: true };
+const agAlertaString = { code: '4422008', name: 'Analista Alfa', queue: 'Fila_Suporte', line: 'pbx', pbxStatus: 'Free', pbxExtension: '2008', npxLoggedIn: true, pbxIdleAlert: 'true' };
+
+results.push({
+  id: 'alerta_pbx_idle_tests',
+  htmlTrue: fn.linha(agAlertaTrue),
+  htmlFalse: fn.linha(agAlertaFalse),
+  htmlUndefined: fn.linha(agAlertaUndefined),
+  htmlString: fn.linha(agAlertaString)
 });
 
 console.log(JSON.stringify(results));

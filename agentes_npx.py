@@ -29,7 +29,10 @@ from zoneinfo import ZoneInfo
 
 from flask import jsonify, render_template, request, session
 
-from pbx_monitor import ColetorPbx, FILA_PBX_SEM_FILA, NOME_PBX_SEM_FILA
+from pbx_monitor import (
+    ColetorPbx, FILA_PBX_SEM_FILA, NOME_PBX_SEM_FILA, VALIDADE_PBX,
+    atualizar_inicio_ociosidade, elegivel_alerta_ociosidade_npx,
+)
 from seguranca import registrar_acao_admin
 
 LOGGER = logging.getLogger(__name__)
@@ -493,6 +496,7 @@ class ColetorAgentes:
         self._forcar = threading.Event()
         self._acordar = threading.Event()
         self.retrato = None          # lista de agentes
+        self._ocioso_desde = {}
         self.coletado_em = None
         self.erro = None
         self._historico, self._historico_em = [], 0.0
@@ -526,6 +530,7 @@ class ColetorAgentes:
                 self.coletar()
             except Exception as erro:
                 self.erro = 'Coleta de agentes indisponível no momento.'
+                self._ocioso_desde = {}
                 LOGGER.warning('Falha na coleta de agentes da NPX: %s', type(erro).__name__)
             self._acordar.wait(INTERVALO_COLETA)
             self._acordar.clear()
@@ -666,6 +671,12 @@ class ColetorAgentes:
                     'erro': None if st else 'status indisponível',
                     'npxLoggedIn': bool(logado),
                 })
+        elegiveis = {(a['code'], a['queue']) for a in lista if elegivel_alerta_ociosidade_npx(a)}
+        self._ocioso_desde = atualizar_inicio_ociosidade(self._ocioso_desde, elegiveis, agora, self.coletado_em)
+        for a in lista:
+            inicio = self._ocioso_desde.get((a['code'], a['queue']))
+            if inicio is not None:
+                a['_npxIdleSince'] = inicio
         self.retrato, self.coletado_em, self.erro = lista, agora, None
         return lista
 
@@ -828,6 +839,11 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
         return None
 
     def _responder_dados(todos_agentes, em, erro_npx, status_pbx):
+        agora = datetime.now(FUSO)
+        dados_frescos = em is not None and not erro_npx and status_pbx.get('available') and 0 <= (agora - em).total_seconds() <= VALIDADE_PBX
+        for a in todos_agentes:
+            a.pop('_npxIdleSince', None)
+            a['pbxIdleAlert'] = bool(dados_frescos and a.get('pbxIdleAlert'))
         nomes = nomes_filas()
         chaves = list(dict.fromkeys(list(nomes) + [a['queue'] for a in todos_agentes if a.get('queue')]))
         pode_gerenciar = pode()

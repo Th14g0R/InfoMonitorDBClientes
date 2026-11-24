@@ -271,6 +271,54 @@ class TestSnapshotPbxP1EDuracao(unittest.TestCase):
 
 
 class TestColetorPbxP5EP6(unittest.TestCase):
+    def test_alerta_visual_exige_15_minutos_continuos_nas_duas_centrais(self):
+        coletor = ColetorPbx(cliente=MagicMock(), mapa_analistas={'Thiago': {'ramal': '2008'}})
+        agente = {'code': '101', 'name': 'Thiago', 'status': 1, 'paused': False, 'npxLoggedIn': True, 'penalty': 1}
+        agora = datetime(2026, 11, 24, 7, 15, tzinfo=pbx_monitor.FUSO)
+        inicio = agora - timedelta(minutes=15)
+        coletor.snapshot = {'2008': {'status': 'Free'}}
+        coletor._livre_desde = {'2008': inicio}
+        for instante, alteracoes, esperado in (
+            (agora - timedelta(seconds=1), {}, False),
+            (agora, {}, True),
+            (agora, {'penalty': 2}, True),
+            (agora, {'penalty': '3'}, True),
+            (agora, {'penalty': 4}, False),
+            (agora, {'penalty': '4'}, False),
+            (agora, {'penalty': 0}, False),
+            (agora, {'penalty': None}, False),
+            (agora, {'_npxIdleSince': inicio + timedelta(seconds=1)}, False),
+            (agora, {'paused': True}, False),
+            (agora, {'npxLoggedIn': False}, False),
+            (agora, {'status': 2}, False),
+            (agora, {'status': 5}, False),
+            (agora.replace(hour=19, minute=0), {}, False),
+        ):
+            with self.subTest(instante=instante, alteracoes=alteracoes), patch.object(pbx_monitor, 'datetime') as hora:
+                hora.now.return_value = instante
+                coletor.coletado_em = instante
+                linha = {**agente, '_npxIdleSince': inicio, **alteracoes}
+                coletor.enriquecer_agentes([linha])
+                self.assertIs(linha['pbxIdleAlert'], esperado)
+
+        with patch.object(pbx_monitor, 'datetime') as hora:
+            hora.now.return_value = agora
+            coletor.coletado_em = agora - timedelta(seconds=16)
+            linha = {**agente, '_npxIdleSince': inicio}
+            coletor.enriquecer_agentes([linha])
+            self.assertFalse(linha['pbxIdleAlert'])
+
+    def test_reinicia_ociosidade_em_lacuna_ou_fora_do_horario(self):
+        atualizar = pbx_monitor.atualizar_inicio_ociosidade
+        inicio = datetime(2026, 11, 24, 7, 0, tzinfo=pbx_monitor.FUSO)
+        depois = inicio + timedelta(seconds=3)
+        self.assertEqual(atualizar({'2008': inicio}, ['2008'], depois, inicio), {'2008': inicio})
+        self.assertEqual(atualizar({'2008': inicio}, [], depois, inicio), {})
+        self.assertEqual(atualizar({'2008': inicio}, ['2008'], depois, None), {'2008': depois})
+        self.assertEqual(atualizar({'2008': inicio}, ['2008'], inicio.replace(hour=19), depois), {})
+        self.assertEqual(atualizar({'2008': inicio}, ['2008'], inicio + timedelta(days=1), depois),
+                         {'2008': inicio + timedelta(days=1)})
+
     def test_p6_unicidade_dois_codes_mesmo_ramal_nenhum_recebe(self):
         coletor = ColetorPbx(cliente=MagicMock(), mapa_analistas={
             'Thiago': {'ramal': '2008', 'departamento': 'InfoBrasil_Suporte'}

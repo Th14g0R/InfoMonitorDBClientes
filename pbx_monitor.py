@@ -29,9 +29,28 @@ FUSO = ZoneInfo('America/Fortaleza')
 INTERVALO_PBX = 3.0
 TIMEOUT_PADRAO = 2.5
 VALIDADE_PBX = 15.0
+OCIOSIDADE_ALERTA_SEGUNDOS = 15 * 60
 
 FILA_PBX_SEM_FILA = 'PBX_Sem_Fila'
 NOME_PBX_SEM_FILA = 'Não logado'
+
+
+def atualizar_inicio_ociosidade(anteriores, chaves, agora, coletado_em):
+    """Mantém só os períodos de ociosidade observados na janela atual."""
+    if not 7 <= agora.hour < 19:
+        return {}
+    if (coletado_em is None or coletado_em.date() != agora.date()
+            or not 0 <= (agora - coletado_em).total_seconds() <= VALIDADE_PBX):
+        anteriores = {}
+    return {chave: anteriores.get(chave, agora) for chave in chaves}
+
+
+def elegivel_alerta_ociosidade_npx(agente):
+    return (
+        agente.get('npxLoggedIn') is True and not agente.get('paused')
+        and agente.get('status') in (0, 1)
+        and str(agente.get('penalty')).strip() in ('1', '2', '3')
+    )
 
 # Mapeamento para filas oficiais conhecidas pelo sistema
 TRADUCAO_FILAS = {
@@ -457,6 +476,7 @@ class ColetorPbx:
         self._acordar = threading.Event()
         
         self.snapshot = {}              # ramal -> { status, number, direction, seconds }
+        self._livre_desde = {}
         self.coletado_em = None
         self.erro = None
         self._dispositivos_cache = []
@@ -483,6 +503,7 @@ class ColetorPbx:
             except Exception as erro:
                 with self._trava:
                     self.erro = 'Coleta PBX indisponível no momento.'
+                    self._livre_desde = {}
                 LOGGER.warning('[PBX] Falha no ciclo de coleta PBX: %s', type(erro).__name__)
             self._acordar.wait(INTERVALO_PBX)
             self._acordar.clear()
@@ -514,6 +535,10 @@ class ColetorPbx:
         )
 
         with self._trava:
+            self._livre_desde = atualizar_inicio_ociosidade(
+                self._livre_desde, (ramal for ramal, info in snapshot_novo.items() if info['status'] == 'Free'),
+                agora, self.coletado_em,
+            )
             self.snapshot = snapshot_novo
             self.coletado_em = agora
             self.erro = None
@@ -543,6 +568,11 @@ class ColetorPbx:
         """Aplica os campos pbx* e line em cada agente da lista NPX com unicidade estrita."""
         with self._trava:
             snapshot = dict(self.snapshot)
+            livre_desde = self._livre_desde
+            coletado_em = self.coletado_em
+            erro = self.erro
+        agora = datetime.now(FUSO)
+        fresco = coletado_em is not None and not erro and 0 <= (agora - coletado_em).total_seconds() <= VALIDADE_PBX
 
         # P6: Pré-cálculo de casamento por código único para detectar colisões
         # Se dois códigos NPX distintos casarem com o mesmo ramal -> nenhum recebe!
@@ -587,6 +617,13 @@ class ColetorPbx:
             a['pbxNumber'] = pbx_number
             a['pbxDirection'] = pbx_direction
             a['pbxSeconds'] = pbx_seconds
+            inicio_npx = a.get('_npxIdleSince')
+            inicio_pbx = livre_desde.get(ramal)
+            a['pbxIdleAlert'] = bool(
+                fresco and 7 <= agora.hour < 19 and elegivel_alerta_ociosidade_npx(a)
+                and pbx_status == 'Free' and inicio_npx and inicio_pbx
+                and (agora - max(inicio_npx, inicio_pbx)).total_seconds() >= OCIOSIDADE_ALERTA_SEGUNDOS
+            )
 
             # Precedência estrita e separação de fone/fila:
             # 1. Analista ativo na NPX (status != 0) e NÃO em pausa -> 'npx' (NPX ativa primária mantida)
