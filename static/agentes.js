@@ -183,7 +183,11 @@
     if (a.status === 2) return 'Em ligação';
     return '';
   }
-  const dirTxt = d => d === 'para' ? '↗ para' : d === 'de' ? '↙ de' : '';
+  function direcaoHtml(direcao) {
+    if (direcao === 'para') return '<span class="dir-chamada dir-saida">↗ para</span> ';
+    if (direcao === 'de') return '<span class="dir-chamada dir-entrada">↙ de</span> ';
+    return '';
+  }
   function situacaoHtml(a) {
     if (a.line === 'pbx') {
       const dur = a.pbxSeconds != null && a.pbxSeconds > 0 ? ` <span class="mut">(${fmtSeg(a.pbxSeconds)})</span>` : '';
@@ -191,8 +195,7 @@
       if (a.pbxStatus === 'Busy' || a.pbxStatus === 'Ringing') {
         const c = chamada(a);
         if (c && c.num) {
-          const dt = dirTxt(c.dir);
-          chamadaHtml = `📞 ${dt ? `<span class="mut">${dt}</span> ` : ''}<span class="fone">${esc(fmtFone(c.num))}</span>${dur}`;
+          chamadaHtml = `📞 ${direcaoHtml(c.dir)}<span class="fone">${esc(fmtFone(c.num))}</span>${dur}`;
         } else {
           const rotuloToque = c?.dir === 'para' ? 'Discando' : (c?.dir === 'de' ? 'Recebendo' : 'Chamando');
           chamadaHtml = `<span class="mut">${a.pbxStatus === 'Ringing' ? rotuloToque : 'Em ligação'}</span>${dur}`;
@@ -230,8 +233,7 @@
         const rotuloToque = c?.dir === 'para' ? 'Discando' : (c?.dir === 'de' ? 'Recebendo' : 'Chamando');
         return `<span class="mut">${a.status === 5 ? rotuloToque : 'Em ligação'}</span>`;
       }
-      const dt = dirTxt(c.dir);
-      return `📞 ${dt ? `<span class="mut">${dt}</span> ` : ''}<span class="fone">${esc(fmtFone(c.num))}</span>`;
+      return `📞 ${direcaoHtml(c.dir)}<span class="fone">${esc(fmtFone(c.num))}</span>`;
     }
     return '<span class="mut">—</span>';
   }
@@ -469,11 +471,11 @@
     let callTxt = '';
     if (ehPbx) {
       if (c && c.num) {
-        callTxt = ` 📞 ${dirTxt(c.dir)} <b>${esc(fmtFone(c.num))}</b>${a.pbxSeconds ? ` (${fmtSeg(a.pbxSeconds)})` : ''}`;
+        callTxt = ` 📞 ${direcaoHtml(c.dir)}<b>${esc(fmtFone(c.num))}</b>${a.pbxSeconds ? ` (${fmtSeg(a.pbxSeconds)})` : ''}`;
       }
     } else {
       if (c && !a.paused && c.num) {
-        callTxt = ` 📞 ${dirTxt(c.dir)} <b>${esc(fmtFone(c.num))}</b>`;
+        callTxt = ` 📞 ${direcaoHtml(c.dir)}<b>${esc(fmtFone(c.num))}</b>`;
       }
     }
 

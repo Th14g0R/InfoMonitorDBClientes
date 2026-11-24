@@ -137,6 +137,13 @@ body:has(#ag) { background: var(--cor-fundo, #f4f6f9); margin: 0; }
 #ag button.nome:hover { color: var(--pausa); }
 #ag .tempo, #ag .fone { font-variant-numeric: tabular-nums; }
 #ag .fone { font-weight: 600; }
+#ag .dir-chamada {
+  display: inline-block; border: 1px solid currentColor; border-radius: 4px; padding: 0 4px;
+  font-size: 12px; font-weight: 700; white-space: nowrap;
+  background: color-mix(in srgb, currentColor 12%, var(--card));
+}
+#ag .dir-entrada { color: var(--pausa-tx); }
+#ag .dir-saida { color: var(--cham-tx); }
 #ag td button { padding: 4px 8px; font-size: 13px; max-width: 100%; }
 #ag .btn-pausa { background: var(--pausa); border-color: var(--pausa); color: #fff; }
 #ag .btn-perigo { background: var(--lig); border-color: var(--lig); color: #fff; }
