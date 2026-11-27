@@ -109,18 +109,19 @@
     }
     .input-wrapper { position: relative; flex: 1; }
     .search-input {
-      width: 100%; padding: 12px 38px 12px 14px;
+      width: 100%; box-sizing: border-box; padding: 12px 42px 12px 14px;
       background: var(--cor-fundo); border: 1px solid var(--cor-borda);
       border-radius: var(--raio-md); color: var(--cor-texto); font-family: var(--font-mono); font-size: 16px;
       outline: none; transition: border-color var(--transition-normal), box-shadow var(--transition-normal);
     }
     .search-input:focus { border-color: var(--cor-primaria); box-shadow: var(--shadow-focus); }
     .btn-clear {
-      position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+      position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
       background: none; border: none; color: var(--cor-texto-suave); cursor: pointer;
-      font-size: 16px; padding: 4px; display: none;
+      font-size: 16px; padding: 6px; min-width: 28px; min-height: 28px;
+      display: none; align-items: center; justify-content: center; border-radius: 9999px;
     }
-    .btn-clear:hover { color: var(--cor-texto); }
+    .btn-clear:hover { color: var(--cor-texto); background: var(--cor-superficie-hover); }
     .btn-search {
       padding: 12px 24px; background: var(--cor-primaria); color: var(--cor-texto-invertido);
       border: 1px solid var(--cor-primaria); border-radius: var(--raio-md); font-weight: 600; cursor: pointer;
@@ -149,10 +150,6 @@
       max-width: 680px; margin: 0 auto; display: none;
     }
     .alert-error strong { color: var(--cor-perigo); display: block; margin-bottom: 2px; }
-      border-radius: 12px; padding: 14px 16px; color: #fecdd3; font-size: 13px;
-      max-width: 680px; margin: 0 auto; display: none;
-    }
-    .alert-error strong { color: #fff; display: block; margin-bottom: 2px; }
 
     /* Results */
     #resultado-container { display: none; flex-direction: column; gap: 20px; }
@@ -171,33 +168,33 @@
     .metrics { display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px; }
     .metric-badge {
       background: var(--bg-main); border: 1px solid var(--border-color);
-      padding: 6px 12px; border-radius: 6px; color: #cbd5e1;
+      padding: 6px 12px; border-radius: 6px; color: var(--text-muted);
     }
-    .metric-badge strong { color: #fff; }
-    .metric-badge .highlight { color: #34d399; }
-    .metric-badge .indigo-val { color: #818cf8; }
+    .metric-badge strong { color: var(--text-main); }
+    .metric-badge .highlight { color: var(--emerald); font-weight: 700; }
+    .metric-badge .indigo-val { color: var(--primary); font-weight: 700; }
 
     .action-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
     .btn-action {
-      padding: 6px 12px; background: #334155; border: 1px solid var(--border-light);
-      border-radius: 6px; color: #f1f5f9; font-size: 12px; font-weight: 500;
+      padding: 6px 12px; background: var(--bg-card); border: 1px solid var(--border-color);
+      border-radius: 6px; color: var(--text-main); font-size: 12px; font-weight: 500;
       cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all 0.2s;
     }
-    .btn-action:hover { background: #475569; }
-    .btn-action.active { background: var(--primary); border-color: var(--primary-light); }
+    .btn-action:hover { background: var(--bg-card-sub); border-color: var(--border-light); }
+    .btn-action.active { background: var(--primary); border-color: var(--primary-hover); color: var(--cor-texto-invertido); }
 
     /* Raw JSON View */
     .raw-json-box {
-      display: none; background: #020617; border: 1px solid var(--border-color);
+      display: none; background: var(--bg-main); border: 1px solid var(--border-color);
       border-radius: 12px; overflow: hidden;
     }
     .raw-json-header {
-      background: #0f172a; padding: 8px 14px; border-bottom: 1px solid var(--border-color);
+      background: var(--bg-card); padding: 8px 14px; border-bottom: 1px solid var(--border-color);
       font-size: 11px; font-family: monospace; color: var(--text-muted);
       display: flex; justify-content: space-between;
     }
     .raw-json-code {
-      padding: 14px; font-family: monospace; font-size: 12px; color: #34d399;
+      padding: 14px; font-family: monospace; font-size: 12px; color: var(--emerald);
       max-height: 380px; overflow: auto; white-space: pre; line-height: 1.4;
     }
 

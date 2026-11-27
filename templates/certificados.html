@@ -130,7 +130,11 @@
             </tr>
             {% else %}
             <tr>
-              <td colspan="{{ 8 if session.get('logged_in') else 7 }}" class="text-muted" style="text-align: center; padding: var(--space-4);">Nenhum certificado cadastrado.</td>
+              <td colspan="{{ 8 if session.get('logged_in') else 7 }}" class="text-muted" style="text-align: center; padding: var(--space-6);">
+                <div style="font-size: 2rem; margin-bottom: var(--space-2);">🔒</div>
+                <strong>Nenhum certificado cadastrado</strong>
+                <p style="margin: var(--space-1) 0 0; font-size: var(--font-size-xs);">Adicione um subdomínio acima para iniciar o monitoramento de validade SSL.</p>
+              </td>
             </tr>
             {% endfor %}
           </tbody>

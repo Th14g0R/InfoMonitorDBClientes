@@ -150,8 +150,22 @@ body:has(#ag) { background: var(--cor-fundo, #f4f6f9); margin: 0; }
 #ag .btn-perigo { background: var(--lig); border-color: var(--lig); color: #fff; }
 #ag .mut { color: var(--mut); font-size: 13px; }
 #ag .vazio { padding: 12px 14px; }
-#ag dialog { border: 1px solid var(--line); border-radius: 12px; padding: 0; width: min(440px, calc(100vw - 32px)); background: var(--card); color: var(--tx); }
-#ag dialog::backdrop { background: rgba(0,0,0,.45); }
+#ag dialog {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0;
+  width: min(440px, calc(100vw - 32px));
+  background: var(--card);
+  color: var(--tx);
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
+}
+#ag dialog input:focus,
+#ag dialog select:focus {
+  outline: none;
+  border-color: var(--pausa);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.25);
+}
+#ag dialog::backdrop { background: rgba(0,0,0,.45); backdrop-filter: blur(2px); }
 #ag .dlg-h { padding: 16px 18px 10px; border-bottom: 1px solid var(--line); }
 #ag .dlg-h h3 { margin: 0 0 4px; font-size: 18px; }
 #ag .dlg-b { padding: 8px 18px 16px; }

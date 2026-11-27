@@ -39,6 +39,14 @@
   width: auto;
 }
 
+.navegacao-servidores .btn:focus-visible,
+.navegacao-servidores summary.btn:focus-visible,
+.seletor-servidor select:focus-visible,
+.theme-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus, 0 0 0 3px rgba(37, 99, 235, 0.3));
+}
+
 /* Grupo direito agrupado (Atualizar | Tema | Conta) */
 .menu-direita {
   display: flex;

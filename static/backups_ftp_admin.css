@@ -46,10 +46,22 @@
     color: var(--cor-texto-suave, #64748b);
     cursor: pointer;
     line-height: 1;
-    padding: 0 4px;
+    padding: 4px 8px;
+    min-width: 32px;
+    min-height: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--raio-md, 6px);
+    transition: background-color var(--transition-fast, 100ms ease), color var(--transition-fast, 100ms ease);
 }
 .ftp-admin-btn-close:hover {
     color: var(--cor-perigo, #dc2626);
+    background-color: var(--cor-superficie-hover, #f1f5f9);
+}
+.ftp-admin-btn-close:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.3);
 }
 
 .ftp-form-grid {
@@ -119,8 +131,10 @@
 }
 
 .ftp-submodal-card {
-    background: #ffffff;
-    border-radius: 8px;
+    background: var(--cor-superficie, #ffffff);
+    color: var(--cor-texto, #1e293b);
+    border: 1px solid var(--cor-borda, #e2e8f0);
+    border-radius: var(--raio-lg, 8px);
     width: 100%;
     max-width: 760px;
     max-height: 85vh;
@@ -128,6 +142,22 @@
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.25);
+}
+
+@media (max-width: 600px) {
+    .ftp-admin-modal-overlay,
+    .ftp-submodal-overlay {
+        padding: 8px;
+    }
+    .ftp-admin-modal-card {
+        padding: 14px 16px;
+        max-height: 96vh;
+    }
+    .ftp-submodal-card {
+        padding: 14px 16px;
+        max-height: 92vh;
+    }
 }
 
 .ftp-codigo-pre {
