@@ -418,6 +418,14 @@ def processar_snapshot_pbx(dispositivos_lista, registrados_lista, chamadas_lista
             caller_id = str(call_info.get('callerid') or call_info.get('cli') or call_info.get('from') or '').strip()
             status_text = str(call_info.get('status_text') or '').upper()
 
+            # Normaliza identificadores de dispositivo (username) para ramal via username_to_ramal
+            if src in username_to_ramal:
+                src = username_to_ramal[src]
+            if dst in username_to_ramal:
+                dst = username_to_ramal[dst]
+            if caller_id in username_to_ramal:
+                caller_id = username_to_ramal[caller_id]
+
             src_analista = eh_identificador_analista(src, ramal, username)
             dst_analista = eh_identificador_analista(dst, ramal, username)
 
@@ -438,6 +446,9 @@ def processar_snapshot_pbx(dispositivos_lista, registrados_lista, chamadas_lista
             else:
                 direction = api_direction if api_direction in ('inbound', 'outbound') else ('outbound' if dst else 'inbound')
                 number = dst or src or caller_id
+
+            if number in username_to_ramal:
+                number = username_to_ramal[number]
 
             status_pbx = 'Ringing' if 'RING' in status_text or 'DIAL' in status_text else 'Busy'
 

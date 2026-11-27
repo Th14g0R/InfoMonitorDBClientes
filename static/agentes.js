@@ -109,16 +109,54 @@
   const duasColunas = () => Number(layout.cols) === 2 && innerWidth > 900;
   const soPausa = () => PODE && $('soPausa') && $('soPausa').checked;
 
+  let aliasMap = new Map();
+  function atualizarAliasMap() {
+    aliasMap.clear();
+    for (const a of dados) {
+      const nome = a.name;
+      for (const campo of ['code', 'extension', 'pbxExtension']) {
+        const v = String(a[campo] || '').trim();
+        if (v && !aliasMap.has(v)) {
+          aliasMap.set(v, nome);
+        }
+      }
+    }
+  }
+
+  function formatarChamadaInternaTexto(c, dur) {
+    const nome = c.otherName || c.num || '';
+    let seta = '↔';
+    if (c.dir === 'para') seta = '→';
+    else if (c.dir === 'de') seta = '←';
+    return `${seta} ${nome}${dur || ''}`;
+  }
+  function formatarChamadaInternaHtml(c, dur) {
+    const nome = esc(c.otherName || c.num || '');
+    let seta = '↔';
+    let cls = 'dir-indefinida';
+    if (c.dir === 'para') {
+      seta = '→';
+      cls = 'dir-saida';
+    } else if (c.dir === 'de') {
+      seta = '←';
+      cls = 'dir-entrada';
+    }
+    const setaHtml = `<span class="dir-chamada ${cls}">${seta}</span> `;
+    return `${setaHtml}${nome}${dur || ''}`;
+  }
+
   function chamada(a) {
     if (a.line === 'pbx') {
       const num = a.pbxNumber || '';
       const dir = a.pbxDirection === 'outbound' ? 'para' : (a.pbxDirection === 'inbound' ? 'de' : '');
-      return (num || a.pbxStatus === 'Busy' || a.pbxStatus === 'Ringing') ? {num, dir} : null;
+      const otherName = a.otherName || (aliasMap && aliasMap.get(num)) || a.otherExtension || num;
+      const isInternal = Boolean(otherName && (a.isInternal || (num && aliasMap.has(num))));
+      return (num || a.pbxStatus === 'Busy' || a.pbxStatus === 'Ringing') ? {num, dir, isInternal, otherName} : null;
     }
     const src = String(a.callSrc || '').trim();
     const dst = String(a.callDst || '').trim();
     const client = String(a.callClient || '').trim();
-    const me = new Set([String(a.extension || '').trim(), String(a.code || '').trim()].filter(Boolean));
+    const me = new Set([String(a.extension || '').trim(), String(a.code || '').trim(), String(a.pbxExtension || '').trim()].filter(Boolean));
 
     let num = src || dst || client;
     let dir = '';
@@ -127,6 +165,12 @@
       dir = 'para';
     } else if (a.callDirection === 'inbound') {
       num = src && !me.has(src) ? src : (dst && !me.has(dst) ? dst : client);
+      dir = 'de';
+    } else if (me.has(src) && !me.has(dst) && dst) {
+      num = dst;
+      dir = 'para';
+    } else if (me.has(dst) && !me.has(src) && src) {
+      num = src;
       dir = 'de';
     } else if (me.has(src)) {
       num = dst || client;
@@ -141,7 +185,9 @@
       num = src;
       dir = 'de';
     }
-    return (num || a.status === 2 || a.status === 5) ? {num, dir} : null;
+    const otherName = a.otherName || (aliasMap && aliasMap.get(num)) || a.otherExtension || num;
+    const isInternal = Boolean(otherName && (a.isInternal || (num && aliasMap.has(num))));
+    return (num || a.status === 2 || a.status === 5) ? {num, dir, isInternal, otherName} : null;
   }
   function situacaoTexto(a) {
     if (a.line === 'pbx') {
@@ -149,9 +195,13 @@
       let res = '';
       if (a.pbxStatus === 'Busy' || a.pbxStatus === 'Ringing') {
         const c = chamada(a);
-        const rotuloToque = c?.dir === 'para' ? 'Discando' : (c?.dir === 'de' ? 'Recebendo' : 'Chamando');
-        const num = a.pbxNumber ? fmtFone(a.pbxNumber) : (a.pbxStatus === 'Ringing' ? rotuloToque : 'Em ligação');
-        res = `${num}${dur}`;
+        if (c && c.isInternal) {
+          res = formatarChamadaInternaTexto(c, dur);
+        } else {
+          const rotuloToque = c?.dir === 'para' ? 'Discando' : (c?.dir === 'de' ? 'Recebendo' : 'Chamando');
+          const num = a.pbxNumber ? fmtFone(a.pbxNumber) : (a.pbxStatus === 'Ringing' ? rotuloToque : 'Em ligação');
+          res = `${num}${dur}`;
+        }
       } else if (a.pbxStatus === 'Free') {
         res = a.paused ? '' : 'Livre';
       } else {
@@ -178,6 +228,7 @@
     }
     const c = chamada(a);
     if (!c) return '';
+    if (c.isInternal) return formatarChamadaInternaTexto(c, '');
     if (c.num) return fmtFone(c.num);
     if (a.status === 5) return c.dir === 'para' ? 'Discando' : (c.dir === 'de' ? 'Recebendo' : 'Chamando');
     if (a.status === 2) return 'Em ligação';
@@ -194,7 +245,9 @@
       let chamadaHtml = '';
       if (a.pbxStatus === 'Busy' || a.pbxStatus === 'Ringing') {
         const c = chamada(a);
-        if (c && c.num) {
+        if (c && c.isInternal) {
+          chamadaHtml = formatarChamadaInternaHtml(c, dur);
+        } else if (c && c.num) {
           chamadaHtml = `📞 ${direcaoHtml(c.dir)}<span class="fone">${esc(fmtFone(c.num))}</span>${dur}`;
         } else {
           const rotuloToque = c?.dir === 'para' ? 'Discando' : (c?.dir === 'de' ? 'Recebendo' : 'Chamando');
@@ -229,7 +282,11 @@
     }
     if (a.status === 2 || a.status === 5) {
       const c = chamada(a);
-      if (!c || !c.num) {
+      if (!c) return '<span class="mut">—</span>';
+      if (c.isInternal) {
+        return formatarChamadaInternaHtml(c, '');
+      }
+      if (!c.num) {
         const rotuloToque = c?.dir === 'para' ? 'Discando' : (c?.dir === 'de' ? 'Recebendo' : 'Chamando');
         return `<span class="mut">${a.status === 5 ? rotuloToque : 'Em ligação'}</span>`;
       }
@@ -355,6 +412,7 @@
       const j = await r.json();
       if (!r.ok) throw new Error(j.erro || r.status);
       dados = j.agentes || []; filas = j.filas || [];
+      atualizarAliasMap();
       waitingCalls = Number.isSafeInteger(j.waitingCalls) && j.waitingCalls >= 0 ? j.waitingCalls : null;
       painelConfigurado = j.painelConfigurado !== false;
       const pbxConn = j.pbxConnection || null;
@@ -470,12 +528,22 @@
 
     let callTxt = '';
     if (ehPbx) {
-      if (c && c.num) {
+      if (c && c.isInternal) {
+        const seta = c.dir === 'para' ? '→' : (c.dir === 'de' ? '←' : '↔');
+        const cls = c.dir === 'para' ? 'dir-saida' : (c.dir === 'de' ? 'dir-entrada' : 'dir-indefinida');
+        callTxt = ` <span class="dir-chamada ${cls}">${seta}</span> <b>${esc(c.otherName || c.num || '')}</b>${a.pbxSeconds ? ` (${fmtSeg(a.pbxSeconds)})` : ''}`;
+      } else if (c && c.num) {
         callTxt = ` 📞 ${direcaoHtml(c.dir)}<b>${esc(fmtFone(c.num))}</b>${a.pbxSeconds ? ` (${fmtSeg(a.pbxSeconds)})` : ''}`;
       }
     } else {
-      if (c && !a.paused && c.num) {
-        callTxt = ` 📞 ${direcaoHtml(c.dir)}<b>${esc(fmtFone(c.num))}</b>`;
+      if (c && !a.paused) {
+        if (c.isInternal) {
+          const seta = c.dir === 'para' ? '→' : (c.dir === 'de' ? '←' : '↔');
+          const cls = c.dir === 'para' ? 'dir-saida' : (c.dir === 'de' ? 'dir-entrada' : 'dir-indefinida');
+          callTxt = ` <span class="dir-chamada ${cls}">${seta}</span> <b>${esc(c.otherName || c.num || '')}</b>`;
+        } else if (c.num) {
+          callTxt = ` 📞 ${direcaoHtml(c.dir)}<b>${esc(fmtFone(c.num))}</b>`;
+        }
       }
     }
 
@@ -747,7 +815,7 @@
   checaTelaCheia();
   aplicarControles();
   if (typeof window !== 'undefined') {
-    window._testAgentes = { carregar, atualizarDialogo, abrir, getDados: () => dados };
+    window._testAgentes = { carregar, atualizarDialogo, abrir, getDados: () => dados, setDados: (d) => { dados = d || []; atualizarAliasMap(); }, atualizarAliasMap };
   }
 
   carregar();

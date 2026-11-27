@@ -810,6 +810,42 @@ class TestColetorPbxP5EP6(unittest.TestCase):
         self.assertEqual(info['status'], 'Ringing')
         self.assertEqual(info['number'], '85988884321')
 
+    def test_chamada_entre_ramais_darkison_wendel_normaliza_username_e_direcao(self):
+        # Chamada entre Darkison (2001) e Wendel (2018):
+        # Darkison disca para Wendel. Usernames de dispositivo são normalizados exatamente aos ramais sem substring.
+        mapa = {
+            'Darkison': {'ramal': '2001', 'departamento': 'InfoBrasil_Suporte'},
+            'Wendel': {'ramal': '2018', 'departamento': 'InfoBrasil_Suporte'},
+        }
+        dispositivos = [
+            {'username': '8540428900.2001', 'linha_ip': '2001'},
+            {'username': '8540428900.2018', 'linha_ip': '2018'},
+        ]
+        registrados = [
+            {'device_username': '8540428900.2001', 'device_registered': True},
+            {'device_username': '8540428900.2018', 'device_registered': True},
+        ]
+        chamadas = [{
+            'source': '8540428900.2001',
+            'destination': '8540428900.2018',
+            'status_text': 'ANSWERED',
+            'starttime': '2026-11-27T10:00:00-03:00',
+        }]
+        snap = processar_snapshot_pbx(dispositivos, registrados, chamadas, mapa_analistas=mapa)
+        # Origem (Darkison): direction=outbound, number=2018
+        self.assertIn('2001', snap)
+        d = snap['2001']
+        self.assertEqual(d['status'], 'Busy')
+        self.assertEqual(d['direction'], 'outbound')
+        self.assertEqual(d['number'], '2018')
+
+        # Destino (Wendel): direction=inbound, number=2001
+        self.assertIn('2018', snap)
+        w = snap['2018']
+        self.assertEqual(w['status'], 'Busy')
+        self.assertEqual(w['direction'], 'inbound')
+        self.assertEqual(w['number'], '2001')
+
 
 if __name__ == '__main__':
     unittest.main()

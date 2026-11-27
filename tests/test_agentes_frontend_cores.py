@@ -583,5 +583,60 @@ class TestAgentesFrontendCores(unittest.TestCase):
         self.assertIn('1 em ligação', cg['cardHtml'])
         self.assertIn('1 em pausa', cg['cardHtml'])
 
+    def test_chamadas_internas_ramais_darkison_wendel(self):
+        # Validação de chamadas entre ramais Darkison e Wendel no frontend
+        # Exibe: → Nome na origem, ← Nome no destino, ↔ Nome se direção desconhecida, ramal como fallback
+        res = subprocess.run(['node', RUNNER_PATH, JS_PATH], capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(res.returncode, 0, f"Erro ao executar runner Node.js:\n{res.stderr}")
+        data = json.loads(res.stdout)
+        by_id = {r['id']: r for r in data}
+        r = by_id['chamadas_internas_ramais_tests']
+
+        # 1. PBX: Darkison origem (outbound) -> Wendel
+        p_out = r['pbxDarkisonOrigem']
+        self.assertEqual(p_out['sitTxt'], "→ Wendel (0m 35s)")
+        self.assertIn("→", p_out['sitHtml'])
+        self.assertIn("Wendel", p_out['sitHtml'])
+        self.assertIn("dir-saida", p_out['sitHtml'])
+        self.assertNotIn("📞", p_out['sitHtml'])
+
+        # 2. PBX: Wendel destino (inbound) <- Darkison
+        p_in = r['pbxWendelDestino']
+        self.assertEqual(p_in['sitTxt'], "← Darkison (0m 35s)")
+        self.assertIn("←", p_in['sitHtml'])
+        self.assertIn("Darkison", p_in['sitHtml'])
+        self.assertIn("dir-entrada", p_in['sitHtml'])
+        self.assertNotIn("📞", p_in['sitHtml'])
+
+        # 3. PBX: Direção desconhecida
+        p_desc = r['pbxDesconhecida']
+        self.assertEqual(p_desc['sitTxt'], "↔ Wendel (0m 10s)")
+        self.assertIn("↔", p_desc['sitHtml'])
+        self.assertIn("Wendel", p_desc['sitHtml'])
+        self.assertIn("dir-indefinida", p_desc['sitHtml'])
+
+        # 4. PBX: Fallback para ramal se não houver nome
+        p_fall = r['pbxFallbackRamal']
+        self.assertEqual(p_fall['sitTxt'], "→ 2099 (0m 05s)")
+        self.assertIn("→", p_fall['sitHtml'])
+        self.assertIn("2099", p_fall['sitHtml'])
+
+        # 5. NPX: Darkison origem -> Wendel
+        n_out = r['npxDarkisonOrigem']
+        self.assertEqual(n_out['sitTxt'], "→ Wendel")
+        self.assertIn("→", n_out['sitHtml'])
+        self.assertIn("Wendel", n_out['sitHtml'])
+        self.assertIn("dir-saida", n_out['sitHtml'])
+        self.assertNotIn("📞", n_out['sitHtml'])
+
+        # 6. NPX: Wendel destino <- Darkison
+        n_in = r['npxWendelDestino']
+        self.assertEqual(n_in['sitTxt'], "← Darkison")
+        self.assertIn("←", n_in['sitHtml'])
+        self.assertIn("Darkison", n_in['sitHtml'])
+        self.assertIn("dir-entrada", n_in['sitHtml'])
+        self.assertNotIn("📞", n_in['sitHtml'])
+
+
 if __name__ == '__main__':
     unittest.main()

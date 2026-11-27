@@ -1059,6 +1059,7 @@ class RotasTest(unittest.TestCase):
         self.assertNotIn('callSrc', agente_pub)
         self.assertNotIn('callDst', agente_pub)
         self.assertNotIn('callClient', agente_pub)
+        self.assertNotIn('otherExtension', agente_pub)
         self.assertIn('callSrc', self.coletor.retrato[0])
 
         self.permitido = True
@@ -2175,6 +2176,64 @@ class WaitingCallsTest(unittest.TestCase):
         coletor = ColetorAgentes(cliente)
         total = coletor._coletar_waiting_calls(['InfoBrasil_Suporte'])
         self.assertIsNone(total)
+
+    def test_chamada_interna_pbx_darkison_e_wendel(self):
+        darkison = {
+            'code': '4422001', 'name': 'Darkison', 'pbxExtension': '2001',
+            'pbxNumber': '2018', 'pbxDirection': 'outbound', 'line': 'pbx',
+        }
+        wendel = {
+            'code': '4422018', 'name': 'Wendel', 'pbxExtension': '2018',
+            'pbxNumber': '2001', 'pbxDirection': 'inbound', 'line': 'pbx',
+        }
+        agentes_npx.enriquecer_chamadas_internas([darkison, wendel])
+        self.assertTrue(darkison['isInternal'])
+        self.assertEqual(darkison['otherName'], 'Wendel')
+        self.assertEqual(darkison['otherExtension'], '2018')
+
+        self.assertTrue(wendel['isInternal'])
+        self.assertEqual(wendel['otherName'], 'Darkison')
+        self.assertEqual(wendel['otherExtension'], '2001')
+
+    def test_chamada_interna_npx_darkison_e_wendel_deriva_direcao(self):
+        darkison = {
+            'code': '4422001', 'name': 'Darkison', 'extension': '2001',
+            'callSrc': '2001', 'callDst': '2018', 'callDirection': None, 'line': 'npx',
+        }
+        wendel = {
+            'code': '4422018', 'name': 'Wendel', 'extension': '2018',
+            'callSrc': '2001', 'callDst': '2018', 'callDirection': None, 'line': 'npx',
+        }
+        agentes_npx.enriquecer_chamadas_internas([darkison, wendel])
+        self.assertTrue(darkison['isInternal'])
+        self.assertEqual(darkison['otherName'], 'Wendel')
+        self.assertEqual(darkison['otherExtension'], '2018')
+        self.assertEqual(darkison['callDirection'], 'outbound')
+
+        self.assertTrue(wendel['isInternal'])
+        self.assertEqual(wendel['otherName'], 'Darkison')
+        self.assertEqual(wendel['otherExtension'], '2001')
+        self.assertEqual(wendel['callDirection'], 'inbound')
+
+    def test_chamada_externa_nao_marca_interna_preserva_formatacao(self):
+        darkison = {
+            'code': '4422001', 'name': 'Darkison', 'pbxExtension': '2001',
+            'pbxNumber': '85999990000', 'pbxDirection': 'inbound', 'line': 'pbx',
+        }
+        agentes_npx.enriquecer_chamadas_internas([darkison])
+        self.assertFalse(darkison['isInternal'])
+        self.assertIsNone(darkison['otherName'])
+        self.assertIsNone(darkison['otherExtension'])
+
+    def test_chamada_interna_ramal_fallback_sem_agente_no_painel(self):
+        darkison = {
+            'code': '4422001', 'name': 'Darkison', 'pbxExtension': '2001',
+            'pbxNumber': '2099', 'pbxDirection': 'outbound', 'line': 'pbx',
+        }
+        agentes_npx.enriquecer_chamadas_internas([darkison])
+        self.assertTrue(darkison['isInternal'])
+        self.assertIsNone(darkison['otherName'])
+        self.assertEqual(darkison['otherExtension'], '2099')
 
 
 if __name__ == '__main__':

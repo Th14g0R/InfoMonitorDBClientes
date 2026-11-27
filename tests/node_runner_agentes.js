@@ -81,7 +81,7 @@ code = code.replace(/\}\)\(\);?\s*$/, `
     linha: typeof linha !== 'undefined' ? linha : null,
     card: typeof card !== 'undefined' ? card : null,
     render: typeof render !== 'undefined' ? render : null,
-    setDados: d => { dados = d; },
+    setDados: d => { dados = d; if (typeof atualizarAliasMap !== 'undefined') atualizarAliasMap(); },
     setFilas: f => { filas = f; },
     setWaitingCalls: w => { waitingCalls = w; },
     getWaitingCalls: () => waitingCalls,
@@ -478,6 +478,57 @@ results.push({
   com0: simularRender([], [{ key: 'Fila_Suporte', nome: 'Suporte N1' }], 0),
   comNull: simularRender([], [{ key: 'Fila_Suporte', nome: 'Suporte N1' }], null),
   comUndefined: simularRender([], [{ key: 'Fila_Suporte', nome: 'Suporte N1' }], undefined)
+});
+
+// 20. Chamadas internas entre ramais Darkison e Wendel (PBX e NPX)
+const agentesPainel = [
+  { code: '4422001', name: 'Darkison', extension: '2001', pbxExtension: '2001' },
+  { code: '4422018', name: 'Wendel', extension: '2018', pbxExtension: '2018' }
+];
+fn.setDados(agentesPainel);
+
+// PBX: Darkison origem (outbound) -> Wendel
+const pbxDarkisonOrigem = {
+  line: 'pbx', pbxStatus: 'Busy', pbxNumber: '2018', pbxDirection: 'outbound', pbxSeconds: 35,
+  isInternal: true, otherName: 'Wendel', otherExtension: '2018'
+};
+// PBX: Wendel destino (inbound) <- Darkison
+const pbxWendelDestino = {
+  line: 'pbx', pbxStatus: 'Busy', pbxNumber: '2001', pbxDirection: 'inbound', pbxSeconds: 35,
+  isInternal: true, otherName: 'Darkison', otherExtension: '2001'
+};
+// PBX: Direção desconhecida entre ramais
+const pbxDesconhecida = {
+  line: 'pbx', pbxStatus: 'Busy', pbxNumber: '2018', pbxDirection: null, pbxSeconds: 10,
+  isInternal: true, otherName: 'Wendel', otherExtension: '2018'
+};
+// PBX: Ramal fallback sem nome
+const pbxFallbackRamal = {
+  line: 'pbx', pbxStatus: 'Busy', pbxNumber: '2099', pbxDirection: 'outbound', pbxSeconds: 5,
+  isInternal: true, otherName: null, otherExtension: '2099'
+};
+
+// NPX: Darkison origem -> Wendel
+const npxDarkisonOrigem = {
+  line: 'npx', status: 2, code: '4422001', name: 'Darkison', extension: '2001',
+  callSrc: '2001', callDst: '2018', callDirection: 'outbound',
+  isInternal: true, otherName: 'Wendel', otherExtension: '2018'
+};
+// NPX: Wendel destino <- Darkison
+const npxWendelDestino = {
+  line: 'npx', status: 2, code: '4422018', name: 'Wendel', extension: '2018',
+  callSrc: '2001', callDst: '2018', callDirection: 'inbound',
+  isInternal: true, otherName: 'Darkison', otherExtension: '2001'
+};
+
+results.push({
+  id: 'chamadas_internas_ramais_tests',
+  pbxDarkisonOrigem: { sitTxt: fn.situacaoTexto(pbxDarkisonOrigem), sitHtml: fn.situacaoHtml(pbxDarkisonOrigem) },
+  pbxWendelDestino: { sitTxt: fn.situacaoTexto(pbxWendelDestino), sitHtml: fn.situacaoHtml(pbxWendelDestino) },
+  pbxDesconhecida: { sitTxt: fn.situacaoTexto(pbxDesconhecida), sitHtml: fn.situacaoHtml(pbxDesconhecida) },
+  pbxFallbackRamal: { sitTxt: fn.situacaoTexto(pbxFallbackRamal), sitHtml: fn.situacaoHtml(pbxFallbackRamal) },
+  npxDarkisonOrigem: { sitTxt: fn.situacaoTexto(npxDarkisonOrigem), sitHtml: fn.situacaoHtml(npxDarkisonOrigem) },
+  npxWendelDestino: { sitTxt: fn.situacaoTexto(npxWendelDestino), sitHtml: fn.situacaoHtml(npxWendelDestino) },
 });
 
 console.log(JSON.stringify(results));

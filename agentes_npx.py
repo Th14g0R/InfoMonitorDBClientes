@@ -584,6 +584,65 @@ def direcao_chamada_npx(status, chamada, codigo):
     return None
 
 
+def enriquecer_chamadas_internas(todos_agentes):
+    """Identifica chamadas entre ramais através de matching exato de alias (code, extension, pbxExtension)."""
+    alias_map = {}
+    for a in todos_agentes:
+        nome = a.get('name')
+        ramal_canonico = a.get('pbxExtension') or a.get('extension') or a.get('code')
+        for campo in ('code', 'extension', 'pbxExtension'):
+            v = str(a.get(campo) or '').strip()
+            if v and v not in alias_map:
+                alias_map[v] = (nome, ramal_canonico)
+
+    for a in todos_agentes:
+        a['isInternal'] = False
+        a['otherName'] = None
+        a['otherExtension'] = None
+
+        me = {str(a.get(k) or '').strip() for k in ('code', 'extension', 'pbxExtension')} - {''}
+        outro = None
+
+        if a.get('line') == 'pbx':
+            num = str(a.get('pbxNumber') or '').strip()
+            if num and num != 'Ligação Ativa' and num not in me:
+                outro = num
+        else:
+            src = str(a.get('callSrc') or '').strip()
+            dst = str(a.get('callDst') or '').strip()
+            dir_npx = a.get('callDirection')
+            # NPX deriva direção de src/dst quando comprovada
+            if not dir_npx:
+                if src in me and dst and dst not in me:
+                    dir_npx = 'outbound'
+                    a['callDirection'] = 'outbound'
+                elif dst in me and src and src not in me:
+                    dir_npx = 'inbound'
+                    a['callDirection'] = 'inbound'
+
+            if dir_npx == 'outbound':
+                outro = dst if dst and dst not in me else (src if src and src not in me else None)
+            elif dir_npx == 'inbound':
+                outro = src if src and src not in me else (dst if dst and dst not in me else None)
+            elif src in me and dst and dst not in me:
+                outro = dst
+            elif dst in me and src and src not in me:
+                outro = src
+            else:
+                outro = dst if dst and dst not in me else (src if src and src not in me else None)
+
+        if outro:
+            if outro in alias_map:
+                nome_alvo, ramal_alvo = alias_map[outro]
+                a['isInternal'] = True
+                a['otherName'] = nome_alvo
+                a['otherExtension'] = ramal_alvo or outro
+            elif re.fullmatch(r'\d{1,5}', outro):
+                a['isInternal'] = True
+                a['otherName'] = None
+                a['otherExtension'] = outro
+
+
 class ColetorAgentes:
     def __init__(self, cliente, cliente_painel=None):
         self.cliente = cliente
@@ -1034,6 +1093,7 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
         agora = datetime.now(FUSO)
         dados_frescos = (em is not None and not erro_npx and status_pbx.get('available')
                          and 0 <= (agora - em).total_seconds() <= VALIDADE_ALERTA_NPX)
+        enriquecer_chamadas_internas(todos_agentes)
         for a in todos_agentes:
             a.pop('_npxIdleSince', None)
             a['pbxIdleAlert'] = bool(dados_frescos and a.get('pbxIdleAlert'))
@@ -1043,7 +1103,7 @@ def configurar_agentes(bp, conectar, tem_permissao, cliente=None, cliente_painel
         if pode_gerenciar:
             agentes_retorno = todos_agentes
         else:
-            campos_privados = {'callSrc', 'callDst', 'callClient', 'pbxNumber'}
+            campos_privados = {'callSrc', 'callDst', 'callClient', 'pbxNumber', 'otherExtension'}
             agentes_retorno = [{k: v for k, v in a.items() if k not in campos_privados} for a in todos_agentes]
 
         # A7: Nome da fila PBX_Sem_Fila só na serialização se presente nos agentes
